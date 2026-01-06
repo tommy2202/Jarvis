@@ -34,6 +34,27 @@ class StageBLLMRouter:
 
     def __init__(self, cfg: LLMConfig):
         self.cfg = cfg
+        self._conversation_active = False
+
+    def warmup(self) -> None:
+        """
+        Called when a voice wake happens.
+        For a remote/local HTTP server this is a best-effort ping; safe if server absent.
+        """
+        self._conversation_active = True
+        try:
+            # Ollama supports /api/tags; many servers don't. This is best-effort only.
+            url = f"{self.cfg.base_url.rstrip('/')}/api/tags"
+            requests.get(url, timeout=min(self.cfg.timeout_seconds, 2.0))
+        except Exception:
+            return
+
+    def unload(self) -> None:
+        """
+        Called when voice returns to idle sleep.
+        For an HTTP client, we just drop any client-side state.
+        """
+        self._conversation_active = False
 
     def _prompt(self, user_text: str, allowed_intents: Dict[str, Dict[str, Any]]) -> str:
         # Keep prompt minimal but strict: produce JSON ONLY.

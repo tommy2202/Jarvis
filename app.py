@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import getpass
 import threading
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import uvicorn
 
@@ -98,6 +99,10 @@ def _start_web_thread(jarvis: JarvisApp, security: SecurityManager, secure_store
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser(description="Jarvis (offline-first) CLI/voice/web")
+    ap.add_argument("--mode", choices=["text", "voice", "hybrid"], default="hybrid", help="Run mode.")
+    args = ap.parse_args()
+
     logger = setup_logging("logs")
     event_logger = EventLogger("logs/events.jsonl")
 
@@ -186,7 +191,51 @@ def main() -> None:
 
     _start_web_thread(jarvis, security, secure_store, cfg, paths, event_logger, logger)
 
-    logger.info("Jarvis CLI ready. Type /exit to quit.")
+    # Voice stack (optional; safe if deps/models missing)
+    voice_controller: Optional[object] = None
+    voice_cfg = _load_json(cfg, "config/voice.json", default={"enabled": False})
+    models_cfg = _load_json(cfg, "config/models.json", default={"vosk_model_path": "", "faster_whisper_model_path": ""})
+    if args.mode in {"voice", "hybrid"} and bool(voice_cfg.get("enabled", False)):
+        try:
+            from jarvis.voice.state_machine import VoiceConfig, VoiceController
+        except Exception as e:
+            logger.warning(f"Voice stack not available: {e}")
+            voice_controller = None
+        else:
+            vc = VoiceConfig(
+                enabled=bool(voice_cfg.get("enabled", False)),
+                wake_word_engine=str(voice_cfg.get("wake_word_engine", "porcupine")),
+                wake_word=str(voice_cfg.get("wake_word", "jarvis")),
+                mic_device_index=voice_cfg.get("mic_device_index", None),
+                stt_backend_primary=str(voice_cfg.get("stt_backend_primary", "vosk")),
+                stt_backend_fallback=str(voice_cfg.get("stt_backend_fallback", "faster_whisper")),
+                tts_backend_primary=str(voice_cfg.get("tts_backend_primary", "sapi")),
+                tts_backend_fallback=str(voice_cfg.get("tts_backend_fallback", "pyttsx3")),
+                listen_seconds=float(voice_cfg.get("listen_seconds", 8)),
+                sample_rate=int(voice_cfg.get("sample_rate", 16000)),
+                idle_sleep_seconds=float(voice_cfg.get("idle_sleep_seconds", 45)),
+                confirm_beep=bool(voice_cfg.get("confirm_beep", True)),
+                audio_retention_files=int(voice_cfg.get("audio_retention_files", 25)),
+                allow_voice_admin_unlock=bool(voice_cfg.get("allow_voice_admin_unlock", False)),
+                thinking_timeout_seconds=float(voice_cfg.get("thinking_timeout_seconds", 15)),
+            )
+            voice_controller = VoiceController(
+                cfg=vc,
+                models_cfg=models_cfg,
+                secure_store=secure_store,
+                jarvis_app=jarvis,
+                security_manager=security,
+                logger=logger,
+                event_logger=event_logger,
+            )
+            try:
+                voice_controller.start()
+                logger.info("Voice stack enabled.")
+            except Exception as e:
+                logger.warning(f"Voice failed to start; continuing text-only: {e}")
+                voice_controller = None
+
+    logger.info("Jarvis CLI ready. Type /exit to quit. (/mics, /listen, /voice status)")
 
     while True:
         try:
@@ -198,6 +247,53 @@ def main() -> None:
             continue
         if text == "/exit":
             break
+        if text == "/sleep":
+            try:
+                if voice_controller is not None:
+                    voice_controller.force_sleep()
+            except Exception:
+                pass
+            try:
+                jarvis.stage_b.unload()
+            except Exception:
+                pass
+            print("Sleeping.")
+            continue
+        if text.startswith("/voice "):
+            cmd = text.split(" ", 1)[1].strip().lower()
+            if cmd == "status":
+                if voice_controller is None:
+                    print("Voice: off/unavailable.")
+                else:
+                    st = voice_controller.status()
+                    print(st)
+                continue
+            if cmd == "off":
+                if voice_controller is not None:
+                    voice_controller.stop()
+                    voice_controller = None
+                print("Voice disabled.")
+                continue
+            if cmd == "on":
+                print("Voice enable requires config/voice.json enabled:true and restart.")
+                continue
+        if text == "/listen":
+            if voice_controller is None:
+                print("Voice not running. Enable in config/voice.json and restart.")
+            else:
+                voice_controller.trigger_listen_once()
+                print("Listening once...")
+            continue
+        if text == "/mics":
+            try:
+                from jarvis.voice.audio import list_microphones
+
+                mics = list_microphones()
+                for m in mics:
+                    print(f"{m['index']}: {m['name']}")
+            except Exception as e:
+                print(f"Unable to list microphones: {e}")
+            continue
         if text.startswith("/admin unlock"):
             if not security.is_usb_present():
                 print("USB key required for admin unlock.")
@@ -215,9 +311,18 @@ def main() -> None:
             print("Admin locked.")
             continue
 
-        resp = jarvis.process_message(text, client={"name": "cli", "id": "stdin"})
-        print(resp.reply)
+        if args.mode == "voice":
+            print("Voice-only mode: use /listen or /exit.")
+        else:
+            resp = jarvis.process_message(text, client={"name": "cli", "id": "stdin"})
+            print(resp.reply)
         time.sleep(0.01)
+
+    try:
+        if voice_controller is not None:
+            voice_controller.stop()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

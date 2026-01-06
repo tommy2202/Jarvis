@@ -120,3 +120,56 @@ If no local server is running, it falls back to **safe mock mode** (never execut
 
 You can run a local server via Ollama or llama.cpp with an OpenAI-compatible endpoint.
 Update `config/security.json` → `llm.base_url` and `llm.model`.
+
+## Voice mode (Windows 10/11)
+
+### Install voice dependencies
+
+```bash
+pip install -e ".[dev,voice]"
+```
+
+### PortAudio / sounddevice notes (Windows)
+
+If `sounddevice` can’t open the microphone, install PortAudio support:
+- Easiest: `pip install sounddevice` usually bundles what you need on Windows.
+- If you see PortAudio DLL errors, install a PortAudio binary or use a Python distribution that includes it.
+
+### Configure models (no auto-download)
+
+Edit `config/models.json`:
+- **Vosk**: set `"vosk_model_path"` to your local Vosk model folder.
+  - Download a model from the official Vosk model list and unzip it.
+- **faster-whisper**: set `"faster_whisper_model_path"` to a local faster-whisper model directory.
+  - Use a pre-downloaded Whisper model converted for faster-whisper, stored locally.
+
+Jarvis will **not** download models automatically; if paths are missing, STT will fail gracefully and return to sleep.
+
+### Porcupine wake word (optional, offline)
+
+Porcupine requires a Picovoice **AccessKey**, stored encrypted in the secure store:
+
+```bash
+python scripts/set_secret.py porcupine.access_key
+```
+
+If the key is missing, wake-word detection is disabled, but **push-to-talk still works**:
+- Use `/listen` in the CLI to capture + transcribe + route + speak.
+
+### Enable voice stack
+
+Edit `config/voice.json`:
+- set `"enabled": true`
+- pick your mic with `/mics` then set `"mic_device_index"` (optional)
+
+Run:
+
+```bash
+python app.py --mode hybrid
+```
+
+Useful commands:
+- `/mics`
+- `/listen` (push-to-talk)
+- `/voice status`
+- `/sleep`

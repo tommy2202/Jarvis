@@ -1,0 +1,18 @@
+{
+  "enabled": false,
+  "wake_word_engine": "porcupine",
+  "wake_word": "jarvis",
+  "mic_device_index": null,
+  "stt_backend_primary": "vosk",
+  "stt_backend_fallback": "faster_whisper",
+  "tts_backend_primary": "sapi",
+  "tts_backend_fallback": "pyttsx3",
+  "listen_seconds": 8,
+  "sample_rate": 16000,
+  "idle_sleep_seconds": 45,
+  "confirm_beep": true,
+  "audio_retention_files": 25,
+  "allow_voice_admin_unlock": false,
+  "thinking_timeout_seconds": 15
+}
+

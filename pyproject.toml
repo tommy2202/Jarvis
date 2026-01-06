@@ -19,6 +19,17 @@ dev = [
   "pytest>=8.0.0",
 ]
 
+voice = [
+  "numpy>=1.26.0",
+  "pvporcupine>=3.0.0",
+  "pvrecorder>=1.2.0",
+  "sounddevice>=0.4.6",
+  "vosk>=0.3.45",
+  "faster-whisper>=1.0.3",
+  "pyttsx3>=2.90",
+  "pywin32>=306; platform_system == 'Windows'",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

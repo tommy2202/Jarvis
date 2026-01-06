@@ -58,6 +58,14 @@ class ConfigPaths:
     def modules_registry(self) -> str:
         return os.path.join(self.config_dir, "modules_registry.json")
 
+    @property
+    def voice(self) -> str:
+        return os.path.join(self.config_dir, "voice.json")
+
+    @property
+    def models(self) -> str:
+        return os.path.join(self.config_dir, "models.json")
+
 
 class ConfigLoader:
     def __init__(self, paths: ConfigPaths):
