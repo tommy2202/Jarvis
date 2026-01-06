@@ -1,0 +1,4 @@
+{"timestamp": 1767730601.5268857, "job_id": "220da192431340bdb7d62eeaf2b6014b", "event_type": "created", "payload": {"kind": "system.sleep", "priority": 50}}
+{"timestamp": 1767730601.579569, "job_id": "220da192431340bdb7d62eeaf2b6014b", "event_type": "started", "payload": {"priority": 50}}
+{"timestamp": 1767730601.7940078, "job_id": "220da192431340bdb7d62eeaf2b6014b", "event_type": "progress", "payload": {"progress": 100, "message": "sleeping"}}
+{"timestamp": 1767730601.794036, "job_id": "220da192431340bdb7d62eeaf2b6014b", "event_type": "finished", "payload": {"status": "SUCCEEDED"}}

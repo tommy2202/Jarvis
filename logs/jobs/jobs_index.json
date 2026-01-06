@@ -1,0 +1,28 @@
+{
+  "jobs": {
+    "220da192431340bdb7d62eeaf2b6014b": {
+      "args": {
+        "seconds": 0.1
+      },
+      "created_at": 1767730601.5266325,
+      "error": null,
+      "finished_at": 1767730601.8326297,
+      "id": "220da192431340bdb7d62eeaf2b6014b",
+      "kind": "system.sleep",
+      "max_runtime_seconds": null,
+      "message": "succeeded",
+      "priority": 50,
+      "progress": 100,
+      "requested_by": {
+        "source": "cli"
+      },
+      "result": {
+        "slept_seconds": 0.1
+      },
+      "started_at": 1767730601.576711,
+      "status": "SUCCEEDED",
+      "trace_id": "43d2db9e99e240d082936f2eeb8a980c",
+      "updated_at": 1767730601.8326297
+    }
+  }
+}

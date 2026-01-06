@@ -37,3 +37,22 @@ class AdminUnlockResponse(BaseModel):
     ok: bool
     message: str
 
+
+class JobSubmitRequest(BaseModel):
+    kind: str = Field(min_length=1, max_length=128)
+    args: Dict[str, Any] = Field(default_factory=dict)
+    priority: int = Field(default=50, ge=0, le=1000)
+    max_runtime_seconds: Optional[int] = Field(default=None, ge=1, le=86400)
+
+
+class JobSubmitResponse(BaseModel):
+    job_id: str
+
+
+class JobStateResponse(BaseModel):
+    job: Dict[str, Any]
+
+
+class JobListResponse(BaseModel):
+    jobs: list[Dict[str, Any]]
+

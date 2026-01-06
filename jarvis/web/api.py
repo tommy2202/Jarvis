@@ -7,7 +7,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from typing import Callable, Optional
-from jarvis.web.models import AdminUnlockRequest, AdminUnlockResponse, MessageRequest, MessageResponse
+
+from jarvis.web.models import (
+    AdminUnlockRequest,
+    AdminUnlockResponse,
+    JobListResponse,
+    JobStateResponse,
+    JobSubmitRequest,
+    JobSubmitResponse,
+    MessageRequest,
+    MessageResponse,
+)
 
 
 def _is_localhost(request: Request) -> bool:
@@ -21,6 +31,7 @@ def create_app(
     event_logger,
     logger,
     auth_dep: Optional[Callable[..., object]],
+    job_manager=None,
     allowed_origins: list[str] | None = None,
     enable_web_ui: bool = True,
     allow_remote_admin_unlock: bool = False,
@@ -117,6 +128,42 @@ def create_app(
         ok = security_manager.verify_and_unlock_admin(req.passphrase)
         msg = "Admin unlocked." if ok else "Invalid passphrase or USB key missing."
         return AdminUnlockResponse(ok=ok, message=msg)
+
+    # Jobs API (authenticated; allowlist enforced by JobManager)
+    if job_manager is not None:
+        @app.post("/v1/jobs", response_model=JobSubmitResponse)
+        async def submit_job(req: JobSubmitRequest, request: Request, _=Depends(_require_auth())):
+            if not remote_control_enabled:
+                raise HTTPException(status_code=503, detail="Remote control disabled (USB key required).")
+            try:
+                job_id = job_manager.submit_job(
+                    req.kind,
+                    req.args,
+                    requested_by={"source": "web", "client_id": getattr(getattr(request, "client", None), "host", None)},
+                    priority=req.priority,
+                    max_runtime_seconds=req.max_runtime_seconds,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            return JobSubmitResponse(job_id=job_id)
+
+        @app.get("/v1/jobs", response_model=JobListResponse)
+        async def list_jobs(request: Request, _=Depends(_require_auth())):
+            jobs = [j.model_dump() for j in job_manager.list_jobs()]
+            return JobListResponse(jobs=jobs)
+
+        @app.get("/v1/jobs/{job_id}", response_model=JobStateResponse)
+        async def get_job(job_id: str, request: Request, _=Depends(_require_auth())):
+            try:
+                job = job_manager.get_job(job_id)
+            except KeyError as e:
+                raise HTTPException(status_code=404, detail="Job not found.") from e
+            return JobStateResponse(job=job.model_dump())
+
+        @app.post("/v1/jobs/{job_id}/cancel")
+        async def cancel_job(job_id: str, request: Request, _=Depends(_require_auth())):
+            ok = job_manager.cancel_job(job_id)
+            return {"ok": ok}
 
     return app
 

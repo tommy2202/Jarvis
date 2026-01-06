@@ -19,6 +19,16 @@ from jarvis.core.logger import setup_logging
 from jarvis.core.module_registry import ModuleRegistry
 from jarvis.core.security import AdminSession, PermissionPolicy, SecurityManager
 from jarvis.core.setup_wizard import SetupWizard
+from jarvis.core.job_manager import (
+    JobManager,
+    SleepArgs,
+    WriteTestFileArgs,
+    job_system_cleanup_jobs,
+    job_system_health_check,
+    job_system_sleep,
+    job_system_sleep_llm,
+    job_system_write_test_file,
+)
 from jarvis.web.api import create_app
 from jarvis.web.auth import build_api_key_auth
 
@@ -47,7 +57,16 @@ def _ensure_admin_passphrase(security: SecurityManager, logger) -> None:
     logger.info("Admin passphrase set.")
 
 
-def _start_web_thread(jarvis: JarvisApp, security: SecurityManager, secure_store: SecureStore, cfg: ConfigLoader, paths: ConfigPaths, event_logger: EventLogger, logger) -> None:
+def _start_web_thread(
+    jarvis: JarvisApp,
+    security: SecurityManager,
+    secure_store: SecureStore,
+    cfg: ConfigLoader,
+    paths: ConfigPaths,
+    event_logger: EventLogger,
+    logger,
+    job_manager: JobManager | None,
+) -> None:
     web_cfg = _load_json(
         cfg,
         paths.web,
@@ -84,6 +103,7 @@ def _start_web_thread(jarvis: JarvisApp, security: SecurityManager, secure_store
         event_logger=event_logger,
         logger=logger,
         auth_dep=auth,
+        job_manager=job_manager,
         allowed_origins=list(allowed_origins),
         enable_web_ui=enable_web_ui,
         allow_remote_admin_unlock=allow_remote_admin_unlock,
@@ -189,7 +209,68 @@ def main() -> None:
         threshold=threshold,
     )
 
-    _start_web_thread(jarvis, security, secure_store, cfg, paths, event_logger, logger)
+    # Job manager (core subsystem)
+    jobs_cfg = _load_json(
+        cfg,
+        paths.jobs,
+        default={
+            "max_concurrent_jobs": 1,
+            "default_timeout_seconds": 600,
+            "retention_max_jobs": 200,
+            "retention_days": 30,
+            "poll_interval_ms": 200,
+        },
+    )
+
+    job_manager: JobManager | None = JobManager(
+        jobs_dir="logs/jobs",
+        max_concurrent_jobs=int(jobs_cfg.get("max_concurrent_jobs", 1)),
+        default_timeout_seconds=int(jobs_cfg.get("default_timeout_seconds", 600)),
+        retention_max_jobs=int(jobs_cfg.get("retention_max_jobs", 200)),
+        retention_days=int(jobs_cfg.get("retention_days", 30)),
+        poll_interval_ms=int(jobs_cfg.get("poll_interval_ms", 200)),
+        event_logger=event_logger,
+        logger=logger,
+    )
+
+    # Register allowlisted job kinds (no shell, no arbitrary code).
+    job_manager.register_job("system.sleep", job_system_sleep, schema_model=SleepArgs)
+    job_manager.register_job("system.health_check", job_system_health_check)
+    job_manager.register_job("system.write_test_file", job_system_write_test_file, schema_model=WriteTestFileArgs)
+    job_manager.register_job("system.cleanup_jobs", job_system_cleanup_jobs)
+    job_manager.register_job("system.sleep_llm", job_system_sleep_llm)
+
+    # Post-complete hooks that must run in main process (stateful operations / retention).
+    def _hook_cleanup(_st):
+        job_manager.enforce_retention()
+
+    def _hook_sleep_llm(_st):
+        try:
+            jarvis.stage_b.unload()
+        except Exception:
+            pass
+
+    def _hook_health_check(st):
+        # Augment result with a safe snapshot from the main process.
+        try:
+            snap = {
+                "allowed_job_kinds": job_manager.allowed_kinds(),
+                "admin": security.is_admin(),
+                "usb_present": security.is_usb_present(),
+            }
+            job_manager.patch_job_result(st.id, {"snapshot": snap})
+        except Exception:
+            pass
+
+    job_manager.post_complete_hooks.update(
+        {
+            "system.cleanup_jobs": _hook_cleanup,
+            "system.sleep_llm": _hook_sleep_llm,
+            "system.health_check": _hook_health_check,
+        }
+    )
+
+    _start_web_thread(jarvis, security, secure_store, cfg, paths, event_logger, logger, job_manager)
 
     # Voice stack (optional; safe if deps/models missing)
     voice_controller: Optional[object] = None
@@ -294,6 +375,49 @@ def main() -> None:
             except Exception as e:
                 print(f"Unable to list microphones: {e}")
             continue
+        if text.startswith("/jobs"):
+            parts = text.split()
+            if len(parts) == 1 or (len(parts) >= 2 and parts[1] == "list"):
+                status = parts[2] if len(parts) >= 3 else None
+                jobs = job_manager.list_jobs(status=status)
+                for j in jobs[:50]:
+                    print(f"{j.id} | {j.status.value:10s} | {j.kind} | {j.progress:3d}% | {j.message}")
+                continue
+            if len(parts) >= 3 and parts[1] == "show":
+                jid = parts[2]
+                try:
+                    j = job_manager.get_job(jid)
+                except KeyError:
+                    print("Job not found.")
+                else:
+                    print(j.model_dump())
+                continue
+            if len(parts) >= 3 and parts[1] == "cancel":
+                jid = parts[2]
+                ok = job_manager.cancel_job(jid)
+                print("Canceled." if ok else "Unable to cancel.")
+                continue
+            if len(parts) >= 3 and parts[1] == "tail":
+                jid = parts[2]
+                n = int(parts[3]) if len(parts) >= 4 else 20
+                evs = job_manager.tail_job_events(jid, last_n=n)
+                for e in evs:
+                    print(e)
+                continue
+            if len(parts) >= 3 and parts[1] == "run":
+                name = parts[2]
+                if name == "health_check":
+                    jid = job_manager.submit_job("system.health_check", {}, {"source": "cli", "client_id": "stdin"})
+                    print(f"Submitted: {jid}")
+                    continue
+                if name == "cleanup":
+                    jid = job_manager.submit_job("system.cleanup_jobs", {}, {"source": "cli", "client_id": "stdin"})
+                    print(f"Submitted: {jid}")
+                    continue
+                print("Unknown run target. Use: health_check | cleanup")
+                continue
+            print("Usage: /jobs list [STATUS] | /jobs show <id> | /jobs cancel <id> | /jobs tail <id> [n] | /jobs run health_check|cleanup")
+            continue
         if text.startswith("/admin unlock"):
             if not security.is_usb_present():
                 print("USB key required for admin unlock.")
@@ -321,6 +445,11 @@ def main() -> None:
     try:
         if voice_controller is not None:
             voice_controller.stop()
+    except Exception:
+        pass
+    try:
+        if job_manager is not None:
+            job_manager.stop()
     except Exception:
         pass
 

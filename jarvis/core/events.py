@@ -35,6 +35,11 @@ def _redact(obj: Any) -> Any:
     return obj
 
 
+# Exported helper for other subsystems (job manager, etc.)
+def redact(obj: Any) -> Any:
+    return _redact(obj)
+
+
 @dataclass(frozen=True)
 class EventLogger:
     path: str

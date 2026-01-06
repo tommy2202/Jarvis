@@ -173,3 +173,25 @@ Useful commands:
 - `/listen` (push-to-talk)
 - `/voice status`
 - `/sleep`
+
+## Job Manager
+
+Jarvis includes a **process-based Job Manager** for long-running or blocking work:
+- allowlisted job kinds only (no shell, no arbitrary execution)
+- progress + events persisted under `logs/jobs/`
+- cancellation + timeouts
+- survives restarts (jobs can be inspected after restart)
+
+CLI commands:
+- `/jobs list [STATUS]`
+- `/jobs show <job_id>`
+- `/jobs cancel <job_id>`
+- `/jobs tail <job_id> [n]`
+- `/jobs run health_check`
+- `/jobs run cleanup`
+
+If web is enabled, authenticated job endpoints are available:
+- `POST /v1/jobs`
+- `GET /v1/jobs`
+- `GET /v1/jobs/{job_id}`
+- `POST /v1/jobs/{job_id}/cancel`
