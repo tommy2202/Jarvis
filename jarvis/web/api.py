@@ -138,6 +138,12 @@ def create_app(
             return {"state": "unknown"}
         return runtime.get_status()
 
+    @app.get("/v1/llm/status")
+    async def llm_status(request: Request, _=Depends(_require_auth())):
+        if runtime is None or getattr(runtime, "llm_lifecycle", None) is None:
+            return {"enabled": False}
+        return runtime.llm_lifecycle.get_status()
+
     @app.post("/v1/admin/unlock", response_model=AdminUnlockResponse)
     async def admin_unlock(req: AdminUnlockRequest, request: Request, _=Depends(_require_auth())):
         if not remote_control_enabled:

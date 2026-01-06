@@ -4,11 +4,13 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-import requests
 from pydantic import BaseModel, Field, ValidationError
+
+from jarvis.core.llm_contracts import LLMRequest, LLMRole, Message, OutputSchema
 
 
 class LLMOutput(BaseModel):
+    # Back-compat for older callers/tests; maps to intent_fallback output schema.
     intent: str
     confidence: float = Field(ge=0.0, le=1.0)
     args: Dict[str, Any] = Field(default_factory=dict)
@@ -18,103 +20,68 @@ class LLMOutput(BaseModel):
 
 @dataclass(frozen=True)
 class LLMConfig:
-    base_url: str = "http://localhost:11434"
-    timeout_seconds: float = 5.0
-    model: str = "qwen:14b-chat"
+    # Legacy config retained for tests; lifecycle config is in config/llm.json.
     mock_mode: bool = True
 
 
 class StageBLLMRouter:
     """
-    Local HTTP LLM interface with safe mock fallback.
-    Expects OpenAI-compatible /v1/chat/completions OR falls back to mock.
-
-    The model must output strict JSON with the LLMOutput schema.
+    Stage-B router that uses the LLM lifecycle controller + strict JSON contracts.
+    If no lifecycle provided, it can operate in safe mock mode only.
     """
 
-    def __init__(self, cfg: LLMConfig):
+    def __init__(self, cfg: LLMConfig, lifecycle=None):
         self.cfg = cfg
-        self._conversation_active = False
+        self.lifecycle = lifecycle
 
     def warmup(self) -> None:
-        """
-        Called when a voice wake happens.
-        For a remote/local HTTP server this is a best-effort ping; safe if server absent.
-        """
-        self._conversation_active = True
+        if self.lifecycle is None:
+            return
         try:
-            # Ollama supports /api/tags; many servers don't. This is best-effort only.
-            url = f"{self.cfg.base_url.rstrip('/')}/api/tags"
-            requests.get(url, timeout=min(self.cfg.timeout_seconds, 2.0))
+            self.lifecycle.ensure_role_ready("chat", trace_id="llm")
         except Exception:
             return
 
     def unload(self) -> None:
-        """
-        Called when voice returns to idle sleep.
-        For an HTTP client, we just drop any client-side state.
-        """
-        self._conversation_active = False
-
-    def _prompt(self, user_text: str, allowed_intents: Dict[str, Dict[str, Any]]) -> str:
-        # Keep prompt minimal but strict: produce JSON ONLY.
-        intent_list = "\n".join([f"- {k}" for k in sorted(allowed_intents.keys())])
-        return (
-            "You are an intent router. Output STRICT JSON only, no markdown.\n"
-            "Schema: {\"intent\": str, \"confidence\": float, \"args\": object, \"confirmation_text\": str, \"requires_admin\": bool}\n"
-            "Rules:\n"
-            "- intent MUST be one of the allowed intents listed below.\n"
-            "- confidence in [0,1].\n"
-            "- If unsure, set intent=\"unknown\" and confidence=0.\n"
-            "\n"
-            f"Allowed intents:\n{intent_list}\n"
-            "\n"
-            f"User message: {user_text}\n"
-        )
-
-    def _call_openai_compat(self, prompt: str) -> str:
-        url = f"{self.cfg.base_url.rstrip('/')}/v1/chat/completions"
-        payload = {
-            "model": self.cfg.model,
-            "messages": [
-                {"role": "system", "content": "Return JSON only."},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.0,
-        }
-        r = requests.post(url, json=payload, timeout=self.cfg.timeout_seconds)
-        r.raise_for_status()
-        data = r.json()
-        return data["choices"][0]["message"]["content"]
+        if self.lifecycle is None:
+            return
+        try:
+            self.lifecycle.unload_role("chat", reason="idle", trace_id="llm")
+        except Exception:
+            return
 
     def route(self, user_text: str, allowed_intents: Dict[str, Dict[str, Any]]) -> Optional[LLMOutput]:
-        prompt = self._prompt(user_text, allowed_intents)
-        raw: Optional[str] = None
-        try:
-            raw = self._call_openai_compat(prompt)
-        except Exception:  # noqa: BLE001
+        if self.lifecycle is None:
             if not self.cfg.mock_mode:
                 return None
-            # Safe mock: refuse unknowns, never invent new intents.
-            raw = json.dumps(
-                {
-                    "intent": "unknown",
-                    "confidence": 0.0,
-                    "args": {},
-                    "confirmation_text": "I’m not sure what you want me to do.",
-                    "requires_admin": False,
-                }
+            return LLMOutput(intent="unknown", confidence=0.0, args={}, confirmation_text="I’m not sure what you want me to do.", requires_admin=False)
+
+        allowed = sorted([k for k in allowed_intents.keys() if k != "unknown"])
+        req = LLMRequest(
+            trace_id="llm",
+            role=LLMRole.chat,
+            messages=[Message(role="user", content=user_text)],
+            output_schema=OutputSchema.intent_fallback,
+            safety={"allowed_intents": allowed, "denylist_phrases": ["ignore previous instructions", "system prompt", "reveal secrets"]},
+            max_tokens=512,
+            temperature=0.0,
+        )
+        resp = self.lifecycle.call("chat", req)
+        if resp.status.value != "ok" or not resp.parsed_json:
+            if self.cfg.mock_mode:
+                return LLMOutput(intent="unknown", confidence=0.0, args={}, confirmation_text="I’m not sure what you want me to do.", requires_admin=False)
+            return None
+
+        try:
+            # Map contract -> legacy output
+            out = LLMOutput(
+                intent=str(resp.parsed_json.get("intent_id") or "unknown"),
+                confidence=float(resp.parsed_json.get("confidence") or 0.0),
+                args=dict(resp.parsed_json.get("args") or {}),
+                confirmation_text=str(resp.parsed_json.get("confirmation_text") or ""),
+                requires_admin=bool(resp.parsed_json.get("requires_admin") or False),
             )
-
-        try:
-            obj = json.loads(raw)
-        except Exception:  # noqa: BLE001
+            return out
+        except Exception:
             return None
-
-        try:
-            out = LLMOutput.model_validate(obj)
-        except ValidationError:
-            return None
-
-        return out
 

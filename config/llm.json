@@ -1,0 +1,32 @@
+{
+  "enabled": true,
+  "mode": "external",
+  "debug_log_prompts": false,
+  "managed_kill_server_on_idle": false,
+  "roles": {
+    "chat": {
+      "backend": "ollama",
+      "model": "qwen2.5:14b-instruct",
+      "base_url": "http://127.0.0.1:11434",
+      "idle_unload_seconds": 45,
+      "max_request_seconds": 60,
+      "max_tokens": 512,
+      "temperature": 0.7
+    },
+    "coder": {
+      "backend": "ollama",
+      "model": "qwen3-coder:14b",
+      "base_url": "http://127.0.0.1:11434",
+      "idle_unload_seconds": 5,
+      "max_request_seconds": 120,
+      "max_tokens": 1024,
+      "temperature": 0.2
+    }
+  },
+  "watchdog": {
+    "health_check_interval_seconds": 10,
+    "restart_on_failure": true,
+    "max_restart_attempts": 3
+  }
+}
+

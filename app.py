@@ -31,6 +31,8 @@ from jarvis.core.job_manager import (
     job_system_write_test_file,
 )
 from jarvis.core.runtime import JarvisRuntime, RuntimeConfig, TTSAdapter, VoiceAdapter
+from jarvis.core.llm_lifecycle import LLMPolicy, LLMLifecycleController
+from jarvis.core.llm_router import LLMConfig as StageBLegacyConfig, StageBLLMRouter
 from jarvis.web.api import create_app
 from jarvis.web.auth import build_api_key_auth
 
@@ -189,15 +191,13 @@ def main() -> None:
     threshold = float(security_cfg.get("router_confidence_threshold", 0.55))
     stage_a = StageAIntentRouter(stage_a_intents, threshold=threshold)
 
-    llm_cfg_raw = security_cfg.get("llm") or {}
-    stage_b = StageBLLMRouter(
-        LLMConfig(
-            base_url=str(llm_cfg_raw.get("base_url", "http://localhost:11434")),
-            timeout_seconds=float(llm_cfg_raw.get("timeout_seconds", 5.0)),
-            model=str(llm_cfg_raw.get("model", "qwen:14b-chat")),
-            mock_mode=bool(llm_cfg_raw.get("mock_mode", True)),
-        )
-    )
+    # LLM lifecycle policy (new)
+    llm_policy_raw = _load_json(cfg, paths.llm, default={})
+    llm_policy = LLMPolicy.model_validate(llm_policy_raw or {"enabled": False, "mode": "external", "roles": {}, "watchdog": {}})
+    llm_lifecycle = LLMLifecycleController(policy=llm_policy, event_logger=event_logger, logger=logger) if llm_policy.roles else None
+
+    # Stage-B router uses lifecycle if available; otherwise stays in safe mock mode.
+    stage_b = StageBLLMRouter(StageBLegacyConfig(mock_mode=True), lifecycle=llm_lifecycle)
 
     policy = PermissionPolicy(intents=dict(perms_cfg.get("intents") or {}))
     dispatcher = Dispatcher(registry=registry, policy=policy, security=security, event_logger=event_logger, logger=logger)
@@ -351,7 +351,16 @@ def main() -> None:
                 logger.warning(f"Voice disabled (init failed): {e}")
                 voice_adapter = None
 
-    runtime = JarvisRuntime(cfg=sm_cfg, jarvis_app=jarvis, event_logger=event_logger, logger=logger, job_manager=job_manager, voice_adapter=voice_adapter, tts_adapter=tts_adapter)
+    runtime = JarvisRuntime(
+        cfg=sm_cfg,
+        jarvis_app=jarvis,
+        event_logger=event_logger,
+        logger=logger,
+        job_manager=job_manager,
+        llm_lifecycle=llm_lifecycle,
+        voice_adapter=voice_adapter,
+        tts_adapter=tts_adapter,
+    )
     runtime.start()
 
     _start_web_thread(jarvis, security, secure_store, cfg, paths, event_logger, logger, job_manager, runtime)
@@ -440,6 +449,49 @@ def main() -> None:
                 continue
             print("Usage: /jobs list [STATUS] | /jobs show <id> | /jobs cancel <id> | /jobs tail <id> [n] | /jobs run health_check|cleanup")
             continue
+        if text.startswith("/llm"):
+            parts = text.split()
+            if len(parts) == 1 or (len(parts) >= 2 and parts[1] == "status"):
+                print(llm_lifecycle.get_status() if llm_lifecycle else {"enabled": False})
+                continue
+            if len(parts) >= 3 and parts[1] == "unload":
+                target = parts[2].lower()
+                if not llm_lifecycle:
+                    print("LLM lifecycle not configured.")
+                    continue
+                if target == "all":
+                    llm_lifecycle.unload_all("manual")
+                    print("Unloaded all.")
+                    continue
+                llm_lifecycle.unload_role(target, reason="manual", trace_id="cli")
+                print(f"Unloaded {target}.")
+                continue
+            if len(parts) >= 4 and parts[1] == "test":
+                if not llm_lifecycle:
+                    print("LLM lifecycle not configured.")
+                    continue
+                role = parts[2].lower()
+                prompt = text.split(" ", 3)[3]
+                from jarvis.core.llm_contracts import LLMRequest, LLMRole, Message, OutputSchema
+
+                schema = OutputSchema.chat_reply
+                req = LLMRequest(
+                    trace_id="cli",
+                    role=LLMRole(role),
+                    messages=[Message(role="user", content=prompt)],
+                    output_schema=schema,
+                    safety={"allowed_intents": [], "denylist_phrases": ["reveal secrets", "system prompt"]},
+                    max_tokens=1024 if role == "coder" else 512,
+                    temperature=0.2 if role == "coder" else 0.7,
+                )
+                llm_lifecycle.ensure_role_ready(role, trace_id="cli")
+                resp = llm_lifecycle.call(role, req)
+                print(resp.model_dump())
+                if role == "coder":
+                    llm_lifecycle.unload_role("coder", reason="on_demand_complete", trace_id="cli")
+                continue
+            print("Usage: /llm status | /llm unload chat|coder|all | /llm test chat|coder \"...\"")
+            continue
         if text.startswith("/admin unlock"):
             if not security.is_usb_present():
                 print("USB key required for admin unlock.")
@@ -467,6 +519,11 @@ def main() -> None:
 
     try:
         runtime.stop()
+    except Exception:
+        pass
+    try:
+        if llm_lifecycle is not None:
+            llm_lifecycle.stop()
     except Exception:
         pass
     try:

@@ -210,3 +210,42 @@ CLI commands:
 - `/sleep` (unload and return to sleeping)
 - `/shutdown`
 - `/say <text>`
+
+## LLM lifecycle control (Ollama recommended)
+
+Jarvis supports two **local LLM roles**:
+- **chat**: starts on wake/first message; unloads after idle
+- **coder**: on-demand (CLI `/llm test coder ...`), then unloads immediately after use
+
+Configuration: `config/llm.json`
+- `mode: "external"` (default): Jarvis never starts/stops Ollama; it only calls `base_url`.
+- `mode: "managed"`: Jarvis may attempt a best-effort `ollama serve` if the server is down.
+  - By default Jarvis will **not** kill your Ollama server on idle (`managed_kill_server_on_idle: false`).
+
+### Windows setup (Ollama)
+
+1) Install Ollama for Windows.
+2) Pull models (examples; use names that match your `config/llm.json`):
+
+```bash
+ollama pull qwen2.5:14b-instruct
+ollama pull qwen3-coder:14b
+```
+
+3) Start Ollama (if using external mode):
+
+```bash
+ollama serve
+```
+
+### CLI commands
+
+- `/llm status`
+- `/llm unload chat|coder|all`
+- `/llm test chat "hello"`
+- `/llm test coder "write a python function that ..."`
+
+### Web endpoint
+
+If web is enabled, authenticated LLM status endpoint:
+- `GET /v1/llm/status`

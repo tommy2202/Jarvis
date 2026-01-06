@@ -117,6 +117,7 @@ class JarvisRuntime:
         event_logger: EventLogger,
         logger,
         job_manager: Any = None,
+        llm_lifecycle: Any = None,
         voice_adapter: Any = None,
         tts_adapter: Any = None,
         persist_path: str = os.path.join("logs", "state_machine", "events.jsonl"),
@@ -126,6 +127,7 @@ class JarvisRuntime:
         self.event_logger = event_logger
         self.logger = logger
         self.job_manager = job_manager
+        self.llm_lifecycle = llm_lifecycle
         self.voice_adapter = voice_adapter
         self.tts_adapter = tts_adapter
 
@@ -278,7 +280,10 @@ class JarvisRuntime:
         if self._llm_loaded:
             return
         try:
-            self.jarvis_app.stage_b.warmup()
+            if self.llm_lifecycle is not None:
+                self.llm_lifecycle.ensure_role_ready("chat", trace_id=trace_id)
+            else:
+                self.jarvis_app.stage_b.warmup()
         except Exception:
             pass
         self._llm_loaded = True
@@ -297,7 +302,10 @@ class JarvisRuntime:
             except Exception:
                 pass
         try:
-            self.jarvis_app.stage_b.unload()
+            if self.llm_lifecycle is not None:
+                self.llm_lifecycle.unload_role("chat", reason="idle", trace_id=trace_id)
+            else:
+                self.jarvis_app.stage_b.unload()
         except Exception:
             pass
         self._llm_loaded = False
