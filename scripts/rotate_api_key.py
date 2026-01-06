@@ -3,7 +3,7 @@ from __future__ import annotations
 import secrets
 
 from jarvis.core.config_loader import ConfigLoader, ConfigPaths
-from jarvis.core.crypto import SecureStore
+from jarvis.core.secure_store import SecureStore
 from jarvis.web.security.auth import ApiKeyStore
 
 
@@ -15,7 +15,7 @@ def main() -> None:
     store_path = str(sec.get("secure_store_path") or "secure/secure_store.enc")
 
     store = SecureStore(usb_key_path=usb_path, store_path=store_path)
-    if not store.is_unlocked():
+    if store.status().mode.value == "KEY_MISSING":
         raise SystemExit("USB key missing: cannot create/rotate API key.")
 
     ks = ApiKeyStore(store)

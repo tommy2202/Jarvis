@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
-from jarvis.core.crypto import SecureStore
+from jarvis.core.secure_store import SecureStore, SecretUnavailable
 
 
 class LockoutConfig(BaseModel):
@@ -38,14 +38,17 @@ class StrikeManager:
         self.cfg = cfg
 
     def _load(self) -> SecurityState:
-        raw = self.secure_store.secure_get("web.security_state") or {}
+        try:
+            raw = self.secure_store.get("web.security_state") or {}
+        except SecretUnavailable:
+            raw = {}
         try:
             return SecurityState.model_validate(raw)
         except Exception:
             return SecurityState()
 
     def _save(self, st: SecurityState) -> None:
-        self.secure_store.secure_set("web.security_state", st.model_dump())
+        self.secure_store.set("web.security_state", st.model_dump())
 
     def is_ip_locked(self, ip: str) -> bool:
         st = self._load()

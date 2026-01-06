@@ -43,7 +43,7 @@ class FakeEventLogger:
 def test_web_auth_rejects_missing_or_invalid_key():
     # Hardened auth uses encrypted key store.
     from jarvis.core.crypto import generate_usb_master_key_bytes, write_usb_key
-    from jarvis.core.crypto import SecureStore
+    from jarvis.core.secure_store import SecureStore
 
     import pathlib
 

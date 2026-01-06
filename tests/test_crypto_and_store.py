@@ -4,14 +4,8 @@ import json
 
 import pytest
 
-from jarvis.core.crypto import (
-    SecureStore,
-    SecureStoreLockedError,
-    aesgcm_decrypt,
-    aesgcm_encrypt,
-    generate_usb_master_key_bytes,
-    write_usb_key,
-)
+from jarvis.core.crypto import aesgcm_decrypt, aesgcm_encrypt, generate_usb_master_key_bytes, write_usb_key
+from jarvis.core.secure_store import SecureStore, SecretUnavailable
 
 
 def test_aesgcm_round_trip():
@@ -24,14 +18,14 @@ def test_aesgcm_round_trip():
 
 def test_secure_store_write_requires_usb_key(tmp_path):
     store = SecureStore(usb_key_path=str(tmp_path / "missing.bin"), store_path=str(tmp_path / "store.enc"))
-    with pytest.raises(SecureStoreLockedError):
-        store.secure_set("x", "y")
+    with pytest.raises(SecretUnavailable):
+        store.set("x", "y")
 
 
 def test_secure_store_round_trip(tmp_path):
     usb = tmp_path / "usb.bin"
     write_usb_key(str(usb), generate_usb_master_key_bytes())
     store = SecureStore(usb_key_path=str(usb), store_path=str(tmp_path / "store.enc"))
-    store.secure_set("web.api_key", "abc")
-    assert store.secure_get("web.api_key") == "abc"
+    store.set("web.api_key", "abc")
+    assert store.get("web.api_key") == "abc"
 

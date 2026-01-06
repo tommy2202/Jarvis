@@ -18,6 +18,13 @@ class SecureStoreLockedError(RuntimeError):
     pass
 
 
+def key_id_from_key_bytes(key: bytes) -> str:
+    import hashlib
+
+    h = hashlib.sha256(key).hexdigest()
+    return h[:16]
+
+
 def _b64e(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).decode("ascii")
 
@@ -45,6 +52,18 @@ def read_usb_key(path: str) -> bytes:
     if len(b) != 32:
         raise ValueError("USB master key must be 32 bytes (AES-256).")
     return b
+
+
+def best_effort_restrict_permissions(path: str) -> None:
+    """
+    Best-effort permissions tightening.
+    On Windows this is limited; on POSIX it sets 0o600.
+    """
+    try:
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+    except Exception:
+        return
 
 
 def aesgcm_encrypt(key: bytes, plaintext: bytes, aad: bytes = b"") -> Dict[str, str]:

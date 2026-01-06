@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
-from jarvis.core.crypto import SecureStore, SecureStoreLockedError
+from jarvis.core.secure_store import SecureStore, SecretUnavailable
 
 
 def _scrypt_hash(passphrase: str, salt: bytes, n: int = 2**14, r: int = 8, p: int = 1) -> bytes:
@@ -57,24 +57,25 @@ class SecurityManager:
     admin_session: AdminSession
 
     def is_usb_present(self) -> bool:
-        return self.secure_store.is_unlocked()
+        st = self.secure_store.status()
+        return st.mode not in {"KEY_MISSING"}
 
     def has_admin_passphrase_set(self) -> bool:
         try:
-            return self.secure_store.secure_get("admin.passphrase_hash") is not None
-        except SecureStoreLockedError:
+            return self.secure_store.get("admin.passphrase_hash") is not None
+        except SecretUnavailable:
             return False
 
     def set_admin_passphrase(self, passphrase: str) -> None:
         salt = secrets.token_bytes(16)
         digest = _scrypt_hash(passphrase, salt)
         payload = {"salt": salt.hex(), "digest": digest.hex(), "kdf": {"name": "scrypt", "n": 2**14, "r": 8, "p": 1}}
-        self.secure_store.secure_set("admin.passphrase_hash", payload)
+        self.secure_store.set("admin.passphrase_hash", payload)
 
     def verify_and_unlock_admin(self, passphrase: str) -> bool:
         try:
-            payload = self.secure_store.secure_get("admin.passphrase_hash")
-        except SecureStoreLockedError:
+            payload = self.secure_store.get("admin.passphrase_hash")
+        except SecretUnavailable:
             return False
         if not payload:
             return False

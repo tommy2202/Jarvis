@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 import uvicorn
 
 from jarvis.core.config import get_config
-from jarvis.core.crypto import SecureStore
+from jarvis.core.secure_store import SecureStore, SecretUnavailable
 from jarvis.core.dispatcher import Dispatcher
 from jarvis.core.events import EventLogger
 from jarvis.core.intent_router import StageAIntent, StageAIntentRouter
@@ -137,7 +137,15 @@ def main() -> None:
     config = get_config(logger=logger)
     cfg_obj = config.get()
 
-    secure_store = SecureStore(usb_key_path=cfg_obj.security.usb_key_path, store_path=cfg_obj.security.secure_store_path)
+    secure_store = SecureStore(
+        usb_key_path=cfg_obj.security.usb_key_path,
+        store_path=cfg_obj.security.secure_store_path,
+        meta_path=os.path.join("secure", "store.meta.json"),
+        backups_dir=os.path.join("secure", "backups"),
+        max_backups=int(cfg_obj.security.secure_store_backup_keep),
+        max_bytes=int(cfg_obj.security.secure_store_max_bytes),
+        read_only=bool(cfg_obj.security.secure_store_read_only),
+    )
     security = SecurityManager(secure_store=secure_store, admin_session=AdminSession(timeout_seconds=int(cfg_obj.security.admin_session_timeout_seconds)))
 
     _ensure_admin_passphrase(security, logger)
@@ -295,7 +303,7 @@ def main() -> None:
                 if sm_cfg.enable_wake_word and str(voice_cfg.get("wake_word_engine", "porcupine")).lower() == "porcupine":
                     access_key = None
                     try:
-                        access_key = secure_store.secure_get("porcupine.access_key")
+                        access_key = secure_store.get("porcupine.access_key")
                     except Exception:
                         access_key = None
                     if access_key:
@@ -513,6 +521,69 @@ def main() -> None:
                 print(d.changed_files)
                 continue
             print("Usage: /config status|open|validate|reload|diff")
+            continue
+        if text.startswith("/secure"):
+            parts = text.split()
+            cmd = parts[1] if len(parts) >= 2 else "status"
+            if cmd == "status":
+                st = secure_store.status()
+                print(st.model_dump())
+                continue
+            if cmd == "keys":
+                try:
+                    print(secure_store.list_keys())
+                except Exception as e:
+                    print(str(e))
+                continue
+
+            # admin-only operations below
+            if not security.is_admin():
+                print("Admin required.")
+                continue
+
+            if cmd == "get" and len(parts) >= 3:
+                key = parts[2]
+                show = "--show" in parts
+                v = secure_store.get(key)
+                if v is None:
+                    print("(null)")
+                else:
+                    print(v if show else "***REDACTED***")
+                continue
+            if cmd == "set" and len(parts) >= 3:
+                key = parts[2]
+                val = getpass.getpass(f"Value for {key}: ")
+                secure_store.set(key, val, trace_id="cli")
+                print("OK")
+                continue
+            if cmd == "delete" and len(parts) >= 3:
+                key = parts[2]
+                secure_store.delete(key, trace_id="cli")
+                print("OK")
+                continue
+            if cmd == "backup":
+                p = secure_store.backup_now()
+                print(p or "no store to backup")
+                continue
+            if cmd == "restore" and len(parts) >= 3 and parts[2] == "list":
+                if os.path.isdir(secure_store.backups_dir):
+                    files = [f for f in os.listdir(secure_store.backups_dir) if f.startswith("secure_store.") and f.endswith(".enc")]
+                    files.sort(reverse=True)
+                    for f in files:
+                        print(f)
+                else:
+                    print("No backups.")
+                continue
+            if cmd == "restore" and len(parts) >= 3:
+                b = parts[2]
+                path = b if os.path.isabs(b) else os.path.join(secure_store.backups_dir, b)
+                secure_store.restore_backup(path, trace_id="cli")
+                print("Restored.")
+                continue
+            if cmd == "rotate":
+                print("Run: python scripts/rotate_usb_key.py (use --apply to swap automatically)")
+                continue
+            print("Usage: /secure status|keys|get <k> [--show]|set <k>|delete <k>|backup|restore list|restore <backup>|rotate")
             continue
         if text.startswith("/llm"):
             parts = text.split()

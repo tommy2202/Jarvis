@@ -6,7 +6,8 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-from jarvis.core.crypto import SecureStore, generate_usb_master_key_bytes, write_usb_key
+from jarvis.core.secure_store import SecureStore
+from jarvis.core.crypto import generate_usb_master_key_bytes, write_usb_key
 from jarvis.core.events import EventLogger
 from jarvis.core.security_events import SecurityAuditLogger
 from jarvis.web.api import create_app

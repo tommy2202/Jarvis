@@ -18,6 +18,9 @@ class SecurityConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     usb_key_path: str = r"E:\JARVIS_KEY.bin"
     secure_store_path: str = "secure/secure_store.enc"
+    secure_store_read_only: bool = False
+    secure_store_max_bytes: int = 65536
+    secure_store_backup_keep: int = 10
     admin_session_timeout_seconds: int = 900
     router_confidence_threshold: float = 0.55
     llm: Dict[str, Any] = Field(default_factory=dict)  # legacy block (not used for lifecycle)

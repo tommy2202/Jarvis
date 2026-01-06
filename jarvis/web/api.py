@@ -141,6 +141,16 @@ def create_app(
             return {"enabled": False}
         return runtime.llm_lifecycle.get_status()
 
+    @app.get("/v1/secure/status")
+    async def secure_status(request: Request):
+        # Public status only; no secrets.
+        if secure_store is None:
+            return {"mode": "unavailable"}
+        try:
+            return secure_store.export_public_status()
+        except Exception:
+            return {"mode": "unavailable"}
+
     @app.post("/v1/admin/unlock", response_model=AdminUnlockResponse)
     async def admin_unlock(req: AdminUnlockRequest, request: Request):
         if not remote_control_enabled:

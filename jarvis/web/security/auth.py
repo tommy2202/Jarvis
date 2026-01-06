@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from pydantic import BaseModel, Field
 
-from jarvis.core.crypto import SecureStore
+from jarvis.core.secure_store import SecureStore, SecretUnavailable
 from jarvis.core.events import redact
 
 
@@ -39,7 +39,10 @@ class ApiKeyStore:
         self.secure_store = secure_store
 
     def _load(self) -> List[ApiKeyRecord]:
-        raw = self.secure_store.secure_get("web.api_keys") or []
+        try:
+            raw = self.secure_store.get("web.api_keys") or []
+        except SecretUnavailable:
+            raw = []
         out: List[ApiKeyRecord] = []
         if isinstance(raw, list):
             for r in raw:
@@ -50,7 +53,7 @@ class ApiKeyStore:
         return out
 
     def _save(self, records: List[ApiKeyRecord]) -> None:
-        self.secure_store.secure_set("web.api_keys", [r.model_dump() for r in records])
+        self.secure_store.set("web.api_keys", [r.model_dump() for r in records])
 
     @staticmethod
     def _hash_key(key: str) -> str:

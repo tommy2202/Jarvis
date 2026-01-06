@@ -1,6 +1,9 @@
 {
   "usb_key_path": "E:\\\\JARVIS_KEY.bin",
   "secure_store_path": "secure/secure_store.enc",
+  "secure_store_read_only": false,
+  "secure_store_max_bytes": 65536,
+  "secure_store_backup_keep": 10,
   "admin_session_timeout_seconds": 900,
   "router_confidence_threshold": 0.55,
   "llm": {

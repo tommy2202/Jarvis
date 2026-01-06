@@ -32,7 +32,7 @@ from jarvis.core.config.models import (
     WebConfig,
 )
 from jarvis.core.config.paths import ConfigFsPaths
-from jarvis.core.crypto import SecureStore, SecureStoreLockedError
+from jarvis.core.secure_store import SecureStore, SecretUnavailable as _SecureStoreSecretUnavailable
 from jarvis.core.events import redact
 from jarvis.core.config.watcher import ConfigWatcher, WatcherConfig
 
@@ -41,7 +41,7 @@ class ConfigError(RuntimeError):
     pass
 
 
-class SecretUnavailable(ConfigError):
+class SecretUnavailable(ConfigError, _SecureStoreSecretUnavailable):
     pass
 
 
@@ -95,7 +95,15 @@ class ConfigManager:
         self._raw_last = {k: dict(v) for k, v in ensured.items()}
 
         # create secure store handle (can be locked)
-        self._secure_store = SecureStore(usb_key_path=cfg.security.usb_key_path, store_path=cfg.security.secure_store_path)
+        self._secure_store = SecureStore(
+            usb_key_path=cfg.security.usb_key_path,
+            store_path=cfg.security.secure_store_path,
+            meta_path=os.path.join(self.fs.secure_dir, "store.meta.json"),
+            backups_dir=os.path.join(self.fs.secure_dir, "backups"),
+            max_backups=int(cfg.security.secure_store_backup_keep),
+            max_bytes=int(cfg.security.secure_store_max_bytes),
+            read_only=bool(cfg.security.secure_store_read_only),
+        )
 
         # snapshot last known good
         if not self.read_only:
@@ -188,16 +196,16 @@ class ConfigManager:
         if self._secure_store is None:
             raise SecretUnavailable("Secure store not initialized.")
         try:
-            return self._secure_store.secure_get(key)
-        except SecureStoreLockedError as e:
+            return self._secure_store.get(key)
+        except _SecureStoreSecretUnavailable as e:
             raise SecretUnavailable(str(e)) from e
 
     def set_secret(self, key: str, value: Any) -> None:
         if self._secure_store is None:
             raise SecretUnavailable("Secure store not initialized.")
         try:
-            self._secure_store.secure_set(key, value)
-        except SecureStoreLockedError as e:
+            self._secure_store.set(key, value)
+        except _SecureStoreSecretUnavailable as e:
             raise SecretUnavailable(str(e)) from e
 
     # ---------- internals ----------

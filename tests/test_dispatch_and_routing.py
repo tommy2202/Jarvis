@@ -7,7 +7,8 @@ from jarvis.core.jarvis_app import JarvisApp
 from jarvis.core.llm_router import LLMConfig, StageBLLMRouter
 from jarvis.core.module_registry import ModuleRegistry
 from jarvis.core.security import AdminSession, PermissionPolicy, SecurityManager
-from jarvis.core.crypto import SecureStore, generate_usb_master_key_bytes, write_usb_key
+from jarvis.core.secure_store import SecureStore
+from jarvis.core.crypto import generate_usb_master_key_bytes, write_usb_key
 
 
 class DummyLogger:

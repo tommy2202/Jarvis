@@ -12,7 +12,7 @@ from jarvis.core.events import redact
 
 @dataclass(frozen=True)
 class SecurityAuditLogger:
-    path: str = os.path.join("logs", "security.log")
+    path: str = os.path.join("logs", "security.jsonl")
     _lock: threading.Lock = threading.Lock()
 
     def log(

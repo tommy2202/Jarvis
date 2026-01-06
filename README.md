@@ -354,3 +354,42 @@ ollama serve
 
 If web is enabled, authenticated LLM status endpoint:
 - `GET /v1/llm/status`
+
+## Secure store operations (USB key)
+
+Jarvis keeps secrets in an encrypted secure store:
+- `secure/secure_store.enc` (AES‑GCM encrypted)
+- `secure/store.meta.json` (plaintext non-sensitive metadata: store_id/key_id/version)
+- `secure/backups/` (automatic backups and last-known-good)
+
+### Status modes (operational clarity)
+
+`/secure status` reports one of:
+- `READY`: USB key present, store decryptable
+- `KEY_MISSING`: USB key not found
+- `STORE_MISSING`: store file missing (created on first secret write)
+- `STORE_CORRUPT`: store exists but can’t be decrypted / JSON invalid
+- `KEY_MISMATCH`: key present but doesn’t match store key_id
+- `READ_ONLY`: store readable but writes blocked
+
+### CLI helpers
+
+- `/secure status`
+- `/secure keys`
+- `/secure get <key> [--show]` (admin-only; redacts unless `--show`)
+- `/secure set <key>` (admin-only, hidden input)
+- `/secure delete <key>` (admin-only)
+- `/secure backup` (admin-only)
+- `/secure restore list` / `/secure restore <backup_file>` (admin-only)
+- `/secure rotate` (prints rotation instructions)
+
+Scripts:
+- `python scripts/create_usb_key.py` (creates key, prints key_id)
+- `python scripts/check_usb_key.py` (prints key_id)
+- `python scripts/rotate_usb_key.py` (safe rotation with `.new` files; `--apply` to swap)
+- `python scripts/restore_secure_store.py --list` / `python scripts/restore_secure_store.py <backup>`
+
+### Web endpoint
+
+Authenticated public status only:
+- `GET /v1/secure/status`
