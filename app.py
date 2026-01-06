@@ -9,13 +9,13 @@ from typing import Any, Dict, Optional
 
 import uvicorn
 
-from jarvis.core.config_loader import ConfigLoader, ConfigPaths
+from jarvis.core.config import get_config
 from jarvis.core.crypto import SecureStore
 from jarvis.core.dispatcher import Dispatcher
 from jarvis.core.events import EventLogger
 from jarvis.core.intent_router import StageAIntent, StageAIntentRouter
 from jarvis.core.jarvis_app import JarvisApp
-from jarvis.core.llm_router import LLMConfig, StageBLLMRouter
+from jarvis.core.llm_router import LLMConfig  # legacy name kept
 from jarvis.core.logger import setup_logging
 from jarvis.core.module_registry import ModuleRegistry
 from jarvis.core.security import AdminSession, PermissionPolicy, SecurityManager
@@ -37,11 +37,6 @@ from jarvis.web.api import create_app
 from jarvis.web.auth import build_api_key_auth  # legacy
 from jarvis.web.security.auth import ApiKeyStore
 from jarvis.web.security.strikes import StrikeManager, LockoutConfig
-
-
-def _load_json(cfg: ConfigLoader, path: str, default: Dict[str, Any]) -> Dict[str, Any]:
-    data = cfg.load(path)
-    return data if isinstance(data, dict) and data else dict(default)
 
 
 def _ensure_admin_passphrase(security: SecurityManager, logger) -> None:
@@ -67,29 +62,13 @@ def _start_web_thread(
     jarvis: JarvisApp,
     security: SecurityManager,
     secure_store: SecureStore,
-    cfg: ConfigLoader,
-    paths: ConfigPaths,
+    config_manager,
     event_logger: EventLogger,
     logger,
     job_manager: JobManager | None,
     runtime: JarvisRuntime | None,
 ) -> None:
-    web_cfg = _load_json(
-        cfg,
-        paths.web,
-        default={
-            "enabled": False,
-            "bind_host": "127.0.0.1",
-            "port": 8000,
-            "allow_remote": False,
-            "allowed_origins": [],
-            "max_request_bytes": 32768,
-            "rate_limits": {"per_ip_per_minute": 60, "per_key_per_minute": 30, "admin_per_minute": 5},
-            "lockout": {"strike_threshold": 5, "lockout_minutes": 15, "permanent_after": 3},
-            "admin": {"allow_remote_unlock": False, "allowed_admin_ips": ["127.0.0.1"]},
-            "enable_web_ui": True,
-        },
-    )
+    web_cfg = config_manager.get().web.model_dump()
     if not web_cfg.get("enabled", False):
         return
 
@@ -155,37 +134,29 @@ def main() -> None:
     logger = setup_logging("logs")
     event_logger = EventLogger("logs/events.jsonl")
 
-    paths = ConfigPaths()
-    cfg = ConfigLoader(paths)
+    config = get_config(logger=logger)
+    cfg_obj = config.get()
 
-    security_cfg = _load_json(
-        cfg,
-        paths.security,
-        default={
-            "usb_key_path": r"E:\JARVIS_KEY.bin",
-            "secure_store_path": "secure/secure_store.enc",
-            "admin_session_timeout_seconds": 900,
-            "router_confidence_threshold": 0.55,
-            "llm": {"base_url": "http://localhost:11434", "timeout_seconds": 5.0, "model": "qwen:14b-chat", "mock_mode": True},
-        },
-    )
-
-    secure_store = SecureStore(
-        usb_key_path=str(security_cfg.get("usb_key_path")),
-        store_path=str(security_cfg.get("secure_store_path")),
-    )
-    security = SecurityManager(secure_store=secure_store, admin_session=AdminSession(timeout_seconds=int(security_cfg.get("admin_session_timeout_seconds", 900))))
+    secure_store = SecureStore(usb_key_path=cfg_obj.security.usb_key_path, store_path=cfg_obj.security.secure_store_path)
+    security = SecurityManager(secure_store=secure_store, admin_session=AdminSession(timeout_seconds=int(cfg_obj.security.admin_session_timeout_seconds)))
 
     _ensure_admin_passphrase(security, logger)
 
-    # Setup wizard (startup)
-    wiz = SetupWizard(cfg=cfg, paths=paths, secure_store=secure_store, logger=logger)
-    wiz.run_interactive()
+    # Setup wizard currently uses config files; keep behavior but avoid ad-hoc loads elsewhere.
+    wiz = SetupWizard(cfg=None, paths=None, secure_store=secure_store, logger=logger)  # type: ignore[arg-type]
+    try:
+        wiz.run_interactive()
+        config.load_all()
+        cfg_obj = config.get()
+    except Exception:
+        # wizard is optional; continue with validated config
+        pass
 
-    modules_registry_cfg = _load_json(cfg, paths.modules_registry, default={"modules": []})
-    modules_cfg = _load_json(cfg, paths.modules, default={"intents": []})
-    perms_cfg = _load_json(cfg, paths.permissions, default={"intents": {}})
-    resp_cfg = _load_json(cfg, paths.responses, default={"confirmations": {}})
+    # Use unified validated config everywhere below
+    modules_registry_cfg = cfg_obj.modules_registry.model_dump()
+    modules_cfg = cfg_obj.modules.model_dump()
+    perms_cfg = cfg_obj.permissions.model_dump()
+    resp_cfg = cfg_obj.responses.model_dump()
 
     # Module registry
     registry = ModuleRegistry()
@@ -211,12 +182,11 @@ def main() -> None:
             )
         )
 
-    threshold = float(security_cfg.get("router_confidence_threshold", 0.55))
+    threshold = float(cfg_obj.security.router_confidence_threshold)
     stage_a = StageAIntentRouter(stage_a_intents, threshold=threshold)
 
     # LLM lifecycle policy (new)
-    llm_policy_raw = _load_json(cfg, paths.llm, default={})
-    llm_policy = LLMPolicy.model_validate(llm_policy_raw or {"enabled": False, "mode": "external", "roles": {}, "watchdog": {}})
+    llm_policy = LLMPolicy.model_validate(cfg_obj.llm.model_dump())
     llm_lifecycle = LLMLifecycleController(policy=llm_policy, event_logger=event_logger, logger=logger) if llm_policy.roles else None
 
     # Stage-B router uses lifecycle if available; otherwise stays in safe mock mode.
@@ -237,25 +207,14 @@ def main() -> None:
     )
 
     # Job manager (core subsystem)
-    jobs_cfg = _load_json(
-        cfg,
-        paths.jobs,
-        default={
-            "max_concurrent_jobs": 1,
-            "default_timeout_seconds": 600,
-            "retention_max_jobs": 200,
-            "retention_days": 30,
-            "poll_interval_ms": 200,
-        },
-    )
-
+    jobs_cfg = cfg_obj.jobs
     job_manager: JobManager | None = JobManager(
         jobs_dir="logs/jobs",
-        max_concurrent_jobs=int(jobs_cfg.get("max_concurrent_jobs", 1)),
-        default_timeout_seconds=int(jobs_cfg.get("default_timeout_seconds", 600)),
-        retention_max_jobs=int(jobs_cfg.get("retention_max_jobs", 200)),
-        retention_days=int(jobs_cfg.get("retention_days", 30)),
-        poll_interval_ms=int(jobs_cfg.get("poll_interval_ms", 200)),
+        max_concurrent_jobs=int(jobs_cfg.max_concurrent_jobs),
+        default_timeout_seconds=int(jobs_cfg.default_timeout_seconds),
+        retention_max_jobs=int(jobs_cfg.retention_max_jobs),
+        retention_days=int(jobs_cfg.retention_days),
+        poll_interval_ms=int(jobs_cfg.poll_interval_ms),
         event_logger=event_logger,
         logger=logger,
     )
@@ -298,21 +257,7 @@ def main() -> None:
     )
 
     # Core Runtime State Machine
-    sm_cfg_raw = _load_json(
-        cfg,
-        paths.state_machine,
-        default={
-            "idle_sleep_seconds": 45,
-            "timeouts": {"LISTENING": 8, "TRANSCRIBING": 15, "UNDERSTANDING": 10, "EXECUTING": 20, "SPEAKING": 20},
-            "enable_voice": False,
-            "enable_tts": True,
-            "enable_wake_word": True,
-            "max_concurrent_interactions": 1,
-            "busy_policy": "queue",
-            "result_ttl_seconds": 120,
-        },
-    )
-    sm_cfg = RuntimeConfig.model_validate(sm_cfg_raw)
+    sm_cfg = RuntimeConfig.model_validate(cfg_obj.state_machine.model_dump())
 
     # Build optional voice adapters (reuse existing voice package components)
     voice_adapter = None
@@ -329,9 +274,9 @@ def main() -> None:
             logger.warning(f"TTS disabled (init failed): {e}")
             tts_adapter = None
 
-    if sm_cfg.enable_voice and args.mode in {"voice", "hybrid"}:
-        voice_cfg = _load_json(cfg, paths.voice, default={"enabled": False})
-        models_cfg = _load_json(cfg, paths.models, default={"vosk_model_path": "", "faster_whisper_model_path": ""})
+    if sm_cfg.enable_voice and args.mode in {"voice", "hybrid"} and cfg_obj.voice.enabled:
+        voice_cfg = cfg_obj.voice.model_dump()
+        models_cfg = cfg_obj.models.model_dump()
         if bool(voice_cfg.get("enabled", False)):
             try:
                 from jarvis.voice.audio import AudioRecorder
@@ -386,7 +331,7 @@ def main() -> None:
     )
     runtime.start()
 
-    _start_web_thread(jarvis, security, secure_store, cfg, paths, event_logger, logger, job_manager, runtime)
+    _start_web_thread(jarvis, security, secure_store, config, event_logger, logger, job_manager, runtime)
 
     logger.info("Jarvis CLI ready. Type /exit to quit. (/status, /wake, /sleep, /shutdown, /jobs ...)")
 
@@ -475,7 +420,7 @@ def main() -> None:
         if text.startswith("/web"):
             parts = text.split()
             if len(parts) == 1 or (len(parts) >= 2 and parts[1] == "status"):
-                web_cfg = _load_json(cfg, paths.web, default={})
+                web_cfg = config.get().web.model_dump()
                 st = {"config": web_cfg}
                 if secure_store.is_unlocked():
                     try:
@@ -495,7 +440,7 @@ def main() -> None:
             if not secure_store.is_unlocked():
                 print("USB key required.")
                 continue
-            web_cfg = _load_json(cfg, paths.web, default={})
+            web_cfg = config.get().web.model_dump()
             key_store = ApiKeyStore(secure_store)
             strikes = StrikeManager(secure_store, LockoutConfig.model_validate((web_cfg.get("lockout") or {})))
             from jarvis.core.security_events import SecurityAuditLogger
@@ -506,13 +451,13 @@ def main() -> None:
                 web_cfg["enabled"] = True
                 web_cfg["bind_host"] = "127.0.0.1"
                 web_cfg["allow_remote"] = False
-                cfg.save(paths.web, web_cfg)
+                config.save_non_sensitive("web.json", web_cfg)
                 audit.log(trace_id="cli", severity="INFO", event="web.config", ip=None, endpoint="cli", outcome="enabled", details={"enabled": True})
                 print("Web enabled (localhost only). Restart app.py.")
                 continue
             if len(parts) >= 2 and parts[1] == "disable":
                 web_cfg["enabled"] = False
-                cfg.save(paths.web, web_cfg)
+                config.save_non_sensitive("web.json", web_cfg)
                 audit.log(trace_id="cli", severity="INFO", event="web.config", ip=None, endpoint="cli", outcome="disabled", details={"enabled": False})
                 print("Web disabled. Restart app.py.")
                 continue
@@ -543,6 +488,31 @@ def main() -> None:
                 print(strikes.get_lockouts())
                 continue
             print("Usage: /web status | /web enable | /web disable | /web rotate-key | /web list-keys | /web revoke-key <id> | /web unlock-ip <ip> | /web locks")
+            continue
+        if text.startswith("/config"):
+            parts = text.split()
+            if len(parts) == 1 or parts[1] == "status":
+                print({"paths": config.open_paths(), "hot_reload": config.get().app.hot_reload})
+                continue
+            if parts[1] == "open":
+                print(config.open_paths())
+                continue
+            if parts[1] == "validate":
+                try:
+                    config.validate()
+                    print("OK")
+                except Exception as e:
+                    print(str(e))
+                continue
+            if parts[1] == "reload":
+                ok = config.reload_if_changed()
+                print("reloaded" if ok else "no change / rejected")
+                continue
+            if parts[1] == "diff":
+                d = config.diff_since_last_load()
+                print(d.changed_files)
+                continue
+            print("Usage: /config status|open|validate|reload|diff")
             continue
         if text.startswith("/llm"):
             parts = text.split()

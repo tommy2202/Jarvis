@@ -1,0 +1,14 @@
+{
+  "config_version": 2,
+  "created_at": "2026-01-06T00:00:00Z",
+  "last_migrated_at": "2026-01-06T00:00:00Z",
+  "backups": {
+    "max_backups_per_file": 10
+  },
+  "hot_reload": {
+    "enabled": false,
+    "debounce_ms": 500,
+    "poll_interval_ms": 500
+  }
+}
+

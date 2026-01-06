@@ -3,8 +3,8 @@ from __future__ import annotations
 import getpass
 import sys
 
-from jarvis.core.config_loader import ConfigLoader, ConfigPaths
-from jarvis.core.crypto import SecureStore
+from jarvis.core.config import ConfigManager
+from jarvis.core.config.paths import ConfigFsPaths
 
 
 def main() -> None:
@@ -19,17 +19,12 @@ def main() -> None:
     if value is None:
         value = getpass.getpass(f"Value for {key}: ")
 
-    paths = ConfigPaths()
-    cfg = ConfigLoader(paths)
-    sec = cfg.load(paths.security) or {}
-    usb_path = str(sec.get("usb_key_path") or r"E:\JARVIS_KEY.bin")
-    store_path = str(sec.get("secure_store_path") or "secure/secure_store.enc")
-
-    store = SecureStore(usb_key_path=usb_path, store_path=store_path)
-    if not store.is_unlocked():
-        raise SystemExit("USB key missing: cannot set encrypted secrets.")
-
-    store.secure_set(key, value)
+    cm = ConfigManager(fs=ConfigFsPaths("."), logger=None)
+    cm.load_all()
+    try:
+        cm.set_secret(key, value)
+    except Exception as e:
+        raise SystemExit(str(e)) from e
     print(f"Saved secret: {key}")
 
 

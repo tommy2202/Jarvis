@@ -11,6 +11,71 @@ This repo is a **minimal but functional** “Jarvis” assistant designed to run
 - **CLI REPL** (`app.py`)
 - **FastAPI remote control** (authenticated via API key stored **only** in encrypted secure store)
 - **Module setup wizard** (detects modules and guides configuration)
+- **Production-grade configuration system** (validated schemas, migrations, backups, hot reload)
+
+## Configuration system (production-grade)
+
+### Directory layout
+
+- `config/`: **non-sensitive** plaintext JSON configs (validated)
+- `secure/`: encrypted secure store file(s) (requires USB key)
+- `config/schema/`: (optional) JSON schema exports
+- `config/backups/`: automatic backups + corrupt-file quarantine
+  - `config/backups/last_known_good/`: last known good snapshot of `config/*.json`
+
+### Single Config API (no ad-hoc JSON)
+
+Jarvis uses a single validated config object:
+- `jarvis/core/config/manager.py` → `ConfigManager`
+- `jarvis/core/config/models.py` → pydantic schemas (**extra fields forbidden**)
+
+On startup Jarvis:
+- loads all `config/*.json`
+- applies migrations based on `config/app.json` → `config_version`
+- validates everything (clear errors)
+- if a file is missing: writes safe defaults
+- if a file is corrupt JSON: moves it to `config/backups/<name>.<ts>.corrupt.json` and restores last known good or defaults
+
+### Versioning + migrations
+
+`config/app.json` contains:
+- `config_version`
+- timestamps
+- backup and hot-reload settings
+
+Migrations live in `jarvis/core/config/migrations/` and run sequentially.
+If migrations succeed, migrated configs are written back atomically with backups.
+
+### Atomic writes + backups
+
+All config writes are atomic (temp file + rename), and a timestamped backup is made before overwriting.
+Backup retention is controlled by `config/app.json` → `backups.max_backups_per_file` (default 10).
+
+### Sensitive vs non-sensitive
+
+**Never stored in plaintext** (`config/*.json`):
+- admin passphrase hash
+- web API keys and metadata
+- Porcupine access key
+- lockout state for web security
+
+These live only in the encrypted secure store (`secure/secure_store.enc`) via:
+- `scripts/set_secret.py`
+
+### Hot reload (optional, safe)
+
+Hot reload is off by default (`config/app.json` → `hot_reload.enabled: false`).
+When enabled:
+- only non-sensitive configs are reloaded
+- changes are debounced
+- invalid changes are rejected and the previous config remains active
+
+CLI commands:
+- `/config status`
+- `/config open`
+- `/config validate`
+- `/config reload`
+- `/config diff`
 
 ## Windows setup
 

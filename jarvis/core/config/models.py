@@ -1,0 +1,130 @@
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class AppFileConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    config_version: int = Field(default=2, ge=1)
+    created_at: str = "1970-01-01T00:00:00Z"
+    last_migrated_at: str = "1970-01-01T00:00:00Z"
+    backups: Dict[str, Any] = Field(default_factory=lambda: {"max_backups_per_file": 10})
+    hot_reload: Dict[str, Any] = Field(default_factory=lambda: {"enabled": False, "debounce_ms": 500, "poll_interval_ms": 500})
+
+
+class SecurityConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    usb_key_path: str = r"E:\JARVIS_KEY.bin"
+    secure_store_path: str = "secure/secure_store.enc"
+    admin_session_timeout_seconds: int = 900
+    router_confidence_threshold: float = 0.55
+    llm: Dict[str, Any] = Field(default_factory=dict)  # legacy block (not used for lifecycle)
+
+
+class VoiceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    wake_word_engine: str = "porcupine"
+    wake_word: str = "jarvis"
+    mic_device_index: Optional[int] = None
+    stt_backend_primary: str = "vosk"
+    stt_backend_fallback: str = "faster_whisper"
+    tts_backend_primary: str = "sapi"
+    tts_backend_fallback: str = "pyttsx3"
+    listen_seconds: int = 8
+    sample_rate: int = 16000
+    idle_sleep_seconds: int = 45
+    confirm_beep: bool = True
+    audio_retention_files: int = 25
+    allow_voice_admin_unlock: bool = False
+    thinking_timeout_seconds: int = 15
+
+
+class ModelsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    vosk_model_path: str = ""
+    faster_whisper_model_path: str = ""
+
+
+class JobsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    max_concurrent_jobs: int = 1
+    default_timeout_seconds: int = 600
+    retention_max_jobs: int = 200
+    retention_days: int = 30
+    poll_interval_ms: int = 200
+
+
+class WebConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    bind_host: str = "127.0.0.1"
+    port: int = 8000
+    allow_remote: bool = False
+    allowed_origins: List[str] = Field(default_factory=list)
+    max_request_bytes: int = 32768
+    rate_limits: Dict[str, int] = Field(default_factory=lambda: {"per_ip_per_minute": 60, "per_key_per_minute": 30, "admin_per_minute": 5})
+    lockout: Dict[str, int] = Field(default_factory=lambda: {"strike_threshold": 5, "lockout_minutes": 15, "permanent_after": 3})
+    admin: Dict[str, Any] = Field(default_factory=lambda: {"allow_remote_unlock": False, "allowed_admin_ips": ["127.0.0.1"]})
+    enable_web_ui: bool = True
+
+
+class LLMConfigFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    mode: str = "external"
+    debug_log_prompts: bool = False
+    managed_kill_server_on_idle: bool = False
+    roles: Dict[str, Any] = Field(default_factory=dict)
+    watchdog: Dict[str, Any] = Field(default_factory=dict)
+
+
+class StateMachineConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    idle_sleep_seconds: int = 45
+    timeouts: Dict[str, int] = Field(default_factory=lambda: {"LISTENING": 8, "TRANSCRIBING": 15, "UNDERSTANDING": 10, "EXECUTING": 20, "SPEAKING": 20})
+    enable_voice: bool = False
+    enable_tts: bool = True
+    enable_wake_word: bool = True
+    max_concurrent_interactions: int = 1
+    busy_policy: str = "queue"
+    result_ttl_seconds: int = 120
+
+
+class ModulesRegistryConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    modules: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ModulesConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    intents: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class PermissionsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    intents: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+
+
+class ResponsesConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirmations: Dict[str, str] = Field(default_factory=dict)
+
+
+class AppConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    app: AppFileConfig
+    security: SecurityConfig
+    voice: VoiceConfig
+    models: ModelsConfig
+    web: WebConfig
+    jobs: JobsConfig
+    llm: LLMConfigFile
+    state_machine: StateMachineConfig
+    modules_registry: ModulesRegistryConfig
+    modules: ModulesConfig
+    permissions: PermissionsConfig
+    responses: ResponsesConfig
+
