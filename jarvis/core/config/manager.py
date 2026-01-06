@@ -17,7 +17,7 @@ from jarvis.core.config.io import (
 )
 from jarvis.core.config.migrations.runner import latest_version, run_migrations
 from jarvis.core.config.models import (
-    AppConfig,
+    AppConfigV2,
     AppFileConfig,
     JobsConfig,
     LLMConfigFile,
@@ -25,6 +25,7 @@ from jarvis.core.config.models import (
     ModulesConfig,
     ModulesRegistryConfig,
     PermissionsConfig,
+    RecoveryConfigFile,
     ResponsesConfig,
     SecurityConfig,
     StateMachineConfig,
@@ -55,13 +56,13 @@ class ConfigManager:
         self.fs = fs or ConfigFsPaths(".")
         self.logger = logger
         self.read_only = read_only
-        self._cfg: Optional[AppConfig] = None
+        self._cfg: Optional[AppConfigV2] = None
         self._raw_last: Dict[str, Dict[str, Any]] = {}
         self._secure_store: Optional[SecureStore] = None
         self._watcher: Optional[ConfigWatcher] = None
 
     # ---------- public API ----------
-    def load_all(self) -> AppConfig:
+    def load_all(self) -> AppConfigV2:
         os.makedirs(self.fs.config_dir, exist_ok=True)
         os.makedirs(self.fs.backups_dir, exist_ok=True)
         os.makedirs(self.fs.last_known_good_dir, exist_ok=True)
@@ -118,7 +119,7 @@ class ConfigManager:
             raise ConfigError("Config not loaded.")
         _ = self._validate_all(self._load_raw_files())
 
-    def get(self) -> AppConfig:
+    def get(self) -> AppConfigV2:
         if self._cfg is None:
             raise ConfigError("Config not loaded.")
         return self._cfg
@@ -218,6 +219,7 @@ class ConfigManager:
             "web.json",
             "jobs.json",
             "llm.json",
+            "recovery.json",
             "state_machine.json",
             "modules_registry.json",
             "modules.json",
@@ -250,6 +252,7 @@ class ConfigManager:
             "web.json": WebConfig().model_dump(),
             "jobs.json": JobsConfig().model_dump(),
             "llm.json": LLMConfigFile().model_dump(),
+            "recovery.json": RecoveryConfigFile().model_dump(),
             "state_machine.json": StateMachineConfig().model_dump(),
             "modules_registry.json": ModulesRegistryConfig().model_dump(),
             "modules.json": ModulesConfig().model_dump(),
@@ -266,9 +269,9 @@ class ConfigManager:
                     atomic_write_json(os.path.join(self.fs.config_dir, name), dflt, self.fs.backups_dir, max_backups=max_backups)
         return out
 
-    def _validate_all(self, files: Dict[str, Dict[str, Any]]) -> AppConfig:
+    def _validate_all(self, files: Dict[str, Dict[str, Any]]) -> AppConfigV2:
         try:
-            cfg = AppConfig(
+            cfg = AppConfigV2(
                 app=AppFileConfig.model_validate(files.get("app.json") or {}),
                 security=SecurityConfig.model_validate(files.get("security.json") or {}),
                 voice=VoiceConfig.model_validate(files.get("voice.json") or {}),
@@ -276,6 +279,7 @@ class ConfigManager:
                 web=WebConfig.model_validate(files.get("web.json") or {}),
                 jobs=JobsConfig.model_validate(files.get("jobs.json") or {}),
                 llm=LLMConfigFile.model_validate(files.get("llm.json") or {}),
+                recovery=RecoveryConfigFile.model_validate(files.get("recovery.json") or {}),
                 state_machine=StateMachineConfig.model_validate(files.get("state_machine.json") or {}),
                 modules_registry=ModulesRegistryConfig.model_validate(files.get("modules_registry.json") or {}),
                 modules=ModulesConfig.model_validate(files.get("modules.json") or {}),

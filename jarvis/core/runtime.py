@@ -15,6 +15,9 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 
 from jarvis.core.events import EventLogger, redact
+from jarvis.core.error_reporter import ErrorReporter
+from jarvis.core.recovery import RecoveryPolicy, RecoveryConfig
+from jarvis.core.circuit_breaker import BreakerRegistry
 
 
 class StateTransitionError(RuntimeError):
@@ -120,6 +123,9 @@ class JarvisRuntime:
         llm_lifecycle: Any = None,
         voice_adapter: Any = None,
         tts_adapter: Any = None,
+        error_reporter: Optional[ErrorReporter] = None,
+        recovery_policy: Optional[RecoveryPolicy] = None,
+        breakers: Optional[BreakerRegistry] = None,
         persist_path: str = os.path.join("logs", "state_machine", "events.jsonl"),
     ):
         self.cfg = cfg
@@ -130,6 +136,9 @@ class JarvisRuntime:
         self.llm_lifecycle = llm_lifecycle
         self.voice_adapter = voice_adapter
         self.tts_adapter = tts_adapter
+        self.error_reporter = error_reporter or ErrorReporter()
+        self.recovery_policy = recovery_policy or RecoveryPolicy(RecoveryConfig())
+        self.breakers = breakers or BreakerRegistry({})
 
         self._writer = _JsonlWriter(persist_path)
         self._q: "queue.Queue[RuntimeEvent]" = queue.Queue()
@@ -279,12 +288,20 @@ class JarvisRuntime:
     def _ensure_llm_loaded(self, trace_id: str) -> None:
         if self._llm_loaded:
             return
+        # Circuit breaker gate for LLM
+        br = self.breakers.breakers.get("llm") if hasattr(self.breakers, "breakers") else None
+        if br is not None and not br.allow():
+            raise RuntimeError("llm breaker open")
         try:
             if self.llm_lifecycle is not None:
                 self.llm_lifecycle.ensure_role_ready("chat", trace_id=trace_id)
             else:
                 self.jarvis_app.stage_b.warmup()
+            if br is not None:
+                br.record_success()
         except Exception:
+            if br is not None:
+                br.record_failure()
             pass
         self._llm_loaded = True
         self._log_sm("llm.loaded", {})
@@ -339,14 +356,19 @@ class JarvisRuntime:
             try:
                 self._handle_event(ev)
             except StateTransitionError as e:
-                self._writer.write({"ts": time.time(), "trace_id": ev.trace_id, "event": "transition.invalid", "error": str(e), "state": self._state.value})
-                self.event_logger.log(ev.trace_id, "core.transition_invalid", {"error": str(e), "state": self._state.value})
-                self._recover(ev.trace_id, str(e))
+                je = self.error_reporter.report_exception(e, trace_id=ev.trace_id, subsystem="state_machine", context={"transition_invalid": True})
+                _ = self.recovery_policy.decide(je, subsystem="state_machine")
+                self._recover(ev.trace_id, "state_transition_error")
             except Exception as e:  # noqa: BLE001
-                tb = traceback.format_exc(limit=20)
-                self._writer.write({"ts": time.time(), "trace_id": ev.trace_id, "event": "error", "error": str(e), "traceback": tb})
-                self.event_logger.log(ev.trace_id, "core.error", {"error": str(e)})
-                self._recover(ev.trace_id, str(e))
+                je = self.error_reporter.report_exception(e, trace_id=ev.trace_id, subsystem="state_machine", context={"event": ev.type.value, "state": self._state.value})
+                decision = self.recovery_policy.decide(je, subsystem="state_machine")
+                # Always produce a user-facing reply for interactive inputs.
+                if ev.type in {EventType.TextInputReceived, EventType.WakeWordDetected, EventType.AudioCaptured, EventType.STTFailed}:
+                    try:
+                        self._finalize_reply(ev.trace_id, decision.user_message, intent={"id": "system.error", "source": "system", "confidence": 1.0})
+                    except Exception:
+                        pass
+                self._recover(ev.trace_id, je.code)
 
     def _recover(self, trace_id: str, reason: str) -> None:
         try:
@@ -484,7 +506,16 @@ class JarvisRuntime:
     def _start_speaking(self, trace_id: str, text: str) -> None:
         def run():
             try:
+                br = self.breakers.breakers.get("tts") if hasattr(self.breakers, "breakers") else None
+                if br is not None and not br.allow():
+                    raise RuntimeError("tts breaker open")
                 self.tts_adapter.speak(trace_id, text)
+                if br is not None:
+                    br.record_success()
+            except Exception as e:
+                if br is not None:
+                    br.record_failure()
+                self.error_reporter.report_exception(e, trace_id=trace_id, subsystem="tts", context={})
             finally:
                 self._enqueue(RuntimeEvent(trace_id=trace_id, source="system", type=EventType.SpeakComplete, payload={}))
 
@@ -506,11 +537,19 @@ class JarvisRuntime:
     def _start_transcribe(self, trace_id: str, wav_path: str) -> None:
         def run():
             try:
+                br = self.breakers.breakers.get("stt") if hasattr(self.breakers, "breakers") else None
+                if br is not None and not br.allow():
+                    raise RuntimeError("stt breaker open")
                 text = self.voice_adapter.transcribe(wav_path)
                 if not text.strip():
                     raise RuntimeError("empty transcription")
+                if br is not None:
+                    br.record_success()
                 self._enqueue(RuntimeEvent(trace_id=trace_id, source="voice", type=EventType.TranscriptionReady, payload={"text": text}))
             except Exception as e:
+                if br is not None:
+                    br.record_failure()
+                self.error_reporter.report_exception(e, trace_id=trace_id, subsystem="stt", context={})
                 self._enqueue(RuntimeEvent(trace_id=trace_id, source="voice", type=EventType.STTFailed, payload={"error": str(e)}))
 
         self._executor.submit(run)

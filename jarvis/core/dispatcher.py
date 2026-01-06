@@ -6,6 +6,8 @@ from typing import Any, Dict, Optional, Tuple
 from jarvis.core.events import EventLogger
 from jarvis.core.module_registry import ModuleRegistry
 from jarvis.core.security import PermissionPolicy, SecurityManager
+from jarvis.core.error_reporter import ErrorReporter
+from jarvis.core.errors import AdminRequiredError, JarvisError, PermissionDeniedError
 
 
 @dataclass(frozen=True)
@@ -32,12 +34,14 @@ class Dispatcher:
         security: SecurityManager,
         event_logger: EventLogger,
         logger,
+        error_reporter: ErrorReporter | None = None,
     ):
         self.registry = registry
         self.policy = policy
         self.security = security
         self.event_logger = event_logger
         self.logger = logger
+        self.error_reporter = error_reporter or ErrorReporter()
 
     def _enforce(self, trace_id: str, intent_id: str) -> Tuple[bool, str]:
         perms = self.policy.for_intent(intent_id)
@@ -61,12 +65,16 @@ class Dispatcher:
         # MODULE_META fail-safe: resource_intensive => admin-only regardless of config.
         if bool(mod.meta.get("resource_intensive", False)) and not self.security.is_admin():
             self.event_logger.log(trace_id, "dispatch.denied", {"intent_id": intent_id, "reason": "module resource_intensive requires admin"})
-            return DispatchResult(ok=False, reply="Admin required for this action.", denied_reason="admin required")
+            err = AdminRequiredError()
+            self.error_reporter.write_error(err, trace_id=trace_id, subsystem="dispatcher", internal_exc=None)
+            return DispatchResult(ok=False, reply=err.user_message, denied_reason="admin required")
 
         allowed, reason = self._enforce(trace_id, intent_id)
         self.event_logger.log(trace_id, "dispatch.permission_check", {"intent_id": intent_id, "allowed": allowed, "reason": reason})
         if not allowed:
-            return DispatchResult(ok=False, reply="Admin required for this action.", denied_reason=reason)
+            err = AdminRequiredError()
+            self.error_reporter.write_error(err, trace_id=trace_id, subsystem="dispatcher", internal_exc=None)
+            return DispatchResult(ok=False, reply=err.user_message, denied_reason=reason)
 
         # Touch admin session on successful execution path.
         if self.security.is_admin():
@@ -77,7 +85,8 @@ class Dispatcher:
             out = mod.handler(intent_id=intent_id, args=args, context=context)
             return DispatchResult(ok=True, reply="", module_output=out)
         except Exception as e:  # noqa: BLE001
-            self.logger.error(f"[{trace_id}] Module error: {e}")
-            self.event_logger.log(trace_id, "dispatch.error", {"intent_id": intent_id, "module_id": module_id, "error": str(e)})
-            return DispatchResult(ok=False, reply="Something went wrong while executing that.", denied_reason="error")
+            je = self.error_reporter.report_exception(e, trace_id=trace_id, subsystem="dispatcher", context={"intent_id": intent_id, "module_id": module_id})
+            self.logger.error(f"[{trace_id}] Module error: {je.code}")
+            self.event_logger.log(trace_id, "dispatch.error", {"intent_id": intent_id, "module_id": module_id, "error_code": je.code})
+            return DispatchResult(ok=False, reply=je.user_message, denied_reason=je.code)
 

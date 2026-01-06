@@ -111,6 +111,7 @@ class JobManager:
         poll_interval_ms: int = 200,
         event_logger: EventLogger,
         logger,
+        debug_tracebacks: bool = False,
         post_complete_hooks: Optional[Dict[str, Callable[[JobState], None]]] = None,
     ):
         self.jobs_dir = jobs_dir
@@ -126,6 +127,7 @@ class JobManager:
 
         self.event_logger = event_logger
         self.logger = logger
+        self.debug_tracebacks = bool(debug_tracebacks)
         self.post_complete_hooks = post_complete_hooks or {}
 
         self._ctx = mp.get_context("spawn")
@@ -417,7 +419,7 @@ class JobManager:
 
             proc = self._ctx.Process(
                 target=worker_main,
-                args=(job_id, st.trace_id, {"args": exec_args}, handler.handler_ref, q),
+                args=(job_id, st.trace_id, {"args": exec_args, "debug_tracebacks": self.debug_tracebacks}, handler.handler_ref, q),
                 daemon=True,
             )
 

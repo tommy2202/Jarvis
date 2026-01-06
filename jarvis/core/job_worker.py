@@ -59,7 +59,8 @@ def worker_main(job_id: str, trace_id: str, spec: Dict[str, Any], handler_ref: s
             raise TypeError("Job handler must return a dict (or None).")
         emit("finished", {"status": "SUCCEEDED", "result": result or {}})
     except Exception as e:  # noqa: BLE001
-        tb = traceback.format_exc(limit=50)
+        include_tb = bool(spec.get("debug_tracebacks", False))
+        tb = traceback.format_exc(limit=50) if include_tb else None
         emit(
             "error",
             {

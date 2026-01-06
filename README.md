@@ -393,3 +393,24 @@ Scripts:
 
 Authenticated public status only:
 - `GET /v1/secure/status`
+
+## Error handling & recovery policy
+
+Jarvis uses a unified, production-grade error policy to prevent crashes and fail safe:
+
+- **Typed taxonomy**: `jarvis/core/errors.py` defines stable error codes, safe user messages, severity, and redacted context.
+- **Error reporting**: `logs/errors.jsonl` stores structured error reports (secrets redacted; tracebacks off by default).
+- **Deterministic recovery**: `jarvis/core/recovery.py` decides actions (retry/fallback/sleep/abort) based on error type.
+- **Circuit breakers**: `jarvis/core/circuit_breaker.py` prevents thrashing when subsystems repeatedly fail (LLM/STT/TTS/etc.).
+
+Config: `config/recovery.json`:
+- debug flags (`include_tracebacks` default false)
+- retry/backoff for timeouts
+- breaker thresholds/window/cooldowns
+
+CLI diagnostics:
+- `/errors last [n]`
+- `/errors show <trace_id>`
+- `/errors export <path>`
+- `/health` (subsystem breaker states + last-known status)
+- `/debug enable|disable` (admin-only; toggles traceback logging temporarily)

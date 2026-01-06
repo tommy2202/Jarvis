@@ -131,3 +131,27 @@ class AppConfig(BaseModel):
     permissions: PermissionsConfig
     responses: ResponsesConfig
 
+
+class RecoveryConfigFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    debug: Dict[str, bool] = Field(default_factory=lambda: {"include_tracebacks": False, "log_prompts": False})
+    retry: Dict[str, int] = Field(default_factory=lambda: {"llm_timeout_max_retries": 1, "llm_timeout_backoff_ms": 200})
+    circuit_breakers: Dict[str, Dict[str, int]] = Field(default_factory=dict)
+
+
+class AppConfigV2(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    app: AppFileConfig
+    security: SecurityConfig
+    voice: VoiceConfig
+    models: ModelsConfig
+    web: WebConfig
+    jobs: JobsConfig
+    llm: LLMConfigFile
+    recovery: RecoveryConfigFile
+    state_machine: StateMachineConfig
+    modules_registry: ModulesRegistryConfig
+    modules: ModulesConfig
+    permissions: PermissionsConfig
+    responses: ResponsesConfig
+

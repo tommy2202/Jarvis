@@ -3,6 +3,8 @@ from __future__ import annotations
 import uuid
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
@@ -19,6 +21,9 @@ from jarvis.web.models import (
     MessageResponse,
 )
 from jarvis.web.middleware import WebSecurityMiddleware
+from jarvis.core.errors import JarvisError
+from jarvis.core.error_reporter import ErrorReporter
+from jarvis.core.errors import PermissionDeniedError
 
 
 def _is_localhost(request: Request) -> bool:
@@ -42,6 +47,7 @@ def create_app(
     remote_control_enabled: bool = True,
 ) -> FastAPI:
     app = FastAPI(title="Jarvis Remote", version="0.1.0")
+    reporter = ErrorReporter()
 
     if allowed_origins:
         if any(o == "*" for o in allowed_origins):
@@ -59,6 +65,27 @@ def create_app(
     from jarvis.core.security_events import SecurityAuditLogger
 
     app.middleware("http")(WebSecurityMiddleware(web_cfg=web_cfg, secure_store=secure_store, event_logger=event_logger, audit_logger=SecurityAuditLogger()))
+
+    @app.exception_handler(JarvisError)
+    async def jarvis_error_handler(request: Request, exc: JarvisError):
+        trace_id = getattr(getattr(request, "state", None), "trace_id", "web")
+        reporter.write_error(exc, trace_id=trace_id, subsystem="web", internal_exc=None)
+        code = 500
+        if exc.code in {"permission_denied", "admin_required"}:
+            code = 403
+        elif exc.code in {"validation_error"}:
+            code = 400
+        elif exc.code in {"rate_limited"}:
+            code = 429
+        elif exc.code in {"llm_unavailable"}:
+            code = 503
+        return JSONResponse(status_code=code, content={"detail": exc.user_message, "code": exc.code})
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_handler(request: Request, exc: RequestValidationError):
+        trace_id = getattr(getattr(request, "state", None), "trace_id", "web")
+        reporter.write_error(JarvisError(code="validation_error", user_message="Invalid request.", context={"errors": exc.errors()}), trace_id=trace_id, subsystem="web", internal_exc=None)
+        return JSONResponse(status_code=400, content={"detail": "Invalid request.", "code": "validation_error"})
 
     @app.get("/health")
     async def health():
@@ -163,9 +190,9 @@ def create_app(
         client_ip = getattr(getattr(request, "client", None), "host", None)
         allow_remote_unlock = bool(web_admin.get("allow_remote_unlock", False))
         if not allow_remote_unlock and not _is_localhost(request):
-            raise HTTPException(status_code=403, detail="Remote admin unlock disabled by policy.")
+            raise PermissionDeniedError("Remote admin unlock disabled by policy.")
         if client_ip not in allowed_admin_ips and not _is_localhost(request):
-            raise HTTPException(status_code=403, detail="Admin unlock not allowed from this IP.")
+            raise PermissionDeniedError("Admin unlock not allowed from this IP.")
         # Never log passphrase; EventLogger redacts anyway, but we avoid logging body entirely.
         ok = security_manager.verify_and_unlock_admin(req.passphrase)
         msg = "Admin unlocked." if ok else "Invalid passphrase or USB key missing."

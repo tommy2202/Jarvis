@@ -31,6 +31,9 @@ from jarvis.core.job_manager import (
     job_system_write_test_file,
 )
 from jarvis.core.runtime import JarvisRuntime, RuntimeConfig, TTSAdapter, VoiceAdapter
+from jarvis.core.error_reporter import ErrorReporter, ErrorReporterConfig
+from jarvis.core.recovery import RecoveryPolicy, RecoveryConfig
+from jarvis.core.circuit_breaker import CircuitBreaker, BreakerConfig, BreakerRegistry
 from jarvis.core.llm_lifecycle import LLMPolicy, LLMLifecycleController
 from jarvis.core.llm_router import LLMConfig as StageBLegacyConfig, StageBLLMRouter
 from jarvis.web.api import create_app
@@ -137,6 +140,24 @@ def main() -> None:
     config = get_config(logger=logger)
     cfg_obj = config.get()
 
+    # Error handling + recovery subsystem
+    recovery_cfg = RecoveryConfig.model_validate(cfg_obj.recovery.model_dump())
+    error_reporter = ErrorReporter(cfg=ErrorReporterConfig(include_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False))))
+    recovery_policy = RecoveryPolicy(recovery_cfg)
+    breakers_map = {}
+    for name, bc in (recovery_cfg.circuit_breakers or {}).items():
+        try:
+            breakers_map[name] = CircuitBreaker(
+                BreakerConfig(
+                    failures=int(bc.get("failures", 3)),
+                    window_seconds=int(bc.get("window_seconds", 30)),
+                    cooldown_seconds=int(bc.get("cooldown_seconds", 30)),
+                )
+            )
+        except Exception:
+            continue
+    breaker_registry = BreakerRegistry(breakers_map)
+
     secure_store = SecureStore(
         usb_key_path=cfg_obj.security.usb_key_path,
         store_path=cfg_obj.security.secure_store_path,
@@ -201,7 +222,7 @@ def main() -> None:
     stage_b = StageBLLMRouter(StageBLegacyConfig(mock_mode=True), lifecycle=llm_lifecycle)
 
     policy = PermissionPolicy(intents=dict(perms_cfg.get("intents") or {}))
-    dispatcher = Dispatcher(registry=registry, policy=policy, security=security, event_logger=event_logger, logger=logger)
+    dispatcher = Dispatcher(registry=registry, policy=policy, security=security, event_logger=event_logger, logger=logger, error_reporter=error_reporter)
 
     jarvis = JarvisApp(
         stage_a=stage_a,
@@ -225,6 +246,7 @@ def main() -> None:
         poll_interval_ms=int(jobs_cfg.poll_interval_ms),
         event_logger=event_logger,
         logger=logger,
+        debug_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False)),
     )
 
     # Register allowlisted job kinds (no shell, no arbitrary code).
@@ -336,6 +358,9 @@ def main() -> None:
         llm_lifecycle=llm_lifecycle,
         voice_adapter=voice_adapter,
         tts_adapter=tts_adapter,
+        error_reporter=error_reporter,
+        recovery_policy=recovery_policy,
+        breakers=breaker_registry,
     )
     runtime.start()
 
@@ -584,6 +609,57 @@ def main() -> None:
                 print("Run: python scripts/rotate_usb_key.py (use --apply to swap automatically)")
                 continue
             print("Usage: /secure status|keys|get <k> [--show]|set <k>|delete <k>|backup|restore list|restore <backup>|rotate")
+            continue
+        if text.startswith("/errors"):
+            parts = text.split()
+            if len(parts) == 1 or (len(parts) >= 2 and parts[1] == "last"):
+                n = int(parts[2]) if len(parts) >= 3 else 20
+                for e in error_reporter.tail(n):
+                    print(e)
+                continue
+            if len(parts) >= 3 and parts[1] == "show":
+                tid = parts[2]
+                for e in error_reporter.by_trace_id(tid):
+                    print(e)
+                continue
+            if len(parts) >= 3 and parts[1] == "export":
+                path = parts[2]
+                import json, os
+
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(error_reporter.tail(1000), f, indent=2, ensure_ascii=False)
+                print(f"Exported to {path}")
+                continue
+            print("Usage: /errors last [n] | /errors show <trace_id> | /errors export <path>")
+            continue
+        if text == "/health":
+            print(
+                {
+                    "runtime": runtime.get_status(),
+                    "breakers": breaker_registry.status(),
+                    "secure_store": secure_store.export_public_status(),
+                    "llm": (llm_lifecycle.get_status() if llm_lifecycle else {"enabled": False}),
+                }
+            )
+            continue
+        if text.startswith("/debug"):
+            parts = text.split()
+            if len(parts) >= 2 and parts[1] == "enable":
+                if not security.is_admin():
+                    print("Admin required.")
+                    continue
+                error_reporter.set_debug_override(True)
+                print("Debug enabled (tracebacks may be logged).")
+                continue
+            if len(parts) >= 2 and parts[1] == "disable":
+                if not security.is_admin():
+                    print("Admin required.")
+                    continue
+                error_reporter.set_debug_override(False)
+                print("Debug disabled.")
+                continue
+            print("Usage: /debug enable|disable")
             continue
         if text.startswith("/llm"):
             parts = text.split()
