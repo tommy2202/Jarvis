@@ -414,3 +414,20 @@ CLI diagnostics:
 - `/errors export <path>`
 - `/health` (subsystem breaker states + last-known status)
 - `/debug enable|disable` (admin-only; toggles traceback logging temporarily)
+
+## Testing
+
+Run tests:
+
+```bash
+pytest
+pytest -q
+pytest --maxfail=1
+```
+
+Coverage:
+
+```bash
+coverage run -m pytest
+coverage report -m
+```

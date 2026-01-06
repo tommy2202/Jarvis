@@ -47,9 +47,13 @@ class Dispatcher:
         perms = self.policy.for_intent(intent_id)
         requires_admin = bool(perms.get("requires_admin", False))
         resource_intensive = bool(perms.get("resource_intensive", False))
+        network_access = bool(perms.get("network_access", False))
 
         # Fail-safe: resource-intensive intents are admin-only
         if resource_intensive:
+            requires_admin = True
+        # Fail-safe: intents requiring network are admin-only (offline-first default).
+        if network_access:
             requires_admin = True
 
         if requires_admin and not self.security.is_admin():

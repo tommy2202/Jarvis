@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "coverage>=7.4.0",
   "httpx>=0.27.0",
   "pytest>=8.0.0",
 ]
@@ -34,6 +35,14 @@ voice = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.coverage.run]
+branch = true
+source = ["jarvis"]
+
+[tool.coverage.report]
+skip_empty = true
+show_missing = true
 
 [build-system]
 requires = ["setuptools>=68.0.0"]
