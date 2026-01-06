@@ -8,8 +8,8 @@ from jarvis.core.config_loader import ConfigLoader, ConfigPaths
 from jarvis.core.crypto import SecureStore, generate_usb_master_key_bytes, write_usb_key
 from jarvis.core.setup_wizard import SetupWizard
 from jarvis.web.api import create_app
-from jarvis.web.auth import build_api_key_auth
 from jarvis.core.jarvis_app import MessageResponse as CoreMessageResponse
+from jarvis.web.security.auth import ApiKeyStore
 
 
 class DummyLogger:
@@ -41,24 +41,42 @@ class FakeEventLogger:
 
 
 def test_web_auth_rejects_missing_or_invalid_key():
-    auth = build_api_key_auth(api_key="abc", event_logger=FakeEventLogger())
+    # Hardened auth uses encrypted key store.
+    from jarvis.core.crypto import generate_usb_master_key_bytes, write_usb_key
+    from jarvis.core.crypto import SecureStore
+
+    import pathlib
+
+    tmp = pathlib.Path("logs")  # unused; test uses in-memory-like store
+    # Use temp store under pytest tmp via monkeypatch in other tests; here just use /tmp
+    # (FastAPI app needs a secure_store)
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    usb = f"{d}/usb.bin"
+    write_usb_key(usb, generate_usb_master_key_bytes())
+    store = SecureStore(usb_key_path=usb, store_path=f"{d}/store.enc")
+    key = ApiKeyStore(store).create_key(scopes=["read", "message", "admin"])["key"]
+
     app = create_app(
         jarvis_app=FakeJarvis(),
         security_manager=FakeSecurity(),
         event_logger=FakeEventLogger(),
         logger=DummyLogger(),
-        auth_dep=auth,
+        auth_dep=None,
         allowed_origins=[],
         enable_web_ui=False,
         allow_remote_admin_unlock=False,
         remote_control_enabled=True,
+        secure_store=store,
+        web_cfg={"max_request_bytes": 32768, "rate_limits": {"per_ip_per_minute": 100, "per_key_per_minute": 100, "admin_per_minute": 100}, "lockout": {"strike_threshold": 10, "lockout_minutes": 15, "permanent_after": 3}, "admin": {"allow_remote_unlock": False, "allowed_admin_ips": ["127.0.0.1"]}},
     )
     c = TestClient(app)
     r1 = c.post("/v1/message", json={"message": "hi"})
     assert r1.status_code == 401
     r2 = c.post("/v1/message", headers={"X-API-Key": "nope"}, json={"message": "hi"})
     assert r2.status_code == 401
-    r3 = c.post("/v1/message", headers={"X-API-Key": "abc"}, json={"message": "hi"})
+    r3 = c.post("/v1/message", headers={"X-API-Key": key}, json={"message": "hi"})
     assert r3.status_code == 200
 
 

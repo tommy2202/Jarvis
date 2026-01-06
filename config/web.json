@@ -1,9 +1,26 @@
 {
   "enabled": false,
-  "host": "0.0.0.0",
-  "port": 8787,
+  "bind_host": "127.0.0.1",
+  "port": 8000,
+  "allow_remote": false,
   "allowed_origins": [],
-  "enable_web_ui": true,
-  "allow_remote_admin_unlock": false
+  "max_request_bytes": 32768,
+  "rate_limits": {
+    "per_ip_per_minute": 60,
+    "per_key_per_minute": 30,
+    "admin_per_minute": 5
+  },
+  "lockout": {
+    "strike_threshold": 5,
+    "lockout_minutes": 15,
+    "permanent_after": 3
+  },
+  "admin": {
+    "allow_remote_unlock": false,
+    "allowed_admin_ips": [
+      "127.0.0.1"
+    ]
+  },
+  "enable_web_ui": true
 }
 

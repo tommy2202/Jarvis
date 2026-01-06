@@ -80,6 +80,46 @@ curl -X POST "http://<jarvis-host>:8787/v1/message" ^
   -d "{\"message\":\"play Coldplay on Spotify\",\"client\":{\"name\":\"phone\"}}"
 ```
 
+## Web security hardening (important)
+
+Jarvis’s web interface is **safe by default**:
+- Default bind is **localhost only** (`127.0.0.1`)
+- Remote exposure must be explicitly enabled: `config/web.json` → `"allow_remote": true`
+- If `"allow_remote": true` and the **USB key is missing**, Jarvis **refuses to start** the web server.
+
+### API keys (encrypted, scoped, revocable)
+
+API keys are stored **only** in the encrypted secure store and support:
+- scopes: `read`, `message`, `admin`
+- revocation + metadata
+- per-key IP allowlists (optional)
+
+Rotate/create a key (USB required):
+
+```bash
+python scripts/rotate_api_key.py
+```
+
+Or via CLI (admin required):
+- `/web rotate-key`
+- `/web list-keys`
+- `/web revoke-key <id>`
+
+### Rate limits + lockouts
+
+Defaults (configurable in `config/web.json`):
+- total requests: **60/min per IP**
+- messages: **30/min per API key**
+- admin actions: **5/min per API key**
+
+Failed auth / rate limit hits accrue **strikes** and can trigger lockouts.
+Lockout state is persisted in the encrypted secure store.
+
+### Audit logging
+
+Security events are written to:
+- `logs/security.log` (JSONL)
+
 ## Adding a module (setup wizard workflow)
 
 1) Drop a new module file in `jarvis/modules/` with:

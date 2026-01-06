@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
@@ -18,6 +18,7 @@ from jarvis.web.models import (
     MessageRequest,
     MessageResponse,
 )
+from jarvis.web.middleware import WebSecurityMiddleware
 
 
 def _is_localhost(request: Request) -> bool:
@@ -30,9 +31,11 @@ def create_app(
     security_manager,
     event_logger,
     logger,
-    auth_dep: Optional[Callable[..., object]],
+    auth_dep: Optional[Callable[..., object]],  # legacy, ignored by hardened middleware
     job_manager=None,
     runtime=None,
+    secure_store=None,
+    web_cfg: Optional[dict] = None,
     allowed_origins: list[str] | None = None,
     enable_web_ui: bool = True,
     allow_remote_admin_unlock: bool = False,
@@ -41,6 +44,8 @@ def create_app(
     app = FastAPI(title="Jarvis Remote", version="0.1.0")
 
     if allowed_origins:
+        if any(o == "*" for o in allowed_origins):
+            raise ValueError("Wildcard CORS origins are not allowed.")
         app.add_middleware(
             CORSMiddleware,
             allow_origins=allowed_origins,
@@ -48,15 +53,12 @@ def create_app(
             allow_methods=["*"],
             allow_headers=["*"],
         )
+    # Hardened security middleware (requires secure_store)
+    if secure_store is None or web_cfg is None:
+        raise ValueError("secure_store and web_cfg required for hardened web app.")
+    from jarvis.core.security_events import SecurityAuditLogger
 
-    @app.middleware("http")
-    async def log_requests(request: Request, call_next):
-        # Every inbound web request gets a trace_id (even auth failures).
-        request.state.trace_id = uuid.uuid4().hex
-        trace_id = request.state.trace_id
-        client_host = getattr(getattr(request, "client", None), "host", None)
-        event_logger.log(trace_id, "web.request", {"path": str(request.url.path), "method": request.method, "client_host": client_host})
-        return await call_next(request)
+    app.middleware("http")(WebSecurityMiddleware(web_cfg=web_cfg, secure_store=secure_store, event_logger=event_logger, audit_logger=SecurityAuditLogger()))
 
     @app.get("/health")
     async def health():
@@ -101,13 +103,8 @@ def create_app(
 </body>
 </html>"""
 
-    def _require_auth():
-        if auth_dep is None:
-            raise HTTPException(status_code=503, detail="Web auth not configured (USB key + API key required).")
-        return auth_dep
-
     @app.post("/v1/message", response_model=MessageResponse)
-    async def post_message(req: MessageRequest, request: Request, _=Depends(_require_auth())):
+    async def post_message(req: MessageRequest, request: Request):
         if not remote_control_enabled:
             raise HTTPException(status_code=503, detail="Remote control disabled (USB key required).")
         if runtime is not None:
@@ -133,23 +130,32 @@ def create_app(
         )
 
     @app.get("/v1/status")
-    async def status(request: Request, _=Depends(_require_auth())):
+    async def status(request: Request):
         if runtime is None:
             return {"state": "unknown"}
         return runtime.get_status()
 
     @app.get("/v1/llm/status")
-    async def llm_status(request: Request, _=Depends(_require_auth())):
+    async def llm_status(request: Request):
         if runtime is None or getattr(runtime, "llm_lifecycle", None) is None:
             return {"enabled": False}
         return runtime.llm_lifecycle.get_status()
 
     @app.post("/v1/admin/unlock", response_model=AdminUnlockResponse)
-    async def admin_unlock(req: AdminUnlockRequest, request: Request, _=Depends(_require_auth())):
+    async def admin_unlock(req: AdminUnlockRequest, request: Request):
         if not remote_control_enabled:
             raise HTTPException(status_code=503, detail="Remote control disabled (USB key required).")
-        if not allow_remote_admin_unlock and not _is_localhost(request):
+        # Extra hardening:
+        # - disabled by default (config)
+        # - only allow from configured IP allowlist
+        web_admin = (web_cfg.get("admin") or {}) if isinstance(web_cfg, dict) else {}
+        allowed_admin_ips = set(web_admin.get("allowed_admin_ips") or ["127.0.0.1"])
+        client_ip = getattr(getattr(request, "client", None), "host", None)
+        allow_remote_unlock = bool(web_admin.get("allow_remote_unlock", False))
+        if not allow_remote_unlock and not _is_localhost(request):
             raise HTTPException(status_code=403, detail="Remote admin unlock disabled by policy.")
+        if client_ip not in allowed_admin_ips and not _is_localhost(request):
+            raise HTTPException(status_code=403, detail="Admin unlock not allowed from this IP.")
         # Never log passphrase; EventLogger redacts anyway, but we avoid logging body entirely.
         ok = security_manager.verify_and_unlock_admin(req.passphrase)
         msg = "Admin unlocked." if ok else "Invalid passphrase or USB key missing."
@@ -158,7 +164,7 @@ def create_app(
     # Jobs API (authenticated; allowlist enforced by JobManager)
     if job_manager is not None:
         @app.post("/v1/jobs", response_model=JobSubmitResponse)
-        async def submit_job(req: JobSubmitRequest, request: Request, _=Depends(_require_auth())):
+        async def submit_job(req: JobSubmitRequest, request: Request):
             if not remote_control_enabled:
                 raise HTTPException(status_code=503, detail="Remote control disabled (USB key required).")
             try:
@@ -174,12 +180,12 @@ def create_app(
             return JobSubmitResponse(job_id=job_id)
 
         @app.get("/v1/jobs", response_model=JobListResponse)
-        async def list_jobs(request: Request, _=Depends(_require_auth())):
+        async def list_jobs(request: Request):
             jobs = [j.model_dump() for j in job_manager.list_jobs()]
             return JobListResponse(jobs=jobs)
 
         @app.get("/v1/jobs/{job_id}", response_model=JobStateResponse)
-        async def get_job(job_id: str, request: Request, _=Depends(_require_auth())):
+        async def get_job(job_id: str, request: Request):
             try:
                 job = job_manager.get_job(job_id)
             except KeyError as e:
@@ -187,7 +193,7 @@ def create_app(
             return JobStateResponse(job=job.model_dump())
 
         @app.post("/v1/jobs/{job_id}/cancel")
-        async def cancel_job(job_id: str, request: Request, _=Depends(_require_auth())):
+        async def cancel_job(job_id: str, request: Request):
             ok = job_manager.cancel_job(job_id)
             return {"ok": ok}
 

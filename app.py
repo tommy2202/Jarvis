@@ -34,7 +34,9 @@ from jarvis.core.runtime import JarvisRuntime, RuntimeConfig, TTSAdapter, VoiceA
 from jarvis.core.llm_lifecycle import LLMPolicy, LLMLifecycleController
 from jarvis.core.llm_router import LLMConfig as StageBLegacyConfig, StageBLLMRouter
 from jarvis.web.api import create_app
-from jarvis.web.auth import build_api_key_auth
+from jarvis.web.auth import build_api_key_auth  # legacy
+from jarvis.web.security.auth import ApiKeyStore
+from jarvis.web.security.strikes import StrikeManager, LockoutConfig
 
 
 def _load_json(cfg: ConfigLoader, path: str, default: Dict[str, Any]) -> Dict[str, Any]:
@@ -75,53 +77,74 @@ def _start_web_thread(
     web_cfg = _load_json(
         cfg,
         paths.web,
-        default={"enabled": False, "host": "0.0.0.0", "port": 8787, "allowed_origins": [], "enable_web_ui": True, "allow_remote_admin_unlock": False},
+        default={
+            "enabled": False,
+            "bind_host": "127.0.0.1",
+            "port": 8000,
+            "allow_remote": False,
+            "allowed_origins": [],
+            "max_request_bytes": 32768,
+            "rate_limits": {"per_ip_per_minute": 60, "per_key_per_minute": 30, "admin_per_minute": 5},
+            "lockout": {"strike_threshold": 5, "lockout_minutes": 15, "permanent_after": 3},
+            "admin": {"allow_remote_unlock": False, "allowed_admin_ips": ["127.0.0.1"]},
+            "enable_web_ui": True,
+        },
     )
     if not web_cfg.get("enabled", False):
         return
 
     enable_web_ui = bool(web_cfg.get("enable_web_ui", True))
-    allow_remote_admin_unlock = bool(web_cfg.get("allow_remote_admin_unlock", False))
     allowed_origins = web_cfg.get("allowed_origins") or []
 
-    remote_control_enabled = True
-    auth = None
+    allow_remote = bool(web_cfg.get("allow_remote", False))
+    bind_host = str(web_cfg.get("bind_host") or "127.0.0.1")
+    port = int(web_cfg.get("port") or 8000)
 
-    if not secure_store.is_unlocked():
-        # Safest: do not expose remote control without USB key.
-        remote_control_enabled = False
-        host = "127.0.0.1"
-        port = int(web_cfg.get("port", 8787))
-        logger.warning("USB key missing: starting web server on localhost only with remote control disabled.")
+    # Secure Binding & Exposure Rules:
+    # - Default bind: localhost only
+    # - Remote requires explicit allow_remote + USB key present
+    if not allow_remote:
+        if bind_host != "127.0.0.1":
+            logger.warning("Web allow_remote=false: forcing bind_host=127.0.0.1")
+        bind_host = "127.0.0.1"
     else:
-        host = str(web_cfg.get("host") or "0.0.0.0")
-        port = int(web_cfg.get("port") or 8787)
-        api_key = secure_store.secure_get("web.api_key")
-        if not api_key:
-            logger.error("Web enabled but API key not found. Run: python scripts/rotate_api_key.py")
+        if not secure_store.is_unlocked():
+            logger.error("Refusing to start web server: allow_remote=true requires USB key present.")
             return
-        auth = build_api_key_auth(api_key=str(api_key), event_logger=event_logger)
+        from jarvis.core.security_events import SecurityAuditLogger
+
+        SecurityAuditLogger().log(
+            trace_id="web",
+            severity="HIGH",
+            event="web.remote_enabled",
+            ip=None,
+            endpoint="startup",
+            outcome="enabled",
+            details={"bind_host": bind_host, "port": port},
+        )
 
     fastapi_app = create_app(
         jarvis_app=jarvis,
         security_manager=security,
         event_logger=event_logger,
         logger=logger,
-        auth_dep=auth,
+        auth_dep=None,
         job_manager=job_manager,
         runtime=runtime,
+        secure_store=secure_store,
+        web_cfg=web_cfg,
         allowed_origins=list(allowed_origins),
         enable_web_ui=enable_web_ui,
-        allow_remote_admin_unlock=allow_remote_admin_unlock,
-        remote_control_enabled=remote_control_enabled,
+        allow_remote_admin_unlock=False,
+        remote_control_enabled=secure_store.is_unlocked(),
     )
 
     def run() -> None:
-        uvicorn.run(fastapi_app, host=host, port=port, log_level="info")
+        uvicorn.run(fastapi_app, host=bind_host, port=port, log_level="info")
 
     t = threading.Thread(target=run, name="jarvis-web", daemon=True)
     t.start()
-    logger.info(f"Web server started on http://{host}:{port}")
+    logger.info(f"Web server started on http://{bind_host}:{port}")
 
 
 def main() -> None:
@@ -448,6 +471,78 @@ def main() -> None:
                 print("Unknown run target. Use: health_check | cleanup")
                 continue
             print("Usage: /jobs list [STATUS] | /jobs show <id> | /jobs cancel <id> | /jobs tail <id> [n] | /jobs run health_check|cleanup")
+            continue
+        if text.startswith("/web"):
+            parts = text.split()
+            if len(parts) == 1 or (len(parts) >= 2 and parts[1] == "status"):
+                web_cfg = _load_json(cfg, paths.web, default={})
+                st = {"config": web_cfg}
+                if secure_store.is_unlocked():
+                    try:
+                        ks = ApiKeyStore(secure_store).list_keys()
+                        st["keys"] = [{"id": k.id, "scopes": k.scopes, "revoked": k.revoked, "last_used_at": k.last_used_at, "lockouts": k.lockouts} for k in ks]
+                        st["lockouts"] = StrikeManager(secure_store, LockoutConfig.model_validate((web_cfg.get("lockout") or {}))).get_lockouts()
+                    except Exception as e:
+                        st["error"] = str(e)
+                else:
+                    st["error"] = "USB key missing (secure store locked)."
+                print(st)
+                continue
+            # admin required for mutating operations
+            if not security.is_admin():
+                print("Admin required.")
+                continue
+            if not secure_store.is_unlocked():
+                print("USB key required.")
+                continue
+            web_cfg = _load_json(cfg, paths.web, default={})
+            key_store = ApiKeyStore(secure_store)
+            strikes = StrikeManager(secure_store, LockoutConfig.model_validate((web_cfg.get("lockout") or {})))
+            from jarvis.core.security_events import SecurityAuditLogger
+
+            audit = SecurityAuditLogger()
+
+            if len(parts) >= 2 and parts[1] == "enable":
+                web_cfg["enabled"] = True
+                web_cfg["bind_host"] = "127.0.0.1"
+                web_cfg["allow_remote"] = False
+                cfg.save(paths.web, web_cfg)
+                audit.log(trace_id="cli", severity="INFO", event="web.config", ip=None, endpoint="cli", outcome="enabled", details={"enabled": True})
+                print("Web enabled (localhost only). Restart app.py.")
+                continue
+            if len(parts) >= 2 and parts[1] == "disable":
+                web_cfg["enabled"] = False
+                cfg.save(paths.web, web_cfg)
+                audit.log(trace_id="cli", severity="INFO", event="web.config", ip=None, endpoint="cli", outcome="disabled", details={"enabled": False})
+                print("Web disabled. Restart app.py.")
+                continue
+            if len(parts) >= 2 and parts[1] == "rotate-key":
+                rec = key_store.create_key(scopes=["read", "message", "admin"])
+                audit.log(trace_id="cli", severity="HIGH", event="web.key.created", ip=None, endpoint="cli", outcome="ok", details={"key_id": rec["id"]})
+                print("New API key created (store this safely; it will not be shown again):")
+                print(rec["key"])
+                continue
+            if len(parts) >= 2 and parts[1] == "list-keys":
+                ks = key_store.list_keys()
+                for k in ks:
+                    print({"id": k.id, "scopes": k.scopes, "revoked": k.revoked, "created_at": k.created_at, "last_used_at": k.last_used_at, "allowed_ips": k.allowed_ips, "lockouts": k.lockouts})
+                continue
+            if len(parts) >= 3 and parts[1] == "revoke-key":
+                kid = parts[2]
+                ok = key_store.revoke_key(kid, reason="revoked_by_admin")
+                audit.log(trace_id="cli", severity="HIGH", event="web.key.revoked", ip=None, endpoint="cli", outcome="ok" if ok else "not_found", details={"key_id": kid})
+                print("Revoked." if ok else "Key not found/already revoked.")
+                continue
+            if len(parts) >= 3 and parts[1] == "unlock-ip":
+                ip = parts[2]
+                ok = strikes.unlock_ip(ip)
+                audit.log(trace_id="cli", severity="HIGH", event="web.lockout.cleared", ip=ip, endpoint="cli", outcome="ok" if ok else "not_found", details={})
+                print("Unlocked." if ok else "No lockout for IP.")
+                continue
+            if len(parts) >= 2 and parts[1] == "locks":
+                print(strikes.get_lockouts())
+                continue
+            print("Usage: /web status | /web enable | /web disable | /web rotate-key | /web list-keys | /web revoke-key <id> | /web unlock-ip <ip> | /web locks")
             continue
         if text.startswith("/llm"):
             parts = text.split()

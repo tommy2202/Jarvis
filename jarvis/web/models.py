@@ -2,26 +2,30 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class ClientInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: Optional[str] = None
     id: Optional[str] = None
 
 
 class MessageRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=4000)
+    model_config = ConfigDict(extra="forbid")
+    message: str = Field(min_length=1, max_length=2000)
     client: Optional[ClientInfo] = None
 
 
 class IntentInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     id: str
     source: str
     confidence: float
 
 
 class MessageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     trace_id: str
     reply: str
     intent: IntentInfo
@@ -30,15 +34,18 @@ class MessageResponse(BaseModel):
 
 
 class AdminUnlockRequest(BaseModel):
-    passphrase: str = Field(min_length=1, max_length=512)
+    model_config = ConfigDict(extra="forbid")
+    passphrase: str = Field(min_length=1, max_length=256)
 
 
 class AdminUnlockResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     ok: bool
     message: str
 
 
 class JobSubmitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     kind: str = Field(min_length=1, max_length=128)
     args: Dict[str, Any] = Field(default_factory=dict)
     priority: int = Field(default=50, ge=0, le=1000)
@@ -46,13 +53,16 @@ class JobSubmitRequest(BaseModel):
 
 
 class JobSubmitResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     job_id: str
 
 
 class JobStateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     job: Dict[str, Any]
 
 
 class JobListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     jobs: list[Dict[str, Any]]
 

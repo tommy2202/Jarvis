@@ -4,6 +4,7 @@ import secrets
 
 from jarvis.core.config_loader import ConfigLoader, ConfigPaths
 from jarvis.core.crypto import SecureStore
+from jarvis.web.security.auth import ApiKeyStore
 
 
 def main() -> None:
@@ -17,10 +18,11 @@ def main() -> None:
     if not store.is_unlocked():
         raise SystemExit("USB key missing: cannot create/rotate API key.")
 
-    api_key = secrets.token_urlsafe(32)
-    store.secure_set("web.api_key", api_key)
-    print("Rotated web API key (stored encrypted). New key:")
-    print(api_key)
+    ks = ApiKeyStore(store)
+    rec = ks.create_key(scopes=["read", "message", "admin"])
+    print("Created new web API key (stored encrypted). New key (shown once):")
+    print(rec["key"])
+    print(f"Key id: {rec['id']}")
 
 
 if __name__ == "__main__":
