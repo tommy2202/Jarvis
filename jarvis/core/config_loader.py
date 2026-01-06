@@ -70,6 +70,10 @@ class ConfigPaths:
     def jobs(self) -> str:
         return os.path.join(self.config_dir, "jobs.json")
 
+    @property
+    def state_machine(self) -> str:
+        return os.path.join(self.config_dir, "state_machine.json")
+
 
 class ConfigLoader:
     def __init__(self, paths: ConfigPaths):

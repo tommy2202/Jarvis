@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -29,6 +30,7 @@ from jarvis.core.job_manager import (
     job_system_sleep_llm,
     job_system_write_test_file,
 )
+from jarvis.core.runtime import JarvisRuntime, RuntimeConfig, TTSAdapter, VoiceAdapter
 from jarvis.web.api import create_app
 from jarvis.web.auth import build_api_key_auth
 
@@ -66,6 +68,7 @@ def _start_web_thread(
     event_logger: EventLogger,
     logger,
     job_manager: JobManager | None,
+    runtime: JarvisRuntime | None,
 ) -> None:
     web_cfg = _load_json(
         cfg,
@@ -104,6 +107,7 @@ def _start_web_thread(
         logger=logger,
         auth_dep=auth,
         job_manager=job_manager,
+        runtime=runtime,
         allowed_origins=list(allowed_origins),
         enable_web_ui=enable_web_ui,
         allow_remote_admin_unlock=allow_remote_admin_unlock,
@@ -270,53 +274,89 @@ def main() -> None:
         }
     )
 
-    _start_web_thread(jarvis, security, secure_store, cfg, paths, event_logger, logger, job_manager)
+    # Core Runtime State Machine
+    sm_cfg_raw = _load_json(
+        cfg,
+        paths.state_machine,
+        default={
+            "idle_sleep_seconds": 45,
+            "timeouts": {"LISTENING": 8, "TRANSCRIBING": 15, "UNDERSTANDING": 10, "EXECUTING": 20, "SPEAKING": 20},
+            "enable_voice": False,
+            "enable_tts": True,
+            "enable_wake_word": True,
+            "max_concurrent_interactions": 1,
+            "busy_policy": "queue",
+            "result_ttl_seconds": 120,
+        },
+    )
+    sm_cfg = RuntimeConfig.model_validate(sm_cfg_raw)
 
-    # Voice stack (optional; safe if deps/models missing)
-    voice_controller: Optional[object] = None
-    voice_cfg = _load_json(cfg, "config/voice.json", default={"enabled": False})
-    models_cfg = _load_json(cfg, "config/models.json", default={"vosk_model_path": "", "faster_whisper_model_path": ""})
-    if args.mode in {"voice", "hybrid"} and bool(voice_cfg.get("enabled", False)):
+    # Build optional voice adapters (reuse existing voice package components)
+    voice_adapter = None
+    tts_adapter = None
+    if sm_cfg.enable_tts:
         try:
-            from jarvis.voice.state_machine import VoiceConfig, VoiceController
-        except Exception as e:
-            logger.warning(f"Voice stack not available: {e}")
-            voice_controller = None
-        else:
-            vc = VoiceConfig(
-                enabled=bool(voice_cfg.get("enabled", False)),
-                wake_word_engine=str(voice_cfg.get("wake_word_engine", "porcupine")),
-                wake_word=str(voice_cfg.get("wake_word", "jarvis")),
-                mic_device_index=voice_cfg.get("mic_device_index", None),
-                stt_backend_primary=str(voice_cfg.get("stt_backend_primary", "vosk")),
-                stt_backend_fallback=str(voice_cfg.get("stt_backend_fallback", "faster_whisper")),
-                tts_backend_primary=str(voice_cfg.get("tts_backend_primary", "sapi")),
-                tts_backend_fallback=str(voice_cfg.get("tts_backend_fallback", "pyttsx3")),
-                listen_seconds=float(voice_cfg.get("listen_seconds", 8)),
-                sample_rate=int(voice_cfg.get("sample_rate", 16000)),
-                idle_sleep_seconds=float(voice_cfg.get("idle_sleep_seconds", 45)),
-                confirm_beep=bool(voice_cfg.get("confirm_beep", True)),
-                audio_retention_files=int(voice_cfg.get("audio_retention_files", 25)),
-                allow_voice_admin_unlock=bool(voice_cfg.get("allow_voice_admin_unlock", False)),
-                thinking_timeout_seconds=float(voice_cfg.get("thinking_timeout_seconds", 15)),
-            )
-            voice_controller = VoiceController(
-                cfg=vc,
-                models_cfg=models_cfg,
-                secure_store=secure_store,
-                jarvis_app=jarvis,
-                security_manager=security,
-                logger=logger,
-                event_logger=event_logger,
-            )
-            try:
-                voice_controller.start()
-                logger.info("Voice stack enabled.")
-            except Exception as e:
-                logger.warning(f"Voice failed to start; continuing text-only: {e}")
-                voice_controller = None
+            from jarvis.voice.tts import Pyttsx3TTSEngine, SapiTTSEngine, TTSWorker
 
-    logger.info("Jarvis CLI ready. Type /exit to quit. (/mics, /listen, /voice status)")
+            primary = SapiTTSEngine() if os.name == "nt" else Pyttsx3TTSEngine()
+            fallback = Pyttsx3TTSEngine()
+            tts_worker = TTSWorker(primary=primary, fallback=fallback, logger=logger, event_logger=event_logger)
+            tts_adapter = TTSAdapter(worker=tts_worker)
+        except Exception as e:
+            logger.warning(f"TTS disabled (init failed): {e}")
+            tts_adapter = None
+
+    if sm_cfg.enable_voice and args.mode in {"voice", "hybrid"}:
+        voice_cfg = _load_json(cfg, paths.voice, default={"enabled": False})
+        models_cfg = _load_json(cfg, paths.models, default={"vosk_model_path": "", "faster_whisper_model_path": ""})
+        if bool(voice_cfg.get("enabled", False)):
+            try:
+                from jarvis.voice.audio import AudioRecorder
+                from jarvis.voice.stt import FasterWhisperSTT, VoskSTT
+                from jarvis.voice.wakeword import NoWakeWordEngine, PorcupineWakeWordEngine
+
+                recorder = AudioRecorder(
+                    sample_rate=int(voice_cfg.get("sample_rate", 16000)),
+                    device_index=voice_cfg.get("mic_device_index", None),
+                    keep_last_n=int(voice_cfg.get("audio_retention_files", 25)),
+                )
+                stt_primary = VoskSTT(model_path=str(models_cfg.get("vosk_model_path") or ""))
+                stt_fallback = FasterWhisperSTT(model_path=str(models_cfg.get("faster_whisper_model_path") or ""))
+
+                wake_engine = None
+                if sm_cfg.enable_wake_word and str(voice_cfg.get("wake_word_engine", "porcupine")).lower() == "porcupine":
+                    access_key = None
+                    try:
+                        access_key = secure_store.secure_get("porcupine.access_key")
+                    except Exception:
+                        access_key = None
+                    if access_key:
+                        wake_engine = PorcupineWakeWordEngine(
+                            access_key=str(access_key),
+                            keyword=str(voice_cfg.get("wake_word", "jarvis")).lower(),
+                            on_wake=lambda: None,  # runtime will overwrite
+                            device_index=voice_cfg.get("mic_device_index", None),
+                        )
+                    else:
+                        wake_engine = NoWakeWordEngine()
+
+                voice_adapter = VoiceAdapter(
+                    recorder=recorder,
+                    stt_primary=stt_primary,
+                    stt_fallback=stt_fallback,
+                    wake_engine=wake_engine,
+                    listen_seconds=float(voice_cfg.get("listen_seconds", 8)),
+                )
+            except Exception as e:
+                logger.warning(f"Voice disabled (init failed): {e}")
+                voice_adapter = None
+
+    runtime = JarvisRuntime(cfg=sm_cfg, jarvis_app=jarvis, event_logger=event_logger, logger=logger, job_manager=job_manager, voice_adapter=voice_adapter, tts_adapter=tts_adapter)
+    runtime.start()
+
+    _start_web_thread(jarvis, security, secure_store, cfg, paths, event_logger, logger, job_manager, runtime)
+
+    logger.info("Jarvis CLI ready. Type /exit to quit. (/status, /wake, /sleep, /shutdown, /jobs ...)")
 
     while True:
         try:
@@ -329,41 +369,23 @@ def main() -> None:
         if text == "/exit":
             break
         if text == "/sleep":
-            try:
-                if voice_controller is not None:
-                    voice_controller.force_sleep()
-            except Exception:
-                pass
-            try:
-                jarvis.stage_b.unload()
-            except Exception:
-                pass
+            runtime.request_sleep()
             print("Sleeping.")
             continue
-        if text.startswith("/voice "):
-            cmd = text.split(" ", 1)[1].strip().lower()
-            if cmd == "status":
-                if voice_controller is None:
-                    print("Voice: off/unavailable.")
-                else:
-                    st = voice_controller.status()
-                    print(st)
-                continue
-            if cmd == "off":
-                if voice_controller is not None:
-                    voice_controller.stop()
-                    voice_controller = None
-                print("Voice disabled.")
-                continue
-            if cmd == "on":
-                print("Voice enable requires config/voice.json enabled:true and restart.")
-                continue
-        if text == "/listen":
-            if voice_controller is None:
-                print("Voice not running. Enable in config/voice.json and restart.")
-            else:
-                voice_controller.trigger_listen_once()
-                print("Listening once...")
+        if text == "/status":
+            print(runtime.get_status())
+            continue
+        if text == "/wake":
+            runtime.wake()
+            print("Wake requested.")
+            continue
+        if text == "/shutdown":
+            runtime.request_shutdown()
+            print("Shutdown requested.")
+            break
+        if text.startswith("/say "):
+            runtime.say(text.split(" ", 1)[1].strip(), source="cli")
+            print("Speaking...")
             continue
         if text == "/mics":
             try:
@@ -436,15 +458,15 @@ def main() -> None:
             continue
 
         if args.mode == "voice":
-            print("Voice-only mode: use /listen or /exit.")
+            print("Voice-only mode: use /wake or /exit.")
         else:
-            resp = jarvis.process_message(text, client={"name": "cli", "id": "stdin"})
-            print(resp.reply)
+            trace_id = runtime.submit_text("cli", text, client_meta={"id": "stdin"})
+            res = runtime.wait_for_result(trace_id, timeout_seconds=20.0)
+            print(res["reply"] if res else "…")
         time.sleep(0.01)
 
     try:
-        if voice_controller is not None:
-            voice_controller.stop()
+        runtime.stop()
     except Exception:
         pass
     try:

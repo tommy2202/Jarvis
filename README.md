@@ -195,3 +195,18 @@ If web is enabled, authenticated job endpoints are available:
 - `GET /v1/jobs`
 - `GET /v1/jobs/{job_id}`
 - `POST /v1/jobs/{job_id}/cancel`
+
+## Core State Machine (Runtime)
+
+Jarvis now runs through a **single core runtime state machine** (`jarvis/core/runtime.py`) that:
+- enforces explicit assistant states + valid transitions
+- routes **CLI + web + (optional) voice** through the same pipeline
+- coordinates **LLM lifecycle** (warm on wake / first input, unload after idle)
+- persists state-machine events to `logs/state_machine/events.jsonl`
+
+CLI commands:
+- `/status` (shows current state + last trace_id)
+- `/wake` (simulate wake)
+- `/sleep` (unload and return to sleeping)
+- `/shutdown`
+- `/say <text>`

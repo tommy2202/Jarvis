@@ -32,6 +32,7 @@ def create_app(
     logger,
     auth_dep: Optional[Callable[..., object]],
     job_manager=None,
+    runtime=None,
     allowed_origins: list[str] | None = None,
     enable_web_ui: bool = True,
     allow_remote_admin_unlock: bool = False,
@@ -109,6 +110,19 @@ def create_app(
     async def post_message(req: MessageRequest, request: Request, _=Depends(_require_auth())):
         if not remote_control_enabled:
             raise HTTPException(status_code=503, detail="Remote control disabled (USB key required).")
+        if runtime is not None:
+            trace_id = runtime.submit_text("web", req.message, client_meta=(req.client.model_dump() if req.client else {}))
+            out = runtime.wait_for_result(trace_id, timeout_seconds=20.0)
+            if not out:
+                raise HTTPException(status_code=504, detail="Timed out waiting for result.")
+            intent = out.get("intent") or {"id": "unknown", "source": "system", "confidence": 0.0}
+            return MessageResponse(
+                trace_id=trace_id,
+                reply=out.get("reply") or "",
+                intent=intent,
+                requires_followup=False,
+                followup_question=None,
+            )
         resp = jarvis_app.process_message(req.message, client=(req.client.model_dump() if req.client else {}))
         return MessageResponse(
             trace_id=resp.trace_id,
@@ -117,6 +131,12 @@ def create_app(
             requires_followup=resp.requires_followup,
             followup_question=resp.followup_question,
         )
+
+    @app.get("/v1/status")
+    async def status(request: Request, _=Depends(_require_auth())):
+        if runtime is None:
+            return {"state": "unknown"}
+        return runtime.get_status()
 
     @app.post("/v1/admin/unlock", response_model=AdminUnlockResponse)
     async def admin_unlock(req: AdminUnlockRequest, request: Request, _=Depends(_require_auth())):
