@@ -1,0 +1,13 @@
+{
+  "usb_key_path": "E:\\\\JARVIS_KEY.bin",
+  "secure_store_path": "secure/secure_store.enc",
+  "admin_session_timeout_seconds": 900,
+  "router_confidence_threshold": 0.55,
+  "llm": {
+    "base_url": "http://localhost:11434",
+    "timeout_seconds": 5.0,
+    "model": "qwen:14b-chat",
+    "mock_mode": true
+  }
+}
+

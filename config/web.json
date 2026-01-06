@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "host": "0.0.0.0",
+  "port": 8787,
+  "allowed_origins": [],
+  "enable_web_ui": true,
+  "allow_remote_admin_unlock": false
+}
+

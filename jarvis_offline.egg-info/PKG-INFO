@@ -1,3 +1,19 @@
+Metadata-Version: 2.4
+Name: jarvis-offline
+Version: 0.1.0
+Summary: Secure, offline-first Jarvis assistant (minimal architecture proof).
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: cryptography>=42.0.0
+Requires-Dist: fastapi>=0.110.0
+Requires-Dist: pydantic>=2.6.0
+Requires-Dist: requests>=2.31.0
+Requires-Dist: rich>=13.7.0
+Requires-Dist: uvicorn>=0.27.0
+Provides-Extra: dev
+Requires-Dist: httpx>=0.27.0; extra == "dev"
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+
 ## Jarvis (offline-first, secure, minimal)
 
 This repo is a **minimal but functional** “Jarvis” assistant designed to run **offline-first** on Windows, with:

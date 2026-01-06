@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+import importlib
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
+
+
+class ModuleLoadError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class LoadedModule:
+    module_path: str
+    module_id: str
+    meta: Dict[str, Any]
+    handler: Callable[..., Any]
+
+
+class ModuleRegistry:
+    """
+    Loads Python modules from `config/modules_registry.json`.
+    Contract:
+      - module defines MODULE_META (dict) with at least {"id": "<module_id>"}.
+      - module defines `handle(intent_id: str, args: dict, context: dict) -> dict`.
+    """
+
+    def __init__(self) -> None:
+        self._modules_by_id: Dict[str, LoadedModule] = {}
+        self._modules_by_path: Dict[str, LoadedModule] = {}
+
+    def register(self, module_path: str) -> LoadedModule:
+        try:
+            mod = importlib.import_module(module_path)
+        except Exception as e:  # noqa: BLE001
+            raise ModuleLoadError(f"Failed to import {module_path}: {e}") from e
+
+        meta = getattr(mod, "MODULE_META", None)
+        handler = getattr(mod, "handle", None)
+        if not isinstance(meta, dict) or "id" not in meta:
+            raise ModuleLoadError(f"{module_path} missing MODULE_META with required key 'id'.")
+        if not callable(handler):
+            raise ModuleLoadError(f"{module_path} missing callable handle().")
+
+        loaded = LoadedModule(module_path=module_path, module_id=str(meta["id"]), meta=meta, handler=handler)
+        self._modules_by_id[loaded.module_id] = loaded
+        self._modules_by_path[module_path] = loaded
+        return loaded
+
+    def get_by_id(self, module_id: str) -> Optional[LoadedModule]:
+        return self._modules_by_id.get(module_id)
+
+    def list_modules(self) -> List[LoadedModule]:
+        return list(self._modules_by_id.values())
+
