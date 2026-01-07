@@ -197,6 +197,28 @@ CLI:
 Config:
 - `config/runtime.json`
 
+## Persistent runtime state (operational, no secrets)
+
+Jarvis persists a **safe operational runtime state** across restarts (not chat memory) to support:
+- resume diagnostics / post-mortem inspection
+- crash recovery warnings (dirty shutdown detection)
+- breaker state continuity
+
+Storage (local):
+- `runtime/state.json`
+- `runtime/backups/`
+- `runtime/last_known_good/`
+- `runtime/crash_markers/dirty_shutdown.flag`
+- `runtime/crash_markers/restart_marker.json`
+
+Config:
+- `config/runtime_state.json`
+
+Privacy:
+- no user message content
+- no audio recordings
+- no API keys / passphrases / secrets (only stored in encrypted secure store)
+
 CLI commands:
 - `/admin unlock` (prompts for passphrase; no echo)
 - `/admin lock`

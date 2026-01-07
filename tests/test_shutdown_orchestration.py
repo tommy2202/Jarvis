@@ -113,9 +113,11 @@ def test_restart_marker_created_and_detected(tmp_path, monkeypatch):
     from jarvis.core.shutdown_orchestrator import ShutdownConfig, ShutdownMode, ShutdownOrchestrator
     from jarvis.core.runtime_control import RuntimeController, check_startup_recovery
     from jarvis.core.ops_log import OpsLogger
+    from jarvis.core.runtime_state.manager import RuntimeStateManager, RuntimeStateManagerConfig
 
     monkeypatch.chdir(tmp_path)
     ops = OpsLogger(path=str(tmp_path / "logs" / "ops.jsonl"))
+    rs = RuntimeStateManager(cfg=RuntimeStateManagerConfig(enabled=False), ops=ops, logger=None)
 
     def fake_exec(_exe, _argv):  # noqa: ANN001
         return
@@ -135,25 +137,26 @@ def test_restart_marker_created_and_detected(tmp_path, monkeypatch):
         exec_fn=fake_exec,
         root_path=".",
     )
-    ctl = RuntimeController(runtime_cfg={"shutdown": {"enable_restart": True, "restart_requires_admin": False}}, ops=ops, logger=None, orchestrator=orch, security_manager=None)
+    ctl = RuntimeController(runtime_cfg={"shutdown": {"enable_restart": True, "restart_requires_admin": False}}, ops=ops, logger=None, orchestrator=orch, runtime_state=rs, security_manager=None)
     ctl.request_shutdown(reason="test_restart", restart=True, safe_mode=True, argv=["app.py", "--ui"])
     # next startup should consume marker
-    info = check_startup_recovery(ops=ops, root_path=".")
+    info = check_startup_recovery(ops=ops, root_path=".", runtime_dir="runtime")
     assert info["restart"] is not None
     assert bool(info["restart"]["safe_mode"]) is True
 
 
 def test_abrupt_shutdown_recovery(tmp_path, monkeypatch):
     from jarvis.core.ops_log import OpsLogger
-    from jarvis.core.persistence.runtime_state import dirty_flag_path
     from jarvis.core.runtime_control import check_startup_recovery
+    from jarvis.core.runtime_state.io import RuntimeStatePaths
 
     monkeypatch.chdir(tmp_path)
-    os.makedirs(os.path.join("logs", "runtime"), exist_ok=True)
-    with open(dirty_flag_path("."), "w", encoding="utf-8") as f:
+    paths = RuntimeStatePaths(runtime_dir="runtime")
+    os.makedirs(paths.crash_markers_dir, exist_ok=True)
+    with open(paths.dirty_flag, "w", encoding="utf-8") as f:
         f.write("x\n")
     ops = OpsLogger(path=str(tmp_path / "logs" / "ops.jsonl"))
-    info = check_startup_recovery(ops=ops, root_path=".")
+    info = check_startup_recovery(ops=ops, root_path=".", runtime_dir="runtime")
     assert info["dirty_shutdown"] is True
 
 

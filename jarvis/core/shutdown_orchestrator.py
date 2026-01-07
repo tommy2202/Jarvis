@@ -8,7 +8,6 @@ from enum import Enum
 from typing import Any, Callable, Dict, Optional
 
 from jarvis.core.ops_log import OpsLogger
-from jarvis.core.persistence.runtime_state import clear_dirty_flag, save_state_snapshot, write_restart_marker
 
 
 class ShutdownMode(str, Enum):
@@ -56,10 +55,12 @@ class ShutdownOrchestrator:
         self.config_manager = config_manager
         self.web_handle = web_handle
         self.ui_handle = ui_handle
+        self.runtime_state = None
         self.exec_fn = exec_fn or os.execv
         self.root_path = root_path
 
-    def run_shutdown_sequence(self, *, mode: ShutdownMode, reason: str, trace_id: str, safe_mode: bool, argv: list[str]) -> None:
+    def run_shutdown_sequence(self, *, mode: ShutdownMode, reason: str, trace_id: str, safe_mode: bool, argv: list[str], runtime_state=None) -> None:
+        self.runtime_state = runtime_state
         self.ops.log(trace_id=trace_id, event="shutdown_begin", outcome="start", details={"mode": mode.value, "reason": reason, "safe_mode": safe_mode})
 
         # Phase 0: announce/begin
@@ -82,11 +83,21 @@ class ShutdownOrchestrator:
 
         # Phase 6: exit/restart
         self.ops.log(trace_id=trace_id, event="shutdown_complete", outcome="ok", details={"mode": mode.value})
-        clear_dirty_flag(self.root_path)
+        try:
+            if self.runtime_state is not None:
+                self.runtime_state.clear_dirty_shutdown(reason=reason)
+                # Persist final crash/shutdown fields.
+                self.runtime_state.save(reason="shutdown_complete")
+        except Exception:
+            pass
 
         if mode == ShutdownMode.RESTART:
             self.ops.log(trace_id=trace_id, event="restart_begin", outcome="ok", details={"argv": argv, "safe_mode": safe_mode})
-            write_restart_marker(self.root_path, argv=argv, safe_mode=safe_mode, trace_id=trace_id)
+            try:
+                if self.runtime_state is not None:
+                    self.runtime_state.write_restart_marker(argv=argv, safe_mode=safe_mode, trace_id=trace_id)
+            except Exception:
+                pass
             self.ops.log(trace_id=trace_id, event="restart_exec", outcome="exec", details={"python": sys.executable})
             self.exec_fn(sys.executable, [sys.executable, *argv[1:]])
 
@@ -190,24 +201,10 @@ class ShutdownOrchestrator:
                 pass
 
     def _phase3_persist_flush(self) -> None:
-        # Persist snapshot
-        snap: Dict[str, Any] = {}
+        # Persist runtime_state snapshot
         try:
-            snap["runtime"] = self.runtime.get_status()
-        except Exception:
-            snap["runtime"] = {}
-        try:
-            if self.telemetry is not None:
-                snap["telemetry"] = self.telemetry.get_snapshot()
-        except Exception:
-            snap["telemetry"] = {}
-        try:
-            if self.job_manager is not None:
-                snap["jobs"] = self.job_manager.get_counts() if hasattr(self.job_manager, "get_counts") else {}
-        except Exception:
-            snap["jobs"] = {}
-        try:
-            save_state_snapshot(self.root_path, data=snap)
+            if self.runtime_state is not None:
+                self.runtime_state.save(reason="shutdown")
         except Exception:
             pass
         # Flush telemetry thread (best effort)

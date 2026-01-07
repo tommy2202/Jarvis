@@ -62,6 +62,10 @@ class ConfigFsPaths:
         return os.path.join(self.config_dir, "runtime.json")
 
     @property
+    def runtime_state(self) -> str:
+        return os.path.join(self.config_dir, "runtime_state.json")
+
+    @property
     def jobs(self) -> str:
         return os.path.join(self.config_dir, "jobs.json")
 

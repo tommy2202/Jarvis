@@ -127,6 +127,7 @@ class JarvisRuntime:
         security_manager: Any = None,
         secure_store: Any = None,
         telemetry: Any = None,
+        runtime_state: Any = None,
         error_reporter: Optional[ErrorReporter] = None,
         recovery_policy: Optional[RecoveryPolicy] = None,
         breakers: Optional[BreakerRegistry] = None,
@@ -143,6 +144,7 @@ class JarvisRuntime:
         self.security_manager = security_manager
         self.secure_store = secure_store
         self.telemetry = telemetry
+        self.runtime_state = runtime_state
         self.error_reporter = error_reporter or ErrorReporter()
         self.recovery_policy = recovery_policy or RecoveryPolicy(RecoveryConfig())
         self.breakers = breakers or BreakerRegistry({})
@@ -267,6 +269,12 @@ class JarvisRuntime:
         secure = self.get_secure_store_status()
         llm = self.get_llm_status()
         voice = self.get_voice_status()
+        rs = None
+        if self.runtime_state is not None:
+            try:
+                rs = self.runtime_state.get_snapshot()
+            except Exception:
+                rs = None
         return {
             "state": self._state.value,
             "last_trace_id": self._last_trace_id,
@@ -280,6 +288,7 @@ class JarvisRuntime:
             "secure_store": secure,
             "llm": llm,
             "voice": voice,
+            "runtime_state": rs,
             "runtime_cfg": {
                 "max_concurrent_interactions": self.cfg.max_concurrent_interactions,
                 "busy_policy": self.cfg.busy_policy,
@@ -509,6 +518,11 @@ class JarvisRuntime:
         if self.telemetry is not None:
             try:
                 self.telemetry.set_gauge("current_state_machine_state", new_state.value)
+            except Exception:
+                pass
+        if self.runtime_state is not None:
+            try:
+                self.runtime_state.record_transition(old.value, new_state.value, trace_id)
             except Exception:
                 pass
 

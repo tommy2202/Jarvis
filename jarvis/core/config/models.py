@@ -113,6 +113,16 @@ class RuntimeControlConfigFile(BaseModel):
     startup: Dict[str, Any] = Field(default_factory=lambda: {"safe_mode_defaults": {"web_enabled": True, "voice_enabled": True, "llm_enabled": True}})
 
 
+class RuntimeStateConfigFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    state_version: int = Field(default=1, ge=1)
+    backup_keep: int = Field(default=20, ge=1, le=200)
+    write_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    write_on_events: List[str] = Field(default_factory=lambda: ["shutdown", "error", "breaker_change"])
+    paths: Dict[str, Any] = Field(default_factory=lambda: {"runtime_dir": "runtime"})
+
+
 class UiConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     refresh_interval_ms: int = 350
@@ -196,6 +206,7 @@ class AppConfigV2(BaseModel):
     ui: UiConfig
     telemetry: TelemetryConfigFile
     runtime: RuntimeControlConfigFile
+    runtime_state: RuntimeStateConfigFile
     jobs: JobsConfig
     llm: LLMConfigFile
     recovery: RecoveryConfigFile

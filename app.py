@@ -40,9 +40,10 @@ from jarvis.core.llm_lifecycle import LLMPolicy, LLMLifecycleController
 from jarvis.core.llm_router import LLMConfig as StageBLegacyConfig, StageBLLMRouter
 from jarvis.core.telemetry.manager import TelemetryManager, TelemetryConfig
 from jarvis.core.ops_log import OpsLogger
-from jarvis.core.runtime_control import RuntimeController, check_startup_recovery
+from jarvis.core.runtime_control import RuntimeController
 from jarvis.core.shutdown_orchestrator import ShutdownConfig, ShutdownOrchestrator
-from jarvis.core.persistence.runtime_state import write_dirty_flag
+from jarvis.core.runtime_state.manager import RuntimeStateManager, RuntimeStateManagerConfig
+from jarvis.core.runtime_state.io import dirty_exists
 from jarvis.web.api import create_app
 from jarvis.web.auth import build_api_key_auth  # legacy
 from jarvis.web.security.auth import ApiKeyStore
@@ -195,49 +196,86 @@ def main() -> None:
     logger = setup_logging("logs")
     event_logger = EventLogger("logs/events.jsonl")
     ops = OpsLogger()
-    recovery_info = check_startup_recovery(ops=ops, root_path=".")
-    # Mark this run as "dirty" until we complete a graceful shutdown.
-    try:
-        write_dirty_flag(".", trace_id=uuid.uuid4().hex)
-    except Exception:
-        pass
 
     config = get_config(logger=logger)
     cfg_obj = config.get()
-    # Safe-mode restart override (local, non-persistent).
-    if recovery_info.get("restart") and bool((recovery_info["restart"] or {}).get("safe_mode", False)):
-        defaults = (cfg_obj.runtime.startup or {}).get("safe_mode_defaults") or {"web_enabled": True, "voice_enabled": True, "llm_enabled": True}
-        try:
-            cfg_obj = cfg_obj.model_copy(deep=True)
-            cfg_obj.web.enabled = bool(defaults.get("web_enabled", False))
-            cfg_obj.voice.enabled = bool(defaults.get("voice_enabled", False))
-            cfg_obj.state_machine.enable_voice = bool(defaults.get("voice_enabled", False))
-            cfg_obj.llm.enabled = bool(defaults.get("llm_enabled", False))
-            ops.log(trace_id=str((recovery_info["restart"] or {}).get("trace_id") or "startup"), event="startup_safe_mode", outcome="applied", details=defaults)
-        except Exception:
-            pass
+
+    # Persistent runtime state (operational state; no secrets)
+    rs_cfg = RuntimeStateManagerConfig.model_validate(cfg_obj.runtime_state.model_dump())
+    runtime_state = RuntimeStateManager(cfg=rs_cfg, ops=ops, logger=logger)
+    runtime_state.attach(config_manager=config)
+    runtime_state.load()
+    # Crash markers + restart marker
+    try:
+        was_dirty = dirty_exists(runtime_state.paths)
+    except Exception:
+        was_dirty = False
+    if was_dirty:
+        ops.log(trace_id="startup", event="recovered_from_crash", outcome="dirty_flag_present", details={"runtime_dir": runtime_state.paths.runtime_dir})
+    marker = runtime_state.consume_restart_marker()
+    if marker:
+        runtime_state.set_restart_marker_info(marker)
+        ops.log(trace_id=str(marker.get("trace_id") or "startup"), event="restart_complete", outcome="ok", details={"safe_mode": bool(marker.get("safe_mode"))})
+        # Safe-mode restart override (local, non-persistent).
+        if bool(marker.get("safe_mode", False)):
+            defaults = (cfg_obj.runtime.startup or {}).get("safe_mode_defaults") or {"web_enabled": True, "voice_enabled": True, "llm_enabled": True}
+            try:
+                cfg_obj = cfg_obj.model_copy(deep=True)
+                cfg_obj.web.enabled = bool(defaults.get("web_enabled", False))
+                cfg_obj.voice.enabled = bool(defaults.get("voice_enabled", False))
+                cfg_obj.state_machine.enable_voice = bool(defaults.get("voice_enabled", False))
+                cfg_obj.llm.enabled = bool(defaults.get("llm_enabled", False))
+                ops.log(trace_id=str(marker.get("trace_id") or "startup"), event="startup_safe_mode", outcome="applied", details=defaults)
+            except Exception:
+                pass
+    runtime_state.mark_dirty_startup()
 
     telemetry_cfg = TelemetryConfig.model_validate(cfg_obj.telemetry.model_dump())
     telemetry = TelemetryManager(cfg=telemetry_cfg, logger=logger, root_path=".")
     telemetry.attach(config_manager=config)
+    runtime_state.attach(telemetry=telemetry)
 
     # Error handling + recovery subsystem
     recovery_cfg = RecoveryConfig.model_validate(cfg_obj.recovery.model_dump())
-    error_reporter = ErrorReporter(cfg=ErrorReporterConfig(include_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False))), telemetry=telemetry)
+    error_reporter = ErrorReporter(cfg=ErrorReporterConfig(include_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False))), telemetry=telemetry, runtime_state=runtime_state)
     recovery_policy = RecoveryPolicy(recovery_cfg)
     breakers_map = {}
     for name, bc in (recovery_cfg.circuit_breakers or {}).items():
         try:
+            def _on_breaker_change(_st, br, _name=name):  # noqa: ANN001
+                try:
+                    from jarvis.core.runtime_state.models import BreakerSnapshot
+
+                    s = br.snapshot()
+                    runtime_state.record_breaker_state(
+                        _name,
+                        BreakerSnapshot(
+                            state=str(s.get("state") or "UNKNOWN"),
+                            opened_at=s.get("opened_at"),
+                            cooldown_until=s.get("cooldown_until"),
+                            failure_count_window=int(s.get("failure_count_window") or 0),
+                        ),
+                    )
+                except Exception:
+                    pass
+
             breakers_map[name] = CircuitBreaker(
                 BreakerConfig(
                     failures=int(bc.get("failures", 3)),
                     window_seconds=int(bc.get("window_seconds", 30)),
                     cooldown_seconds=int(bc.get("cooldown_seconds", 30)),
-                )
+                ),
+                on_state_change=_on_breaker_change,
             )
         except Exception:
             continue
     breaker_registry = BreakerRegistry(breakers_map)
+    # Restore breaker states from persistent runtime state (best effort)
+    try:
+        snaps = runtime_state.get_snapshot().get("breakers") or {}
+        breaker_registry.restore(snaps)
+    except Exception:
+        pass
 
     secure_store = SecureStore(
         usb_key_path=cfg_obj.security.usb_key_path,
@@ -250,6 +288,7 @@ def main() -> None:
     )
     security = SecurityManager(secure_store=secure_store, admin_session=AdminSession(timeout_seconds=int(cfg_obj.security.admin_session_timeout_seconds)))
     telemetry.attach(secure_store=secure_store, security_manager=security)
+    runtime_state.attach(security_manager=security, secure_store=secure_store)
 
     _ensure_admin_passphrase(security, logger)
 
@@ -300,6 +339,7 @@ def main() -> None:
     llm_policy = LLMPolicy.model_validate(cfg_obj.llm.model_dump())
     llm_lifecycle = LLMLifecycleController(policy=llm_policy, event_logger=event_logger, logger=logger, telemetry=telemetry) if (llm_policy.roles and llm_policy.enabled) else None
     telemetry.attach(llm_lifecycle=llm_lifecycle)
+    runtime_state.attach(llm_lifecycle=llm_lifecycle)
 
     # Stage-B router uses lifecycle if available; otherwise stays in safe mock mode.
     stage_b = StageBLLMRouter(StageBLegacyConfig(mock_mode=True), lifecycle=llm_lifecycle)
@@ -335,6 +375,7 @@ def main() -> None:
         telemetry=telemetry,
     )
     telemetry.attach(job_manager=job_manager)
+    runtime_state.attach(job_manager=job_manager)
 
     # Register allowlisted job kinds (no shell, no arbitrary code).
     job_manager.register_job("system.sleep", job_system_sleep, schema_model=SleepArgs)
@@ -448,12 +489,14 @@ def main() -> None:
         security_manager=security,
         secure_store=secure_store,
         telemetry=telemetry,
+        runtime_state=runtime_state,
         error_reporter=error_reporter,
         recovery_policy=recovery_policy,
         breakers=breaker_registry,
     )
     runtime.start()
     telemetry.attach(runtime=runtime, voice_adapter=voice_adapter, tts_adapter=tts_adapter)
+    runtime_state.attach(runtime=runtime)
 
     web_handle = _start_web_thread(jarvis, security, secure_store, config, event_logger, logger, job_manager, runtime, telemetry)
 
@@ -478,7 +521,7 @@ def main() -> None:
         ui_handle=None,
         root_path=".",
     )
-    controller = RuntimeController(runtime_cfg=cfg_obj.runtime.model_dump(), ops=ops, logger=logger, orchestrator=orchestrator, security_manager=security)
+    controller = RuntimeController(runtime_cfg=cfg_obj.runtime.model_dump(), ops=ops, logger=logger, orchestrator=orchestrator, runtime_state=runtime_state, security_manager=security)
 
     if args.ui:
         from jarvis.ui.app import run_desktop_ui

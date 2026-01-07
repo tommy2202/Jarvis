@@ -7,11 +7,11 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from jarvis.core.ops_log import OpsLogger
-from jarvis.core.persistence.runtime_state import consume_restart_marker, dirty_flag_path, load_state_snapshot, write_dirty_flag
-from jarvis.core.shutdown_orchestrator import ShutdownConfig, ShutdownMode, ShutdownOrchestrator
-
 import os
+
+from jarvis.core.ops_log import OpsLogger
+from jarvis.core.shutdown_orchestrator import ShutdownMode, ShutdownOrchestrator
+from jarvis.core.runtime_state.io import RuntimeStatePaths, consume_restart_marker, dirty_exists
 
 
 @dataclass
@@ -36,12 +36,14 @@ class RuntimeController:
         ops: OpsLogger,
         logger,
         orchestrator: ShutdownOrchestrator,
+        runtime_state: Any = None,
         security_manager: Any = None,
     ):
         self.runtime_cfg = runtime_cfg
         self.ops = ops
         self.logger = logger
         self.orchestrator = orchestrator
+        self.runtime_state = runtime_state
         self.security_manager = security_manager
         self._lock = threading.Lock()
         self._status = ShutdownStatus()
@@ -65,14 +67,9 @@ class RuntimeController:
             if self._status.in_progress:
                 return
             self._status = ShutdownStatus(in_progress=True, mode=mode.value, reason=reason, trace_id=trace_id, started_at=time.time())
-        # mark dirty shutdown immediately (cleared on graceful completion)
-        try:
-            write_dirty_flag(".", trace_id=trace_id)
-        except Exception:
-            pass
         try:
             argv2 = argv or sys.argv
-            self.orchestrator.run_shutdown_sequence(mode=mode, reason=reason, trace_id=trace_id, safe_mode=bool(safe_mode), argv=list(argv2))
+            self.orchestrator.run_shutdown_sequence(mode=mode, reason=reason, trace_id=trace_id, safe_mode=bool(safe_mode), argv=list(argv2), runtime_state=self.runtime_state)
         except Exception as e:  # noqa: BLE001
             self.ops.log(trace_id=trace_id, event="shutdown_failed", outcome="error", details={"error": str(e)})
             with self._lock:
@@ -124,7 +121,7 @@ class RuntimeController:
                 raise PermissionError("Admin required to restart.")
 
 
-def check_startup_recovery(*, ops: OpsLogger, root_path: str = ".") -> Dict[str, Any]:
+def check_startup_recovery(*, ops: OpsLogger, root_path: str = ".", runtime_dir: str = "runtime") -> Dict[str, Any]:
     """
     Called on startup:
     - detect dirty shutdown
@@ -132,24 +129,18 @@ def check_startup_recovery(*, ops: OpsLogger, root_path: str = ".") -> Dict[str,
     - always start with admin locked (handled elsewhere)
     """
     info: Dict[str, Any] = {"dirty_shutdown": False, "restart": None}
+    paths = RuntimeStatePaths(runtime_dir=os.path.join(root_path, runtime_dir))  # type: ignore[name-defined]
     try:
-        if os.path.exists(dirty_flag_path(root_path)):  # type: ignore[name-defined]
+        if dirty_exists(paths):
             info["dirty_shutdown"] = True
-            ops.log(trace_id="startup", event="recovered_from_crash", outcome="dirty_flag_present", details={})
+            ops.log(trace_id="startup", event="recovered_from_crash", outcome="dirty_flag_present", details={"runtime_dir": runtime_dir})
     except Exception:
         pass
     try:
-        marker = consume_restart_marker(root_path)
+        marker = consume_restart_marker(paths)
         if marker:
             info["restart"] = marker
             ops.log(trace_id=str(marker.get("trace_id") or "startup"), event="restart_complete", outcome="ok", details={"safe_mode": bool(marker.get("safe_mode"))})
-    except Exception:
-        pass
-    # optionally load last snapshot for diagnostics (no behavior changes)
-    try:
-        snap = load_state_snapshot(root_path)
-        if snap:
-            info["last_snapshot_ts"] = snap.get("ts")
     except Exception:
         pass
     return info

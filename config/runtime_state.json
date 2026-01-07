@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "state_version": 1,
+  "backup_keep": 20,
+  "write_interval_seconds": 10,
+  "write_on_events": ["shutdown", "error", "breaker_change"],
+  "paths": {
+    "runtime_dir": "runtime"
+  }
+}
+

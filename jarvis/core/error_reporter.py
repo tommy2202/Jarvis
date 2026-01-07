@@ -31,10 +31,11 @@ class ErrorReporterConfig:
 
 
 class ErrorReporter:
-    def __init__(self, *, path: str = os.path.join("logs", "errors.jsonl"), cfg: Optional[ErrorReporterConfig] = None, telemetry: Any = None):
+    def __init__(self, *, path: str = os.path.join("logs", "errors.jsonl"), cfg: Optional[ErrorReporterConfig] = None, telemetry: Any = None, runtime_state: Any = None):
         self.path = path
         self.cfg = cfg or ErrorReporterConfig()
         self.telemetry = telemetry
+        self.runtime_state = runtime_state
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self._debug_override: Optional[bool] = None
@@ -73,6 +74,11 @@ class ErrorReporter:
         if self.telemetry is not None:
             try:
                 self.telemetry.record_error(subsystem=subsystem, severity=entry.get("severity", "ERROR"), error_code=err.code, trace_id=trace_id)
+            except Exception:
+                pass
+        if self.runtime_state is not None:
+            try:
+                self.runtime_state.record_error(subsystem=subsystem, jarvis_error=err)
             except Exception:
                 pass
 
