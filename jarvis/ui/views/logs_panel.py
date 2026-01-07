@@ -30,6 +30,8 @@ class LogsPanel(ttk.Frame):
         self._security = ScrolledText(self._nb, height=10, wrap="word")
         self._system = ScrolledText(self._nb, height=10, wrap="none")
         self._health = HealthPanel(self._nb)
+        self._caps = ScrolledText(self._nb, height=10, wrap="word")
+        self._caps.configure(state="disabled")
         for t in (self._errors, self._security, self._system):
             t.configure(state="disabled")
 
@@ -37,6 +39,7 @@ class LogsPanel(ttk.Frame):
         self._nb.add(self._security, text="Security")
         self._nb.add(self._system, text="System")
         self._nb.add(self._health, text="Health")
+        self._nb.add(self._caps, text="Capabilities")
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -58,6 +61,15 @@ class LogsPanel(ttk.Frame):
 
     def set_health_snapshot(self, snap: dict) -> None:
         self._health.set_snapshot(snap)
+
+    def set_capabilities_snapshot(self, payload: dict) -> None:
+        self._caps.configure(state="normal")
+        self._caps.delete("1.0", "end")
+        try:
+            self._caps.insert("end", json.dumps(payload, indent=2, ensure_ascii=False))
+        except Exception:
+            self._caps.insert("end", str(payload))
+        self._caps.configure(state="disabled")
 
     def _set_jsonl(self, widget: ScrolledText, items: list[dict], *, severity_key: str) -> None:
         sev = self.severity_filter()

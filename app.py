@@ -44,6 +44,9 @@ from jarvis.core.runtime_control import RuntimeController
 from jarvis.core.shutdown_orchestrator import ShutdownConfig, ShutdownOrchestrator
 from jarvis.core.runtime_state.manager import RuntimeStateManager, RuntimeStateManagerConfig
 from jarvis.core.runtime_state.io import dirty_exists
+from jarvis.core.capabilities.loader import validate_and_normalize
+from jarvis.core.capabilities.audit import CapabilityAuditLogger
+from jarvis.core.capabilities.engine import CapabilityEngine
 from jarvis.web.api import create_app
 from jarvis.web.auth import build_api_key_auth  # legacy
 from jarvis.web.security.auth import ApiKeyStore
@@ -230,6 +233,11 @@ def main() -> None:
                 pass
     runtime_state.mark_dirty_startup()
 
+    # Capability bus (validated config/capabilities.json)
+    cap_cfg = validate_and_normalize(config.read_non_sensitive("capabilities.json"))
+    cap_audit = CapabilityAuditLogger(path=os.path.join("logs", "security.jsonl"))
+    cap_engine = CapabilityEngine(cfg=cap_cfg, audit=cap_audit, logger=logger)
+
     telemetry_cfg = TelemetryConfig.model_validate(cfg_obj.telemetry.model_dump())
     telemetry = TelemetryManager(cfg=telemetry_cfg, logger=logger, root_path=".")
     telemetry.attach(config_manager=config)
@@ -345,7 +353,18 @@ def main() -> None:
     stage_b = StageBLLMRouter(StageBLegacyConfig(mock_mode=True), lifecycle=llm_lifecycle)
 
     policy = PermissionPolicy(intents=dict(perms_cfg.get("intents") or {}))
-    dispatcher = Dispatcher(registry=registry, policy=policy, security=security, event_logger=event_logger, logger=logger, error_reporter=error_reporter, telemetry=telemetry)
+    dispatcher = Dispatcher(
+        registry=registry,
+        policy=policy,
+        security=security,
+        event_logger=event_logger,
+        logger=logger,
+        error_reporter=error_reporter,
+        telemetry=telemetry,
+        capability_engine=cap_engine,
+        breaker_registry=breaker_registry,
+        secure_store=secure_store,
+    )
 
     jarvis = JarvisApp(
         stage_a=stage_a,
@@ -477,6 +496,8 @@ def main() -> None:
                 logger.warning(f"Voice disabled (init failed): {e}")
                 voice_adapter = None
 
+    # Safe mode currently only applied via restart marker (stored in runtime_state)
+    safe_mode_active = bool((runtime_state.get_snapshot().get("crash") or {}).get("restart_marker", {}).get("safe_mode", False)) if runtime_state else False
     runtime = JarvisRuntime(
         cfg=sm_cfg,
         jarvis_app=jarvis,
@@ -493,6 +514,7 @@ def main() -> None:
         error_reporter=error_reporter,
         recovery_policy=recovery_policy,
         breakers=breaker_registry,
+        safe_mode=safe_mode_active,
     )
     runtime.start()
     telemetry.attach(runtime=runtime, voice_adapter=voice_adapter, tts_adapter=tts_adapter)
@@ -743,6 +765,66 @@ def main() -> None:
                 print(d.changed_files)
                 continue
             print("Usage: /config status|open|validate|reload|diff")
+            continue
+        if text.startswith("/caps"):
+            parts = text.split()
+            if len(parts) == 1 or parts[1] == "list":
+                caps = cap_engine.get_capabilities()
+                for cid in sorted(caps.keys()):
+                    c = caps[cid]
+                    print(f"{cid} | default={c['default_policy']} | sensitivity={c['sensitivity']} | requires_admin={c['requires_admin']}")
+                continue
+            if len(parts) >= 3 and parts[1] == "show":
+                cid = parts[2]
+                caps = cap_engine.get_capabilities()
+                print(caps.get(cid) or {"error": "not found"})
+                continue
+            if len(parts) >= 3 and parts[1] == "intent":
+                iid = parts[2]
+                reqs = cap_engine.get_intent_requirements().get(iid)
+                print({"intent_id": iid, "required_caps": reqs})
+                continue
+            if len(parts) >= 3 and parts[1] == "eval":
+                iid = parts[2]
+                src = "cli"
+                is_admin = False
+                safe_mode = False
+                shutting_down = False
+                for p in parts[3:]:
+                    if p.startswith("--source="):
+                        src = p.split("=", 1)[1]
+                    if p.startswith("--admin="):
+                        is_admin = p.split("=", 1)[1].lower() == "true"
+                    if p.startswith("--safe_mode="):
+                        safe_mode = p.split("=", 1)[1].lower() == "true"
+                    if p.startswith("--shutting_down="):
+                        shutting_down = p.split("=", 1)[1].lower() == "true"
+                from jarvis.core.capabilities.models import RequestContext, RequestSource
+
+                ctx = RequestContext(
+                    trace_id="caps",
+                    source=RequestSource(src),
+                    is_admin=is_admin,
+                    safe_mode=safe_mode,
+                    shutting_down=shutting_down,
+                    subsystem_health={"breakers": breaker_registry.status()},
+                    intent_id=iid,
+                    secure_store_mode=(secure_store.status().mode.value if secure_store else None),
+                )
+                dec = cap_engine.evaluate(ctx)
+                print(dec.model_dump())
+                continue
+            if len(parts) >= 3 and parts[1] == "export":
+                path = parts[2]
+                import json, os
+
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                payload = {"capabilities": cap_engine.get_capabilities(), "intent_requirements": cap_engine.get_intent_requirements(), "recent_decisions": cap_engine.audit.recent(50)}
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2, ensure_ascii=False)
+                print(f"Exported to {path}")
+                continue
+            print("Usage: /caps list | /caps show <cap_id> | /caps intent <intent_id> | /caps eval <intent_id> --source=cli|web|voice|ui --admin=true|false --safe_mode=true|false --shutting_down=true|false | /caps export <path>")
             continue
         if text.startswith("/secure"):
             parts = text.split()

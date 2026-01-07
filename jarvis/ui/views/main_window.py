@@ -168,6 +168,9 @@ class MainWindow(ttk.Frame):
             snap = getattr(self.core, "get_telemetry_snapshot", lambda: None)()
             if snap:
                 self.logs.set_health_snapshot(snap)
+            caps = getattr(self.core, "get_capabilities_snapshot", lambda: None)()
+            if caps:
+                self.logs.set_capabilities_snapshot(caps)
         except Exception as e:  # noqa: BLE001
             self._ui_error(e)
 

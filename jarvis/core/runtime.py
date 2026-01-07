@@ -132,6 +132,7 @@ class JarvisRuntime:
         recovery_policy: Optional[RecoveryPolicy] = None,
         breakers: Optional[BreakerRegistry] = None,
         persist_path: str = os.path.join("logs", "state_machine", "events.jsonl"),
+        safe_mode: bool = False,
     ):
         self.cfg = cfg
         self.jarvis_app = jarvis_app
@@ -148,6 +149,7 @@ class JarvisRuntime:
         self.error_reporter = error_reporter or ErrorReporter()
         self.recovery_policy = recovery_policy or RecoveryPolicy(RecoveryConfig())
         self.breakers = breakers or BreakerRegistry({})
+        self.safe_mode = bool(safe_mode)
 
         self._writer = _JsonlWriter(persist_path)
         self._q: "queue.Queue[RuntimeEvent]" = queue.Queue()
@@ -300,6 +302,18 @@ class JarvisRuntime:
             return None
         try:
             return self.telemetry.get_snapshot()
+        except Exception:
+            return None
+
+    def get_capabilities_snapshot(self) -> Optional[Dict[str, Any]]:
+        """
+        Read-only capability/policy introspection for UI/web.
+        """
+        try:
+            eng = getattr(getattr(self.jarvis_app, "dispatcher", None), "capability_engine", None)
+            if eng is None:
+                return None
+            return {"capabilities": eng.get_capabilities(), "intent_requirements": eng.get_intent_requirements(), "recent": eng.audit.recent(50)}
         except Exception:
             return None
 
@@ -736,7 +750,11 @@ class JarvisRuntime:
             text = str(ev.payload.get("text") or "")
             client = ev.payload.get("client") or {}
             # run pipeline synchronously in this thread (fast) to keep determinism
-            resp = self.jarvis_app.process_message(text, client=client)
+            try:
+                resp = self.jarvis_app.process_message(text, client=client, source=str(ev.source), safe_mode=self.safe_mode, shutting_down=bool(self._shutdown_in_progress))
+            except TypeError:
+                # Backward-compatible for test fakes / older JarvisApp signatures
+                resp = self.jarvis_app.process_message(text, client=client)
             self._writer.write({"ts": time.time(), "trace_id": resp.trace_id, "event": "route.complete", "intent_id": resp.intent_id, "source": resp.intent_source, "confidence": resp.confidence})
             # EXECUTING happens inside jarvis_app.dispatcher; but we still represent it explicitly.
             self._set_state(ev.trace_id, AssistantState.EXECUTING, {"intent_id": resp.intent_id})

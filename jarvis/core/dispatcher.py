@@ -8,6 +8,7 @@ from jarvis.core.module_registry import ModuleRegistry
 from jarvis.core.security import PermissionPolicy, SecurityManager
 from jarvis.core.error_reporter import ErrorReporter
 from jarvis.core.errors import AdminRequiredError, JarvisError, PermissionDeniedError
+from jarvis.core.capabilities.models import RequestContext, RequestSource
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,9 @@ class Dispatcher:
         logger,
         error_reporter: ErrorReporter | None = None,
         telemetry: Any = None,
+        capability_engine: Any = None,
+        breaker_registry: Any = None,
+        secure_store: Any = None,
     ):
         self.registry = registry
         self.policy = policy
@@ -44,6 +48,9 @@ class Dispatcher:
         self.logger = logger
         self.error_reporter = error_reporter or ErrorReporter()
         self.telemetry = telemetry
+        self.capability_engine = capability_engine
+        self.breaker_registry = breaker_registry
+        self.secure_store = secure_store
 
     def _enforce(self, trace_id: str, intent_id: str) -> Tuple[bool, str]:
         perms = self.policy.for_intent(intent_id)
@@ -73,19 +80,67 @@ class Dispatcher:
                     pass
             return DispatchResult(ok=False, reply="I can’t execute that module.", denied_reason="unknown module")
 
-        # MODULE_META fail-safe: resource_intensive => admin-only regardless of config.
-        if bool(mod.meta.get("resource_intensive", False)) and not self.security.is_admin():
-            self.event_logger.log(trace_id, "dispatch.denied", {"intent_id": intent_id, "reason": "module resource_intensive requires admin"})
-            err = AdminRequiredError()
-            self.error_reporter.write_error(err, trace_id=trace_id, subsystem="dispatcher", internal_exc=None)
-            return DispatchResult(ok=False, reply=err.user_message, denied_reason="admin required")
+        # Capability bus is the single enforcement point (authoritative).
+        if self.capability_engine is not None:
+            perms = self.policy.for_intent(intent_id)
+            resource_intensive = bool(perms.get("resource_intensive", False)) or bool(mod.meta.get("resource_intensive", False))
+            network_access = bool(perms.get("network_access", False))
 
-        allowed, reason = self._enforce(trace_id, intent_id)
-        self.event_logger.log(trace_id, "dispatch.permission_check", {"intent_id": intent_id, "allowed": allowed, "reason": reason})
-        if not allowed:
-            err = AdminRequiredError()
-            self.error_reporter.write_error(err, trace_id=trace_id, subsystem="dispatcher", internal_exc=None)
-            return DispatchResult(ok=False, reply=err.user_message, denied_reason=reason)
+            client = (context or {}).get("client") or {}
+            source_s = str((context or {}).get("source") or client.get("source") or client.get("name") or "cli").lower()
+            if source_s not in {"voice", "cli", "web", "ui", "system"}:
+                source_s = "cli"
+            shutting_down = bool((context or {}).get("shutting_down", False))
+            safe_mode = bool((context or {}).get("safe_mode", False))
+            client_id = str(client.get("id") or client.get("client_id") or "")
+
+            breaker_status = {}
+            try:
+                if self.breaker_registry is not None:
+                    breaker_status = {"breakers": self.breaker_registry.status()}
+            except Exception:
+                breaker_status = {}
+
+            secure_mode = None
+            try:
+                if self.secure_store is not None:
+                    st = self.secure_store.status()
+                    secure_mode = str(getattr(st, "mode").value if hasattr(getattr(st, "mode"), "value") else getattr(st, "mode"))
+            except Exception:
+                secure_mode = None
+
+            ctx = RequestContext(
+                trace_id=trace_id,
+                source=RequestSource(source_s),
+                client_id=client_id or None,
+                is_admin=bool(self.security.is_admin()),
+                safe_mode=safe_mode,
+                shutting_down=shutting_down,
+                subsystem_health=breaker_status,
+                intent_id=intent_id,
+                resource_intensive=resource_intensive,
+                network_requested=network_access,
+                secure_store_mode=secure_mode,
+            )
+            dec = self.capability_engine.evaluate(ctx)
+            self.event_logger.log(trace_id, "dispatch.capabilities", {"allowed": dec.allowed, "required": dec.required_capabilities, "denied": dec.denied_capabilities, "reasons": dec.reasons})
+            if not dec.allowed:
+                # Standard user-facing denial (safe)
+                msg = "I can’t do that right now."
+                if any("admin" in r.lower() for r in dec.reasons) or dec.remediation.lower().startswith("unlock admin"):
+                    err = AdminRequiredError()
+                    msg = err.user_message
+                self.error_reporter.write_error(JarvisError(code="permission_denied", user_message=msg, context={"intent_id": intent_id, "denied_caps": dec.denied_capabilities}), trace_id=trace_id, subsystem="dispatcher", internal_exc=None)
+                return DispatchResult(ok=False, reply=msg, denied_reason="capability_denied")
+
+        else:
+            # Fallback legacy enforcement if capability engine not configured
+            allowed, reason = self._enforce(trace_id, intent_id)
+            self.event_logger.log(trace_id, "dispatch.permission_check", {"intent_id": intent_id, "allowed": allowed, "reason": reason})
+            if not allowed:
+                err = AdminRequiredError()
+                self.error_reporter.write_error(err, trace_id=trace_id, subsystem="dispatcher", internal_exc=None)
+                return DispatchResult(ok=False, reply=err.user_message, denied_reason=reason)
 
         # Touch admin session on successful execution path.
         if self.security.is_admin():

@@ -219,6 +219,30 @@ Privacy:
 - no audio recordings
 - no API keys / passphrases / secrets (only stored in encrypted secure store)
 
+## Capabilities (unified policy enforcement)
+
+Jarvis uses a **central capability model** as the source of truth for permissions. Capabilities are **independent of intents/modules** and are enforced **only in the dispatcher**.
+
+Config:
+- `config/capabilities.json` defines:
+  - capability definitions
+  - intent → required capabilities
+  - source policies (web/voice stricter)
+  - safe-mode denies
+
+Hard safety rules (always enforced):
+- `CAP_ADMIN_ACTION` always requires admin
+- `CAP_IMAGE_GENERATION` and `CAP_CODE_GENERATION` always require admin
+- `CAP_HEAVY_COMPUTE` requires admin unless explicitly whitelisted and not from web (fail-safe)
+- during shutdown, only `CAP_READ_FILES` and `CAP_AUDIO_OUTPUT` are allowed
+
+CLI:
+- `/caps list`
+- `/caps show <cap_id>`
+- `/caps intent <intent_id>`
+- `/caps eval <intent_id> --source=cli|web|voice|ui --admin=true|false --safe_mode=true|false --shutting_down=true|false`
+- `/caps export <path>`
+
 CLI commands:
 - `/admin unlock` (prompts for passphrase; no echo)
 - `/admin lock`

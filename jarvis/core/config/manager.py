@@ -225,6 +225,7 @@ class ConfigManager:
             "telemetry.json",
             "runtime.json",
             "runtime_state.json",
+            "capabilities.json",
             "jobs.json",
             "llm.json",
             "recovery.json",
@@ -262,6 +263,7 @@ class ConfigManager:
             "telemetry.json": TelemetryConfigFile().model_dump(),
             "runtime.json": RuntimeControlConfigFile().model_dump(),
             "runtime_state.json": RuntimeStateConfigFile().model_dump(),
+            "capabilities.json": __import__("jarvis.core.capabilities.loader", fromlist=["default_config_dict"]).default_config_dict(),
             "jobs.json": JobsConfig().model_dump(),
             "llm.json": LLMConfigFile().model_dump(),
             "recovery.json": RecoveryConfigFile().model_dump(),
@@ -283,6 +285,15 @@ class ConfigManager:
 
     def _validate_all(self, files: Dict[str, Dict[str, Any]]) -> AppConfigV2:
         try:
+            # Capabilities config is validated separately (outside AppConfigV2) to avoid bloating the core config schema.
+            # Still strict schema validated at load time via capabilities.models.
+            try:
+                from jarvis.core.capabilities.loader import validate_and_normalize
+
+                _ = validate_and_normalize(files.get("capabilities.json") or {})
+            except Exception as e:
+                raise ConfigError(f"capabilities.json invalid: {e}") from e
+
             cfg = AppConfigV2(
                 app=AppFileConfig.model_validate(files.get("app.json") or {}),
                 security=SecurityConfig.model_validate(files.get("security.json") or {}),

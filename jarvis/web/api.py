@@ -24,6 +24,7 @@ from jarvis.web.middleware import WebSecurityMiddleware
 from jarvis.core.errors import JarvisError
 from jarvis.core.error_reporter import ErrorReporter
 from jarvis.core.errors import PermissionDeniedError
+from jarvis.core.capabilities.models import RequestContext, RequestSource
 
 
 def _is_localhost(request: Request) -> bool:
@@ -151,7 +152,10 @@ def create_app(
                 requires_followup=False,
                 followup_question=None,
             )
-        resp = jarvis_app.process_message(req.message, client=(req.client.model_dump() if req.client else {}))
+        try:
+            resp = jarvis_app.process_message(req.message, client=(req.client.model_dump() if req.client else {}), source="web", safe_mode=False, shutting_down=False)
+        except TypeError:
+            resp = jarvis_app.process_message(req.message, client=(req.client.model_dump() if req.client else {}))
         return MessageResponse(
             trace_id=resp.trace_id,
             reply=resp.reply,
@@ -193,6 +197,45 @@ def create_app(
         if tm is None:
             raise HTTPException(status_code=503, detail="Telemetry unavailable.")
         return tm.get_snapshot()
+
+    @app.get("/v1/capabilities")
+    async def capabilities_list(request: Request):
+        # Capabilities engine lives in app wiring via dispatcher
+        eng = getattr(getattr(jarvis_app, "dispatcher", None), "capability_engine", None)
+        if eng is None:
+            raise HTTPException(status_code=503, detail="Capabilities unavailable.")
+        return {"capabilities": eng.get_capabilities(), "recent": eng.audit.recent(50)}
+
+    @app.get("/v1/capabilities/intents")
+    async def capabilities_intents(request: Request):
+        eng = getattr(getattr(jarvis_app, "dispatcher", None), "capability_engine", None)
+        if eng is None:
+            raise HTTPException(status_code=503, detail="Capabilities unavailable.")
+        return {"intent_requirements": eng.get_intent_requirements()}
+
+    @app.post("/v1/capabilities/eval")
+    async def capabilities_eval(request: Request):
+        eng = getattr(getattr(jarvis_app, "dispatcher", None), "capability_engine", None)
+        if eng is None:
+            raise HTTPException(status_code=503, detail="Capabilities unavailable.")
+        body = await request.json()
+        intent_id = str(body.get("intent_id") or "")
+        src = str(body.get("source") or "web")
+        is_admin = bool(body.get("is_admin", False))
+        safe_mode = bool(body.get("safe_mode", False))
+        shutting_down = bool(body.get("shutting_down", False))
+        trace_id = getattr(getattr(request, "state", None), "trace_id", "web")
+        ctx = RequestContext(
+            trace_id=trace_id,
+            source=RequestSource(src),
+            is_admin=is_admin,
+            safe_mode=safe_mode,
+            shutting_down=shutting_down,
+            subsystem_health={"breakers": getattr(getattr(runtime, "breakers", None), "status", lambda: {})()},
+            intent_id=intent_id,
+            secure_store_mode=(secure_store.status().mode.value if secure_store is not None else None),
+        )
+        return eng.evaluate(ctx).model_dump()
 
     @app.get("/v1/llm/status")
     async def llm_status(request: Request):

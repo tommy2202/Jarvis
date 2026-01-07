@@ -59,7 +59,7 @@ class JarvisApp:
         required = cfg.get("required_args") or []
         return any((r not in args or args.get(r) in (None, "")) for r in required)
 
-    def process_message(self, message: str, client: Optional[Dict[str, Any]] = None) -> MessageResponse:
+    def process_message(self, message: str, client: Optional[Dict[str, Any]] = None, *, source: str = "cli", safe_mode: bool = False, shutting_down: bool = False) -> MessageResponse:
         with self._lock:
             trace_id = uuid.uuid4().hex
             self.event_logger.log(trace_id, "request.received", {"message": message, "client": client or {}})
@@ -141,7 +141,7 @@ class JarvisApp:
                         break
 
             # Enforced execution decision happens in dispatcher.
-            dispatch_context = {"client": client or {}}
+            dispatch_context = {"client": client or {}, "source": source, "safe_mode": bool(safe_mode), "shutting_down": bool(shutting_down)}
             if self.telemetry is not None:
                 try:
                     self.telemetry.record_latency("routing_latency_ms", (time.time() - t_route0) * 1000.0, tags={"source": source})

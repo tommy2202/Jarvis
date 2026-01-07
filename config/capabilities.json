@@ -1,0 +1,155 @@
+{
+  "capabilities": {
+    "CAP_ADMIN_ACTION": {
+      "audit": true,
+      "default_policy": "deny",
+      "description": "Perform admin-gated operations.",
+      "id": "CAP_ADMIN_ACTION",
+      "requires_admin": true,
+      "requires_secrets": true,
+      "sensitivity": "high"
+    },
+    "CAP_AUDIO_INPUT": {
+      "audit": false,
+      "default_policy": "allow",
+      "description": "Use microphone / audio input.",
+      "id": "CAP_AUDIO_INPUT",
+      "requires_admin": false,
+      "requires_secrets": false,
+      "sensitivity": "normal"
+    },
+    "CAP_AUDIO_OUTPUT": {
+      "audit": false,
+      "default_policy": "allow",
+      "description": "Play audio output (TTS/beeps).",
+      "id": "CAP_AUDIO_OUTPUT",
+      "requires_admin": false,
+      "requires_secrets": false,
+      "sensitivity": "normal"
+    },
+    "CAP_CODE_GENERATION": {
+      "audit": true,
+      "default_policy": "deny",
+      "description": "Generate code (high-risk).",
+      "id": "CAP_CODE_GENERATION",
+      "requires_admin": true,
+      "requires_secrets": false,
+      "sensitivity": "high"
+    },
+    "CAP_DEVICE_CONTROL": {
+      "audit": true,
+      "default_policy": "deny",
+      "description": "Control devices/OS settings (high-risk).",
+      "id": "CAP_DEVICE_CONTROL",
+      "requires_admin": true,
+      "requires_secrets": false,
+      "sensitivity": "high"
+    },
+    "CAP_HEAVY_COMPUTE": {
+      "audit": true,
+      "default_policy": "deny",
+      "description": "Perform heavy compute (GPU/CPU intensive).",
+      "id": "CAP_HEAVY_COMPUTE",
+      "requires_admin": true,
+      "requires_secrets": false,
+      "sensitivity": "high"
+    },
+    "CAP_IMAGE_GENERATION": {
+      "audit": true,
+      "default_policy": "deny",
+      "description": "Generate images (high-risk).",
+      "id": "CAP_IMAGE_GENERATION",
+      "requires_admin": true,
+      "requires_secrets": false,
+      "sensitivity": "high"
+    },
+    "CAP_NETWORK_ACCESS": {
+      "audit": true,
+      "default_policy": "deny",
+      "description": "Perform outbound network access.",
+      "id": "CAP_NETWORK_ACCESS",
+      "requires_admin": true,
+      "requires_secrets": false,
+      "sensitivity": "high"
+    },
+    "CAP_READ_FILES": {
+      "audit": false,
+      "default_policy": "allow",
+      "description": "Read local files (non-secret).",
+      "id": "CAP_READ_FILES",
+      "requires_admin": false,
+      "requires_secrets": false,
+      "sensitivity": "normal"
+    },
+    "CAP_RUN_SUBPROCESS": {
+      "audit": true,
+      "default_policy": "deny",
+      "description": "Run a local subprocess (not arbitrary shell by default).",
+      "id": "CAP_RUN_SUBPROCESS",
+      "requires_admin": true,
+      "requires_secrets": false,
+      "sensitivity": "high"
+    },
+    "CAP_WRITE_FILES": {
+      "audit": true,
+      "default_policy": "deny",
+      "description": "Write local files.",
+      "id": "CAP_WRITE_FILES",
+      "requires_admin": false,
+      "requires_secrets": false,
+      "sensitivity": "normal"
+    }
+  },
+  "heavy_compute_whitelist_intents": [],
+  "intent_requirements": {
+    "anime_dubbing.run": [
+      "CAP_HEAVY_COMPUTE",
+      "CAP_RUN_SUBPROCESS",
+      "CAP_WRITE_FILES"
+    ],
+    "music.play": [
+      "CAP_AUDIO_OUTPUT"
+    ]
+  },
+  "safe_mode": {
+    "deny": [
+      "CAP_NETWORK_ACCESS",
+      "CAP_RUN_SUBPROCESS",
+      "CAP_HEAVY_COMPUTE"
+    ]
+  },
+  "source_policies": {
+    "cli": {
+      "allow_all_non_sensitive": true,
+      "deny": [],
+      "require_admin_for": []
+    },
+    "system": {
+      "allow_all_non_sensitive": true,
+      "deny": [],
+      "require_admin_for": []
+    },
+    "ui": {
+      "allow_all_non_sensitive": true,
+      "deny": [],
+      "require_admin_for": []
+    },
+    "voice": {
+      "allow_all_non_sensitive": false,
+      "deny": [
+        "CAP_ADMIN_ACTION"
+      ],
+      "require_admin_for": []
+    },
+    "web": {
+      "allow_all_non_sensitive": false,
+      "deny": [
+        "CAP_ADMIN_ACTION"
+      ],
+      "require_admin_for": [
+        "CAP_HEAVY_COMPUTE"
+      ]
+    }
+  }
+}
+
