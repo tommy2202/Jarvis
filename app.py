@@ -439,6 +439,7 @@ def main() -> None:
         logger=logger,
         threshold=threshold,
         telemetry=telemetry,
+        core_fact_fuzzy_cfg=dict(getattr(cfg_obj.ui, "core_fact_fuzzy", {}) or {}),
     )
     telemetry.attach(jarvis_app=jarvis, dispatcher=dispatcher)
 

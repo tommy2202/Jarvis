@@ -3,6 +3,7 @@
 This repo is a **minimal but functional** “Jarvis” assistant designed to run **offline-first** on Windows, with:
 
 - **Config-driven Stage-A intent router** (keyword matching + confidence + basic args)
+- **Core fact fuzzy safeguard** (time/date/status/version resolve locally even with phrasing variance)
 - **Stage-B local LLM fallback** (local HTTP to a model server, safe mock mode)
 - **Single enforcement point** (dispatcher enforces permissions + admin gating)
 - **Admin session** (passphrase hash stored in **encrypted secure store**; inactivity timeout)
@@ -426,6 +427,24 @@ If no local server is running, it falls back to **safe mock mode** (never execut
 
 You can run a local server via Ollama or llama.cpp with an OpenAI-compatible endpoint.
 Update `config/security.json` → `llm.base_url` and `llm.model`.
+
+## Core fact fuzzy safeguard (time/date/status)
+
+Jarvis treats a small set of **core facts** as **deterministic, local, read-only** answers (never modules, never LLM), so queries like “what day is today right now” don’t fall through due to phrasing variance.
+
+Routing order (high-level):
+- exact core phrase match
+- **fuzzy core-fact match** (Jaccard token overlap + small “contains” bonus; deterministic; bounded)
+- Stage-A module intents
+- (if ambiguous between two core facts) deterministic clarification
+- Stage-B LLM fallback (fenced; never for core facts)
+
+Tuning (non-sensitive): `config/ui.json` → `core_fact_fuzzy`
+- `enabled`: enable/disable the safeguard
+- `min_score`: minimum score for a match
+- `min_score_if_contains`: lower minimum when phrase tokens are contained in input tokens
+- `ambiguity_margin`: if top-2 scores are within this margin, ask a clarification question
+- `max_phrases_considered_per_intent`, `max_total_phrase_candidates`: performance bounds
 
 ## Voice mode (Windows 10/11)
 

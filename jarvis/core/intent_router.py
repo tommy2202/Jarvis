@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
+from jarvis.core.text_normalization import tokenize
+
 
 class IntentResult(BaseModel):
     intent_id: Optional[str] = None
@@ -30,7 +32,7 @@ class StageAIntentRouter:
 
     @staticmethod
     def _tokenize(text: str) -> List[str]:
-        return re.findall(r"[a-z0-9']+", text.lower())
+        return tokenize(text)
 
     def _score(self, tokens: List[str], intent: StageAIntent) -> Tuple[float, List[str]]:
         if not intent.keywords:

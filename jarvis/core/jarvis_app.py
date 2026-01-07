@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from jarvis.core.core_intents import AmbiguousMatch, CoreIntentRegistry, MatchResult
 from jarvis.core.dispatcher import Dispatcher
 from jarvis.core.events import EventLogger
 from jarvis.core.intent_router import IntentResult, StageAIntentRouter
@@ -36,6 +37,8 @@ class JarvisApp:
         logger,
         threshold: float = 0.55,
         telemetry: Any = None,
+        core_registry: CoreIntentRegistry | None = None,
+        core_fact_fuzzy_cfg: Dict[str, Any] | None = None,
     ):
         self.stage_a = stage_a
         self.stage_b = stage_b
@@ -46,8 +49,10 @@ class JarvisApp:
         self.logger = logger
         self.threshold = threshold
         self.telemetry = telemetry
+        self.core_registry = core_registry or CoreIntentRegistry(fuzzy_cfg=core_fact_fuzzy_cfg or {})
         self._lock = threading.Lock()
         self._pending_confirmations: Dict[str, Dict[str, Any]] = {}
+        self._pending_clarifications: Dict[str, Dict[str, Any]] = {}
 
     def _confirmation_key(self, source: str, client: Optional[Dict[str, Any]]) -> str:
         c = client or {}
@@ -69,6 +74,77 @@ class JarvisApp:
             return tmpl.format(**args)
         except Exception:  # noqa: BLE001
             return tmpl
+
+    def _consume_clarification(self, key: str) -> Optional[Dict[str, Any]]:
+        p = self._pending_clarifications.get(key)
+        if not p:
+            return None
+        if float(p.get("expires_at") or 0) < time.time():
+            self._pending_clarifications.pop(key, None)
+            return None
+        return p
+
+    @staticmethod
+    def _parse_clarify_choice(text: str, *, labels: Dict[str, str]) -> Optional[int]:
+        t = str(text or "").strip().lower()
+        if t in {"1", "first", "one", "option 1", "option1"}:
+            return 0
+        if t in {"2", "second", "two", "option 2", "option2"}:
+            return 1
+        # allow label-based replies ("time", "date", ...)
+        for idx, intent_id in enumerate(labels.keys()):
+            lab = (labels.get(intent_id) or "").strip().lower()
+            if lab and (t == lab or t.replace(" ", "") == lab.replace(" ", "")):
+                return idx
+        return None
+
+    def _handle_core_intent(self, intent_id: str, *, safe_mode: bool, shutting_down: bool) -> str:
+        # Core facts: deterministic, local, read-only.
+        from datetime import datetime, timezone
+        import importlib.metadata
+
+        if intent_id == "core.time.now":
+            now = datetime.now().astimezone()
+            return now.strftime("It’s %H:%M:%S.")
+        if intent_id == "core.date.today":
+            now = datetime.now(timezone.utc).astimezone()
+            return now.strftime("Today is %Y-%m-%d.")
+        if intent_id == "core.status.listening":
+            return "Listening."
+        if intent_id == "core.status.admin":
+            try:
+                is_admin = bool(self.dispatcher.security.is_admin())
+            except Exception:
+                is_admin = False
+            return "Admin is unlocked." if is_admin else "Admin is locked."
+        if intent_id == "core.status.busy":
+            # Conservative: if shutting down, we are busy; otherwise not.
+            return "I’m busy right now." if bool(shutting_down) else "I’m not busy."
+        if intent_id == "core.status.health":
+            if self.telemetry is None:
+                return "Health is unknown."
+            try:
+                rows = self.telemetry.get_health()
+            except Exception:
+                rows = []
+            statuses = {str((r or {}).get("status") or "").upper() for r in (rows or [])}
+            if "DOWN" in statuses:
+                return "Health: down."
+            if "DEGRADED" in statuses:
+                return "Health: degraded."
+            if "OK" in statuses:
+                return "Health: ok."
+            return "Health is unknown."
+        if intent_id == "core.identity.version":
+            v = "unknown"
+            try:
+                v = importlib.metadata.version("jarvis-offline")
+            except Exception:
+                v = "unknown"
+            return f"Version: {v}."
+
+        # Unknown core intent (should not happen)
+        return "OK."
 
     def _required_missing(self, intent_id: str, args: Dict[str, Any]) -> bool:
         cfg = self.intent_config_by_id.get(intent_id) or {}
@@ -136,6 +212,102 @@ class JarvisApp:
                     requires_followup=False,
                     followup_question=None,
                     modifications=dict(dr.modifications or {}),
+                )
+
+            # Clarification flow (core fact ambiguity)
+            pending_clarify = self._consume_clarification(key)
+            if pending_clarify is not None:
+                choices = list(pending_clarify.get("candidates") or [])
+                labels = dict(pending_clarify.get("labels") or {})
+                idx = self._parse_clarify_choice(message, labels=labels)
+                if idx is None or idx not in {0, 1} or idx >= len(choices):
+                    # keep pending, ask again (bounded)
+                    prompt = str(pending_clarify.get("prompt") or "Did you mean the first or second option?")
+                    return MessageResponse(
+                        trace_id=trace_id,
+                        reply=prompt,
+                        intent_id="system.clarify",
+                        intent_source="system",
+                        confidence=1.0,
+                        requires_followup=True,
+                        followup_question="Reply 'first' or 'second'.",
+                        modifications={},
+                    )
+                self._pending_clarifications.pop(key, None)
+                chosen = str(choices[idx])
+                reply = self._handle_core_intent(chosen, safe_mode=bool(safe_mode), shutting_down=bool(shutting_down))
+                return MessageResponse(
+                    trace_id=trace_id,
+                    reply=reply,
+                    intent_id=chosen,
+                    intent_source="core",
+                    confidence=1.0,
+                    requires_followup=False,
+                    followup_question=None,
+                    modifications={},
+                )
+
+            # Core intents (exact phrase match, then core-fact fuzzy safeguard)
+            exact = self.core_registry.exact_match(message)
+            if exact is not None:
+                reply = self._handle_core_intent(exact.intent_id, safe_mode=bool(safe_mode), shutting_down=bool(shutting_down))
+                self.event_logger.log(trace_id, "core_intent.exact_matched", {"intent_id": exact.intent_id, "matched_phrase": exact.matched_phrase})
+                return MessageResponse(
+                    trace_id=trace_id,
+                    reply=reply,
+                    intent_id=exact.intent_id,
+                    intent_source="core",
+                    confidence=1.0,
+                    requires_followup=False,
+                    followup_question=None,
+                    modifications={},
+                )
+
+            fuzzy = self.core_registry.fuzzy_match_fact_intent(message)
+            if isinstance(fuzzy, MatchResult):
+                # audit event: fuzzy core fact match used
+                self.event_logger.log(
+                    trace_id,
+                    "core_fact_fuzzy.matched",
+                    {"intent_id": fuzzy.intent_id, "score": float(fuzzy.score), "matched_phrase": str(fuzzy.matched_phrase)},
+                )
+                reply = self._handle_core_intent(fuzzy.intent_id, safe_mode=bool(safe_mode), shutting_down=bool(shutting_down))
+                return MessageResponse(
+                    trace_id=trace_id,
+                    reply=reply,
+                    intent_id=fuzzy.intent_id,
+                    intent_source="core",
+                    confidence=float(fuzzy.score),
+                    requires_followup=False,
+                    followup_question=None,
+                    modifications={},
+                )
+            if isinstance(fuzzy, AmbiguousMatch):
+                a, b = fuzzy.candidates
+                # Enter clarification mode (deterministic, local).
+                lab_a = self.core_registry.label(a.intent_id)
+                lab_b = self.core_registry.label(b.intent_id)
+                prompt = f"Did you mean {lab_a} or {lab_b}?"
+                self._pending_clarifications[key] = {
+                    "expires_at": time.time() + 20.0,
+                    "candidates": [a.intent_id, b.intent_id],
+                    "labels": {a.intent_id: lab_a, b.intent_id: lab_b},
+                    "prompt": prompt,
+                }
+                self.event_logger.log(
+                    trace_id,
+                    "core_fact_fuzzy.ambiguous",
+                    {"candidates": [{"intent_id": a.intent_id, "score": a.score}, {"intent_id": b.intent_id, "score": b.score}]},
+                )
+                return MessageResponse(
+                    trace_id=trace_id,
+                    reply=prompt,
+                    intent_id="system.clarify",
+                    intent_source="system",
+                    confidence=max(float(a.score), float(b.score)),
+                    requires_followup=True,
+                    followup_question="Reply 'first' or 'second'.",
+                    modifications={},
                 )
 
             # Stage A

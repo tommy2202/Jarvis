@@ -205,6 +205,16 @@ class UiConfig(BaseModel):
     max_log_entries_displayed: int = 200
     theme: str = "light"  # light|dark
     confirm_on_exit: bool = True
+    core_fact_fuzzy: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "enabled": True,
+            "min_score": 0.72,
+            "min_score_if_contains": 0.62,
+            "ambiguity_margin": 0.05,
+            "max_phrases_considered_per_intent": 30,
+            "max_total_phrase_candidates": 200,
+        }
+    )
 
 
 class LLMConfigFile(BaseModel):
