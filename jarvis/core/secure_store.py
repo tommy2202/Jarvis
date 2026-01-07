@@ -83,6 +83,8 @@ class SecureStore:
         self._lock = threading.Lock()
         self._audit = SecurityAuditLogger(path=os.path.join("logs", "security.jsonl"))
         self._shutdown_writes = False
+        self._writes_paused = False
+        self._pause_token: Optional[str] = None
 
     def begin_shutdown(self) -> None:
         """
@@ -90,6 +92,22 @@ class SecureStore:
         """
         with self._lock:
             self._shutdown_writes = True
+
+    def pause_writes(self) -> str:
+        """
+        Temporarily pause writes (for backups). Returns a token required for resume.
+        """
+        with self._lock:
+            tok = uuid.uuid4().hex
+            self._writes_paused = True
+            self._pause_token = tok
+            return tok
+
+    def resume_writes(self, token: str) -> None:
+        with self._lock:
+            if self._pause_token and token == self._pause_token:
+                self._writes_paused = False
+                self._pause_token = None
 
     # ---------- public API ----------
     def status(self) -> SecureStoreStatus:
@@ -119,7 +137,7 @@ class SecureStore:
         return payload.secrets.get(key)
 
     def set(self, key: str, value: Any, *, trace_id: str = "secure") -> None:
-        if self._shutdown_writes:
+        if self._shutdown_writes or self._writes_paused:
             raise SecretUnavailable("Secure store writes are blocked during shutdown.")
         if self.read_only:
             self._audit.log(trace_id=trace_id, severity="WARN", event="secure.write_blocked", ip=None, endpoint="secure_store", outcome="read_only", details={"key": key})
@@ -141,7 +159,7 @@ class SecureStore:
             self._audit.log(trace_id=trace_id, severity="INFO", event="secure.set", ip=None, endpoint="secure_store", outcome="ok", details={"key": key})
 
     def delete(self, key: str, *, trace_id: str = "secure") -> None:
-        if self._shutdown_writes:
+        if self._shutdown_writes or self._writes_paused:
             raise SecretUnavailable("Secure store writes are blocked during shutdown.")
         if self.read_only:
             raise SecretUnavailable("Secure store is read-only.")

@@ -1,0 +1,25 @@
+{
+  "enabled": true,
+  "default_dir": "backups",
+  "profiles": {
+    "minimal": {
+      "include_logs": false
+    },
+    "standard": {
+      "include_logs": true,
+      "log_days": 7,
+      "include_telemetry": true
+    },
+    "full": {
+      "include_logs": true,
+      "log_days": 3650,
+      "include_telemetry": true
+    }
+  },
+  "support_bundle": {
+    "default_days": 7,
+    "redact": true,
+    "max_total_mb": 200
+  }
+}
+

@@ -145,6 +145,19 @@ class PolicyConfigFile(BaseModel):
     default: Dict[str, Any] = Field(default_factory=lambda: {"deny_unknown_intents": True, "deny_high_sensitivity_without_admin": True})
     rules: List[Dict[str, Any]] = Field(default_factory=list)
 
+
+class BackupConfigFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    default_dir: str = "backups"
+    profiles: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "minimal": {"include_logs": False},
+            "standard": {"include_logs": True, "log_days": 7, "include_telemetry": True},
+            "full": {"include_logs": True, "log_days": 3650, "include_telemetry": True},
+        }
+    )
+    support_bundle: Dict[str, Any] = Field(default_factory=lambda: {"default_days": 7, "redact": True, "max_total_mb": 200})
 class EventsBusConfigFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = True
@@ -271,6 +284,7 @@ class AppConfigV2(BaseModel):
     resources: ResourcesConfigFile
     audit: AuditConfigFile
     policy: PolicyConfigFile
+    backup: BackupConfigFile
     events: EventsBusConfigFile
     runtime: RuntimeControlConfigFile
     runtime_state: RuntimeStateConfigFile

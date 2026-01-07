@@ -34,6 +34,7 @@ from jarvis.core.config.models import (
     ResourcesConfigFile,
     AuditConfigFile,
     PolicyConfigFile,
+    BackupConfigFile,
     RuntimeControlConfigFile,
     RuntimeStateConfigFile,
     UiConfig,
@@ -152,6 +153,8 @@ class ConfigManager:
         """
         if self.read_only:
             raise ConfigError("Config manager is read-only.")
+        if getattr(self, "_writes_paused", False):
+            raise ConfigError("Config writes are paused (backup in progress).")
         if not isinstance(data, dict):
             raise ConfigError("Config data must be an object.")
         max_backups = int((self.get().app.backups or {}).get("max_backups_per_file", 10))
@@ -159,6 +162,19 @@ class ConfigManager:
         atomic_write_json(path, data, self.fs.backups_dir, max_backups=max_backups)
         # validate after write; if invalid keep previous in memory but don't auto-rollback silently
         self.load_all()
+
+    def pause_writes(self) -> str:
+        import uuid
+
+        tok = uuid.uuid4().hex
+        self._writes_paused = True
+        self._pause_token = tok
+        return tok
+
+    def resume_writes(self, token: str) -> None:
+        if getattr(self, "_pause_token", None) == token:
+            self._writes_paused = False
+            self._pause_token = None
 
     def diff_since_last_load(self) -> DiffResult:
         now = self._load_raw_files()
@@ -230,6 +246,7 @@ class ConfigManager:
             "resources.json",
             "audit.json",
             "policy.json",
+            "backup.json",
             "events.json",
             "runtime.json",
             "runtime_state.json",
@@ -272,6 +289,7 @@ class ConfigManager:
             "resources.json": ResourcesConfigFile().model_dump(),
             "audit.json": AuditConfigFile().model_dump(),
             "policy.json": PolicyConfigFile().model_dump(),
+            "backup.json": BackupConfigFile().model_dump(),
             "events.json": EventsBusConfigFile().model_dump(),
             "runtime.json": RuntimeControlConfigFile().model_dump(),
             "runtime_state.json": RuntimeStateConfigFile().model_dump(),
@@ -317,6 +335,7 @@ class ConfigManager:
                 resources=ResourcesConfigFile.model_validate(files.get("resources.json") or {}),
                 audit=AuditConfigFile.model_validate(files.get("audit.json") or {}),
                 policy=PolicyConfigFile.model_validate(files.get("policy.json") or {}),
+                backup=BackupConfigFile.model_validate(files.get("backup.json") or {}),
                 events=EventsBusConfigFile.model_validate(files.get("events.json") or {}),
                 runtime=RuntimeControlConfigFile.model_validate(files.get("runtime.json") or {}),
                 runtime_state=RuntimeStateConfigFile.model_validate(files.get("runtime_state.json") or {}),

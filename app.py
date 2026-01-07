@@ -345,6 +345,19 @@ def main() -> None:
     telemetry.attach(secure_store=secure_store, security_manager=security)
     runtime_state.attach(security_manager=security, secure_store=secure_store)
 
+    # Backup manager (zip exports + manifests)
+    from jarvis.core.backup.api import BackupManager
+
+    backup_mgr = BackupManager(
+        cfg=cfg_obj.backup.model_dump(),
+        root_dir=".",
+        config_manager=config,
+        secure_store=secure_store,
+        runtime_state=runtime_state,
+        audit_timeline=audit,
+        telemetry=telemetry,
+    )
+
     _ensure_admin_passphrase(security, logger)
 
     # Setup wizard currently uses config files; keep behavior but avoid ad-hoc loads elsewhere.
@@ -1083,6 +1096,64 @@ def main() -> None:
                 print(res)
                 continue
             print("Usage: /audit tail [n] | /audit query [--since=.. --category=.. --outcome=.. --source=.. --limit=N] | /audit show <id> | /audit export json|csv <path> | /audit integrity | /audit purge")
+            continue
+        if text.startswith("/backup"):
+            parts = text.split()
+            if len(parts) == 1 or parts[1] == "list":
+                print(backup_mgr.list_backups())
+                continue
+            if len(parts) >= 2 and parts[1] == "create":
+                profile = parts[2] if len(parts) >= 3 and not parts[2].startswith("--") else "standard"
+                out_dir = None
+                for p in parts[2:]:
+                    if p.startswith("--path"):
+                        # allow "--path dir" pattern
+                        pass
+                # simple parse: --path=<dir>
+                for p in parts[2:]:
+                    if p.startswith("--path="):
+                        out_dir = p.split("=", 1)[1]
+                path = backup_mgr.create_backup(profile=profile, out_dir=out_dir)
+                print(path)
+                continue
+            if len(parts) >= 3 and parts[1] == "verify":
+                print(backup_mgr.verify_backup(parts[2]))
+                continue
+            if len(parts) >= 3 and parts[1] == "export" and parts[2] == "support":
+                days = int((cfg_obj.backup.support_bundle or {}).get("default_days", 7))
+                out_dir = None
+                for p in parts[3:]:
+                    if p.startswith("--days="):
+                        days = int(p.split("=", 1)[1])
+                    if p.startswith("--path="):
+                        out_dir = p.split("=", 1)[1]
+                print(backup_mgr.export_support_bundle(days=days, out_dir=out_dir))
+                continue
+            if len(parts) >= 3 and parts[1] == "restore":
+                if not security.is_admin():
+                    print("Admin required.")
+                    continue
+                zip_path = parts[2]
+                mode = "all"
+                apply = False
+                dry = True
+                for p in parts[3:]:
+                    if p.startswith("--mode="):
+                        mode = p.split("=", 1)[1]
+                    if p == "--apply":
+                        apply = True
+                        dry = False
+                    if p == "--dry-run":
+                        dry = True
+                        apply = False
+                if apply:
+                    ans = input("Apply restore? This will overwrite files. (y/N) ").strip().lower()
+                    if ans != "y":
+                        print("Canceled.")
+                        continue
+                print(backup_mgr.restore(zip_path, mode=mode, dry_run=dry, apply=apply))
+                continue
+            print("Usage: /backup create [minimal|standard|full] [--path=<dir>] | /backup verify <zip> | /backup list | /backup export support [--days=N] [--path=<dir>] | /backup restore <zip> [--dry-run|--apply] [--mode=config|runtime|secure|all]")
             continue
         if text.startswith("/events"):
             parts = text.split()

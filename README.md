@@ -120,6 +120,28 @@ CLI commands:
 - `/policy enable` (admin-only)
 - `/policy disable` (admin-only)
 
+## Backup & restore (zip + manifest)
+
+Jarvis can create **portable, integrity-checked zip backups** with a `manifest.json` + `manifest.sha256`.
+
+Profiles:
+- **minimal**: `config/` + `secure/` (encrypted only) + `runtime/` + audit head
+- **standard**: minimal + last 7 days of `logs/` + telemetry snapshots
+- **full**: standard + all `logs/` (still excludes raw audio and caches)
+
+CLI commands:
+- `/backup create [minimal|standard|full] [--path=<dir>]`
+- `/backup verify <zip_path>`
+- `/backup list`
+- `/backup export support [--days=N] [--path=<dir>]` (redacted bundle for debugging)
+- `/backup restore <zip_path> [--dry-run|--apply] [--mode=config|runtime|secure|all]` (admin-only)
+
+Standalone scripts:
+- `python scripts/backup_create.py standard`
+- `python scripts/backup_verify.py <zip_path>`
+- `python scripts/backup_restore.py <zip_path> --mode=config --apply`
+- `python scripts/support_bundle.py --days 7`
+
 ## Windows setup
 
 ### 1) Create a venv + install dependencies
