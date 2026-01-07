@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import sys
 import threading
 import time
+import uuid
 from typing import Any, Dict, Optional
 
 import uvicorn
@@ -37,6 +39,10 @@ from jarvis.core.circuit_breaker import CircuitBreaker, BreakerConfig, BreakerRe
 from jarvis.core.llm_lifecycle import LLMPolicy, LLMLifecycleController
 from jarvis.core.llm_router import LLMConfig as StageBLegacyConfig, StageBLLMRouter
 from jarvis.core.telemetry.manager import TelemetryManager, TelemetryConfig
+from jarvis.core.ops_log import OpsLogger
+from jarvis.core.runtime_control import RuntimeController, check_startup_recovery
+from jarvis.core.shutdown_orchestrator import ShutdownConfig, ShutdownOrchestrator
+from jarvis.core.persistence.runtime_state import write_dirty_flag
 from jarvis.web.api import create_app
 from jarvis.web.auth import build_api_key_auth  # legacy
 from jarvis.web.security.auth import ApiKeyStore
@@ -62,6 +68,56 @@ def _ensure_admin_passphrase(security: SecurityManager, logger) -> None:
     logger.info("Admin passphrase set.")
 
 
+class WebServerHandle:
+    def __init__(self, *, app, host: str, port: int, logger, telemetry: TelemetryManager | None, allow_remote: bool, draining_event: threading.Event):  # noqa: ANN001
+        self.app = app
+        self.host = host
+        self.port = port
+        self.logger = logger
+        self.telemetry = telemetry
+        self.allow_remote = allow_remote
+        self.draining_event = draining_event
+        self._server: Optional[uvicorn.Server] = None
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        cfg = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="info")
+        self._server = uvicorn.Server(cfg)
+
+        def run() -> None:
+            assert self._server is not None
+            self._server.run()
+
+        self._thread = threading.Thread(target=run, name="jarvis-web", daemon=True)
+        self._thread.start()
+        if self.telemetry is not None:
+            try:
+                self.telemetry.set_web_server_info(enabled=True, bind_host=self.host, port=self.port, allow_remote=self.allow_remote, thread_alive=True)
+            except Exception:
+                pass
+        self.logger.info(f"Web server started on http://{self.host}:{self.port}")
+
+    def set_draining(self, draining: bool) -> None:
+        if draining:
+            self.draining_event.set()
+        else:
+            self.draining_event.clear()
+
+    def stop(self) -> None:
+        self.set_draining(True)
+        if self._server is not None:
+            self._server.should_exit = True
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=3.0)
+        if self.telemetry is not None:
+            try:
+                self.telemetry.set_web_server_info(enabled=True, bind_host=self.host, port=self.port, allow_remote=self.allow_remote, thread_alive=False)
+            except Exception:
+                pass
+
+
 def _start_web_thread(
     jarvis: JarvisApp,
     security: SecurityManager,
@@ -72,10 +128,10 @@ def _start_web_thread(
     job_manager: JobManager | None,
     runtime: JarvisRuntime | None,
     telemetry: TelemetryManager | None,
-) -> None:
+) -> Optional[WebServerHandle]:
     web_cfg = config_manager.get().web.model_dump()
     if not web_cfg.get("enabled", False):
-        return
+        return None
 
     enable_web_ui = bool(web_cfg.get("enable_web_ui", True))
     allowed_origins = web_cfg.get("allowed_origins") or []
@@ -94,7 +150,7 @@ def _start_web_thread(
     else:
         if not secure_store.is_unlocked():
             logger.error("Refusing to start web server: allow_remote=true requires USB key present.")
-            return
+            return None
         from jarvis.core.security_events import SecurityAuditLogger
 
         SecurityAuditLogger().log(
@@ -107,6 +163,7 @@ def _start_web_thread(
             details={"bind_host": bind_host, "port": port},
         )
 
+    draining_event = threading.Event()
     fastapi_app = create_app(
         jarvis_app=jarvis,
         security_manager=security,
@@ -118,23 +175,15 @@ def _start_web_thread(
         secure_store=secure_store,
         web_cfg=web_cfg,
         telemetry=telemetry,
+        draining_event=draining_event,
         allowed_origins=list(allowed_origins),
         enable_web_ui=enable_web_ui,
         allow_remote_admin_unlock=False,
         remote_control_enabled=secure_store.is_unlocked(),
     )
-
-    def run() -> None:
-        uvicorn.run(fastapi_app, host=bind_host, port=port, log_level="info")
-
-    t = threading.Thread(target=run, name="jarvis-web", daemon=True)
-    t.start()
-    if telemetry is not None:
-        try:
-            telemetry.set_web_server_info(enabled=True, bind_host=bind_host, port=port, allow_remote=allow_remote, thread_alive=t.is_alive())
-        except Exception:
-            pass
-    logger.info(f"Web server started on http://{bind_host}:{port}")
+    h = WebServerHandle(app=fastapi_app, host=bind_host, port=port, logger=logger, telemetry=telemetry, allow_remote=allow_remote, draining_event=draining_event)
+    h.start()
+    return h
 
 
 def main() -> None:
@@ -145,9 +194,28 @@ def main() -> None:
 
     logger = setup_logging("logs")
     event_logger = EventLogger("logs/events.jsonl")
+    ops = OpsLogger()
+    recovery_info = check_startup_recovery(ops=ops, root_path=".")
+    # Mark this run as "dirty" until we complete a graceful shutdown.
+    try:
+        write_dirty_flag(".", trace_id=uuid.uuid4().hex)
+    except Exception:
+        pass
 
     config = get_config(logger=logger)
     cfg_obj = config.get()
+    # Safe-mode restart override (local, non-persistent).
+    if recovery_info.get("restart") and bool((recovery_info["restart"] or {}).get("safe_mode", False)):
+        defaults = (cfg_obj.runtime.startup or {}).get("safe_mode_defaults") or {"web_enabled": True, "voice_enabled": True, "llm_enabled": True}
+        try:
+            cfg_obj = cfg_obj.model_copy(deep=True)
+            cfg_obj.web.enabled = bool(defaults.get("web_enabled", False))
+            cfg_obj.voice.enabled = bool(defaults.get("voice_enabled", False))
+            cfg_obj.state_machine.enable_voice = bool(defaults.get("voice_enabled", False))
+            cfg_obj.llm.enabled = bool(defaults.get("llm_enabled", False))
+            ops.log(trace_id=str((recovery_info["restart"] or {}).get("trace_id") or "startup"), event="startup_safe_mode", outcome="applied", details=defaults)
+        except Exception:
+            pass
 
     telemetry_cfg = TelemetryConfig.model_validate(cfg_obj.telemetry.model_dump())
     telemetry = TelemetryManager(cfg=telemetry_cfg, logger=logger, root_path=".")
@@ -230,7 +298,7 @@ def main() -> None:
 
     # LLM lifecycle policy (new)
     llm_policy = LLMPolicy.model_validate(cfg_obj.llm.model_dump())
-    llm_lifecycle = LLMLifecycleController(policy=llm_policy, event_logger=event_logger, logger=logger, telemetry=telemetry) if llm_policy.roles else None
+    llm_lifecycle = LLMLifecycleController(policy=llm_policy, event_logger=event_logger, logger=logger, telemetry=telemetry) if (llm_policy.roles and llm_policy.enabled) else None
     telemetry.attach(llm_lifecycle=llm_lifecycle)
 
     # Stage-B router uses lifecycle if available; otherwise stays in safe mock mode.
@@ -387,38 +455,41 @@ def main() -> None:
     runtime.start()
     telemetry.attach(runtime=runtime, voice_adapter=voice_adapter, tts_adapter=tts_adapter)
 
-    _start_web_thread(jarvis, security, secure_store, config, event_logger, logger, job_manager, runtime, telemetry)
+    web_handle = _start_web_thread(jarvis, security, secure_store, config, event_logger, logger, job_manager, runtime, telemetry)
+
+    # Runtime control (shutdown/restart orchestration)
+    shutdown_block = cfg_obj.runtime.shutdown or {}
+    shutdown_cfg = ShutdownConfig(
+        phase_timeouts_seconds=dict(shutdown_block.get("phase_timeouts_seconds") or {}),
+        job_grace_seconds=float(shutdown_block.get("job_grace_seconds", 15)),
+        force_kill_after_seconds=float(shutdown_block.get("force_kill_after_seconds", 30)),
+    )
+    orchestrator = ShutdownOrchestrator(
+        cfg=shutdown_cfg,
+        ops=ops,
+        logger=logger,
+        runtime=runtime,
+        job_manager=job_manager,
+        llm_lifecycle=llm_lifecycle,
+        telemetry=telemetry,
+        secure_store=secure_store,
+        config_manager=config,
+        web_handle=web_handle,
+        ui_handle=None,
+        root_path=".",
+    )
+    controller = RuntimeController(runtime_cfg=cfg_obj.runtime.model_dump(), ops=ops, logger=logger, orchestrator=orchestrator, security_manager=security)
 
     if args.ui:
         from jarvis.ui.app import run_desktop_ui
 
         ui_cfg = config.get().ui
         try:
-            run_desktop_ui(runtime=runtime, config=ui_cfg, logger=logger)
+            run_desktop_ui(runtime=runtime, config=ui_cfg, logger=logger, on_shutdown=lambda: controller.request_shutdown(reason="ui_close", restart=False, argv=sys.argv))
         finally:
-            # Ensure clean shutdown even if UI raises.
-            try:
-                runtime.request_shutdown()
-            except Exception:
-                pass
-            try:
-                runtime.stop()
-            except Exception:
-                pass
-            try:
-                if llm_lifecycle is not None:
-                    llm_lifecycle.stop()
-            except Exception:
-                pass
-            try:
-                if job_manager is not None:
-                    job_manager.stop()
-            except Exception:
-                pass
-            try:
-                telemetry.stop()
-            except Exception:
-                pass
+            # If UI exits without invoking callback, shut down gracefully.
+            if not controller.get_shutdown_status().get("in_progress"):
+                controller.request_shutdown(reason="ui_exit", restart=False, argv=sys.argv)
         return
 
     logger.info("Jarvis CLI ready. Type /exit to quit. (/status, /wake, /sleep, /shutdown, /jobs ...)")
@@ -426,9 +497,13 @@ def main() -> None:
     while True:
         try:
             text = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
             print()
             break
+        except KeyboardInterrupt:
+            print()
+            controller.request_shutdown(reason="ctrl_c", restart=False, argv=sys.argv)
+            return
         if not text:
             continue
         if text == "/exit":
@@ -438,16 +513,40 @@ def main() -> None:
             print("Sleeping.")
             continue
         if text == "/status":
-            print(runtime.get_status())
+            st = runtime.get_status()
+            st["shutdown_status"] = controller.get_shutdown_status()
+            print(st)
             continue
         if text == "/wake":
             runtime.wake()
             print("Wake requested.")
             continue
-        if text == "/shutdown":
-            runtime.request_shutdown()
-            print("Shutdown requested.")
-            break
+        if text.startswith("/shutdown"):
+            requires_confirm = bool((cfg_obj.runtime.shutdown or {}).get("shutdown_requires_confirm", True))
+            if requires_confirm:
+                ans = input("Confirm shutdown? (y/N) ").strip().lower()
+                if ans != "y":
+                    print("Canceled.")
+                    continue
+            controller.request_shutdown(reason="cli_shutdown", restart=False, argv=sys.argv)
+            return
+        if text.startswith("/restart"):
+            parts = text.split()
+            if len(parts) >= 2 and parts[1] in {"llm", "web", "voice", "jobs"}:
+                ok = controller.restart_subsystem(parts[1])
+                print("OK" if ok else "Failed")
+                continue
+            try:
+                controller.request_restart(reason="cli_restart", safe_mode=False, argv=sys.argv)
+            except Exception as e:
+                print(str(e))
+            return
+        if text.startswith("/safe_mode restart"):
+            try:
+                controller.request_restart(reason="cli_safe_mode_restart", safe_mode=True, argv=sys.argv)
+            except Exception as e:
+                print(str(e))
+            return
         if text.startswith("/say "):
             runtime.say(text.split(" ", 1)[1].strip(), source="cli")
             print("Speaking...")
@@ -812,23 +911,10 @@ def main() -> None:
         time.sleep(0.01)
 
     try:
-        runtime.stop()
+        controller.request_shutdown(reason="cli_exit", restart=False, argv=sys.argv)
     except Exception:
         pass
-    try:
-        if llm_lifecycle is not None:
-            llm_lifecycle.stop()
-    except Exception:
-        pass
-    try:
-        if job_manager is not None:
-            job_manager.stop()
-    except Exception:
-        pass
-    try:
-        telemetry.stop()
-    except Exception:
-        pass
+    return
 
 
 if __name__ == "__main__":

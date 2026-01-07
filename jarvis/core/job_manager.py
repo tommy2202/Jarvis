@@ -143,6 +143,7 @@ class JobManager:
         self._queue: "queue.PriorityQueue[Tuple[int, float, str]]" = queue.PriorityQueue()
         self._canceled: set[str] = set()
         self._running: Dict[str, Dict[str, Any]] = {}  # job_id -> {proc,q,start_ts,deadline}
+        self._accepting = True
 
         os.makedirs(self.events_dir, exist_ok=True)
         os.makedirs(self.sandbox_dir, exist_ok=True)
@@ -188,6 +189,8 @@ class JobManager:
         priority: int = 50,
         max_runtime_seconds: Optional[int] = None,
     ) -> str:
+        if not self._accepting:
+            raise ValueError("Job manager is shutting down.")
         if kind not in self._registry:
             raise ValueError("Unknown job kind (not allowlisted).")
         args = args or {}
@@ -347,6 +350,64 @@ class JobManager:
             self._running.clear()
             self._exec_args.clear()
             self._persist_index_locked()
+
+    def begin_shutdown(self) -> None:
+        self._accepting = False
+
+    def drain(self, *, grace_seconds: float = 15.0, force_kill_after_seconds: float = 30.0) -> Dict[str, Any]:
+        """
+        Stop accepting new jobs, wait for running jobs up to grace_seconds, then terminate remaining.
+        Returns counts.
+        """
+        self.begin_shutdown()
+        t0 = time.time()
+        deadline = t0 + float(grace_seconds)
+        while time.time() < deadline:
+            with self._lock:
+                running = [jid for jid, st in self._jobs.items() if st.status == JobStatus.RUNNING]
+            if not running:
+                return {"drained": True, "running_remaining": 0}
+            time.sleep(0.1)
+        # force kill
+        kill_deadline = time.time() + max(0.0, float(force_kill_after_seconds))
+        while time.time() < kill_deadline:
+            with self._lock:
+                running_items = list(self._running.items())
+            for job_id, run in running_items:
+                proc = run.get("proc")
+                if proc is not None and proc.is_alive():
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+            with self._lock:
+                running = [jid for jid, st in self._jobs.items() if st.status == JobStatus.RUNNING]
+            if not running:
+                break
+            time.sleep(0.2)
+        with self._lock:
+            running_remaining = sum(1 for st in self._jobs.values() if st.status == JobStatus.RUNNING)
+        return {"drained": False, "running_remaining": int(running_remaining)}
+
+    def restart_supervisor(self) -> None:
+        """
+        Best-effort "restart_jobs" without recreating the object.
+        Terminates running workers and restarts the supervisor thread loop.
+        """
+        self.begin_shutdown()
+        try:
+            self.drain(grace_seconds=0.0, force_kill_after_seconds=1.0)
+        except Exception:
+            pass
+        self._stop.set()
+        try:
+            self._supervisor.join(timeout=2.0)
+        except Exception:
+            pass
+        self._stop = threading.Event()
+        self._accepting = True
+        self._supervisor = threading.Thread(target=self._run, name="jobs-supervisor", daemon=True)
+        self._supervisor.start()
 
     def enforce_retention(self) -> None:
         self._enforce_retention()

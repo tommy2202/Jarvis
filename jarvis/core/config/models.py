@@ -92,6 +92,27 @@ class TelemetryConfigFile(BaseModel):
     gpu: Dict[str, Any] = Field(default_factory=lambda: {"enable_nvml": True})
 
 
+class RuntimeControlConfigFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    shutdown: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "enable_restart": True,
+            "restart_requires_admin": True,
+            "shutdown_requires_confirm": True,
+            "phase_timeouts_seconds": {
+                "quiesce_inputs": 5,
+                "drain_jobs": 20,
+                "persist_flush": 10,
+                "unload_resources": 10,
+                "stop_services": 10,
+            },
+            "job_grace_seconds": 15,
+            "force_kill_after_seconds": 30,
+        }
+    )
+    startup: Dict[str, Any] = Field(default_factory=lambda: {"safe_mode_defaults": {"web_enabled": True, "voice_enabled": True, "llm_enabled": True}})
+
+
 class UiConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     refresh_interval_ms: int = 350
@@ -174,6 +195,7 @@ class AppConfigV2(BaseModel):
     web: WebConfig
     ui: UiConfig
     telemetry: TelemetryConfigFile
+    runtime: RuntimeControlConfigFile
     jobs: JobsConfig
     llm: LLMConfigFile
     recovery: RecoveryConfigFile

@@ -1,0 +1,24 @@
+{
+  "shutdown": {
+    "enable_restart": true,
+    "restart_requires_admin": true,
+    "shutdown_requires_confirm": true,
+    "phase_timeouts_seconds": {
+      "quiesce_inputs": 5,
+      "drain_jobs": 20,
+      "persist_flush": 10,
+      "unload_resources": 10,
+      "stop_services": 10
+    },
+    "job_grace_seconds": 15,
+    "force_kill_after_seconds": 30
+  },
+  "startup": {
+    "safe_mode_defaults": {
+      "web_enabled": true,
+      "voice_enabled": true,
+      "llm_enabled": true
+    }
+  }
+}
+

@@ -267,8 +267,11 @@ class MainWindow(ttk.Frame):
         runtime_cfg = st.get("runtime_cfg") or {}
         max_conc = int(runtime_cfg.get("max_concurrent_interactions", 1) or 1)
         busy = state not in {"SLEEPING", "IDLE"}
+        shutting_down = bool((st.get("shutdown") or {}).get("in_progress", False))
         if max_conc <= 1 and busy:
             self.input.set_enabled(False, message="Jarvis is busy…")
+        elif shutting_down:
+            self.input.set_enabled(False, message="Shutting down…")
         else:
             self.input.set_enabled(True, message="")
 

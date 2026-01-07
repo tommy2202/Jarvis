@@ -159,6 +159,9 @@ class JarvisRuntime:
         self._last_trace_id: Optional[str] = None
         self._llm_loaded = False
 
+        self._accepting_inputs = True
+        self._shutdown_in_progress = False
+
         self._voice_enabled = bool(cfg.enable_voice)
         self._wake_word_enabled = bool(cfg.enable_wake_word)
 
@@ -188,6 +191,19 @@ class JarvisRuntime:
                 self._log_sm("voice.start_failed", {"error": str(e)})
         self._thread.start()
 
+    def begin_shutdown(self, *, reason: str = "shutdown") -> None:
+        """
+        Phase 0/1 hook: stop accepting new inputs and quiesce adapters.
+        """
+        self._shutdown_in_progress = True
+        self._accepting_inputs = False
+        try:
+            if self.voice_adapter is not None:
+                self.voice_adapter.stop()
+        except Exception:
+            pass
+        self._log_sm("shutdown.begin", {"reason": reason})
+
     def stop(self) -> None:
         self.request_shutdown()
         self._thread.join(timeout=2.0)
@@ -200,9 +216,19 @@ class JarvisRuntime:
                 self.voice_adapter.stop()
             except Exception:
                 pass
+        if self.tts_adapter is not None:
+            try:
+                self.tts_adapter.stop()
+            except Exception:
+                pass
 
     def submit_text(self, source: str, text: str, client_meta: Optional[Dict[str, Any]] = None) -> str:
         trace_id = uuid.uuid4().hex
+        if not self._accepting_inputs:
+            # immediate safe reply
+            with self._results_lock:
+                self._results[trace_id] = InteractionResult(trace_id=trace_id, reply="Shutting down.", intent={"id": "system.shutdown", "source": "system", "confidence": 1.0}, created_at=time.time())
+            return trace_id
         ev = RuntimeEvent(trace_id=trace_id, source=source, type=EventType.TextInputReceived, payload={"text": text, "client": redact(client_meta or {})})
         self._enqueue(ev)
         if self.telemetry is not None:
@@ -249,6 +275,7 @@ class JarvisRuntime:
             "queue_depth": self._q.qsize(),
             "pending_depth": self._pending_interactions.qsize(),
             "results_cached": len(self._results),
+            "shutdown": {"in_progress": bool(self._shutdown_in_progress), "accepting_inputs": bool(self._accepting_inputs)},
             "admin": admin,
             "secure_store": secure,
             "llm": llm,
@@ -617,6 +644,11 @@ class JarvisRuntime:
     def _handle_event(self, ev: RuntimeEvent) -> None:
         self._writer.write({"ts": time.time(), "trace_id": ev.trace_id, "event": "event.process", "type": ev.type.value, "state": self._state.value})
 
+        if self._shutdown_in_progress and ev.type in {EventType.TextInputReceived, EventType.WakeWordDetected}:
+            # Drain mode: do not start new interactions
+            self._finalize_reply(ev.trace_id, "Shutting down.", intent={"id": "system.shutdown", "source": "system", "confidence": 1.0})
+            return
+
         if ev.type == EventType.ShutdownRequested:
             self._stop.set()
             try:
@@ -865,4 +897,10 @@ class TTSAdapter:
 
     def speak(self, trace_id: str, text: str) -> None:
         self.worker.speak_blocking(trace_id, text)
+
+    def stop(self) -> None:
+        try:
+            self.worker.stop()
+        except Exception:
+            pass
 

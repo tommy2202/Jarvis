@@ -82,6 +82,14 @@ class SecureStore:
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
         self._audit = SecurityAuditLogger(path=os.path.join("logs", "security.jsonl"))
+        self._shutdown_writes = False
+
+    def begin_shutdown(self) -> None:
+        """
+        Prevent new writes during shutdown (safety).
+        """
+        with self._lock:
+            self._shutdown_writes = True
 
     # ---------- public API ----------
     def status(self) -> SecureStoreStatus:
@@ -111,6 +119,8 @@ class SecureStore:
         return payload.secrets.get(key)
 
     def set(self, key: str, value: Any, *, trace_id: str = "secure") -> None:
+        if self._shutdown_writes:
+            raise SecretUnavailable("Secure store writes are blocked during shutdown.")
         if self.read_only:
             self._audit.log(trace_id=trace_id, severity="WARN", event="secure.write_blocked", ip=None, endpoint="secure_store", outcome="read_only", details={"key": key})
             raise SecretUnavailable("Secure store is read-only.")
@@ -131,6 +141,8 @@ class SecureStore:
             self._audit.log(trace_id=trace_id, severity="INFO", event="secure.set", ip=None, endpoint="secure_store", outcome="ok", details={"key": key})
 
     def delete(self, key: str, *, trace_id: str = "secure") -> None:
+        if self._shutdown_writes:
+            raise SecretUnavailable("Secure store writes are blocked during shutdown.")
         if self.read_only:
             raise SecretUnavailable("Secure store is read-only.")
         with self._lock:

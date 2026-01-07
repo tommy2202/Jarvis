@@ -173,6 +173,30 @@ Web (authenticated):
 - `GET /v1/metrics`
 - `GET /v1/telemetry/snapshot`
 
+## Graceful shutdown + safe restart
+
+Jarvis supports a **deterministic**, **logged** shutdown sequence that:
+- stops accepting new requests (web/UI/CLI)
+- drains/cancels jobs safely
+- flushes/persists a runtime snapshot
+- unloads heavy resources (LLM, audio/TTS threads)
+- stops the web server in “draining mode”
+
+Ops log:
+- `logs/ops.jsonl`
+
+Runtime state snapshot:
+- `logs/runtime/state_snapshot.json`
+
+CLI:
+- `/shutdown` (may prompt for confirmation; controlled by `config/runtime.json`)
+- `/restart` (admin-only by default; controlled by `config/runtime.json`)
+- `/restart llm|web|voice|jobs` (best-effort subsystem restart)
+- `/safe_mode restart` (restart with temporary safe-mode overrides)
+
+Config:
+- `config/runtime.json`
+
 CLI commands:
 - `/admin unlock` (prompts for passphrase; no echo)
 - `/admin lock`

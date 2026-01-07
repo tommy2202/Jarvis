@@ -7,7 +7,7 @@ from jarvis.ui.ui_models import UiConfig
 from jarvis.ui.views.main_window import MainWindow
 
 
-def run_desktop_ui(*, runtime, config, logger) -> None:  # noqa: ANN001
+def run_desktop_ui(*, runtime, config, logger, on_shutdown=None) -> None:  # noqa: ANN001
     """
     Start Tkinter UI as a thin client over Jarvis runtime.
     """
@@ -46,7 +46,10 @@ def run_desktop_ui(*, runtime, config, logger) -> None:  # noqa: ANN001
 
                     if not messagebox.askokcancel("Exit", "Exit Jarvis Desktop? This will shut down Jarvis core."):
                         return
-                runtime.request_shutdown()
+                if on_shutdown is not None:
+                    on_shutdown()
+                else:
+                    runtime.request_shutdown()
             except Exception:
                 pass
             try:

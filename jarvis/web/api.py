@@ -42,6 +42,7 @@ def create_app(
     secure_store=None,
     web_cfg: Optional[dict] = None,
     telemetry=None,
+    draining_event=None,
     allowed_origins: list[str] | None = None,
     enable_web_ui: bool = True,
     allow_remote_admin_unlock: bool = False,
@@ -133,6 +134,8 @@ def create_app(
 
     @app.post("/v1/message", response_model=MessageResponse)
     async def post_message(req: MessageRequest, request: Request):
+        if draining_event is not None and getattr(draining_event, "is_set", lambda: False)():
+            raise HTTPException(status_code=503, detail="Shutting down")
         if not remote_control_enabled:
             raise HTTPException(status_code=503, detail="Remote control disabled (USB key required).")
         if runtime is not None:
@@ -209,6 +212,8 @@ def create_app(
 
     @app.post("/v1/admin/unlock", response_model=AdminUnlockResponse)
     async def admin_unlock(req: AdminUnlockRequest, request: Request):
+        if draining_event is not None and getattr(draining_event, "is_set", lambda: False)():
+            raise HTTPException(status_code=503, detail="Shutting down")
         if not remote_control_enabled:
             raise HTTPException(status_code=503, detail="Remote control disabled (USB key required).")
         # Extra hardening:
@@ -231,6 +236,8 @@ def create_app(
     if job_manager is not None:
         @app.post("/v1/jobs", response_model=JobSubmitResponse)
         async def submit_job(req: JobSubmitRequest, request: Request):
+            if draining_event is not None and getattr(draining_event, "is_set", lambda: False)():
+                raise HTTPException(status_code=503, detail="Shutting down")
             if not remote_control_enabled:
                 raise HTTPException(status_code=503, detail="Remote control disabled (USB key required).")
             try:
@@ -260,6 +267,8 @@ def create_app(
 
         @app.post("/v1/jobs/{job_id}/cancel")
         async def cancel_job(job_id: str, request: Request):
+            if draining_event is not None and getattr(draining_event, "is_set", lambda: False)():
+                raise HTTPException(status_code=503, detail="Shutting down")
             ok = job_manager.cancel_job(job_id)
             return {"ok": ok}
 
