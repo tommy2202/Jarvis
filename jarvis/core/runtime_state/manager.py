@@ -168,6 +168,21 @@ class RuntimeStateManager:
             self._dirty = True
         self._maybe_write("startup_self_check")
 
+    def set_safe_mode_active(self, active: bool, *, reason: str) -> None:
+        """
+        Persist safe-mode flag (operational only). No secrets.
+        """
+        with self._lock:
+            self._state.safe_mode_active = bool(active)
+            if active:
+                note = f"safe_mode_enabled:{reason}"
+            else:
+                note = f"safe_mode_disabled:{reason}"
+            # keep notes bounded
+            self._state.notes = (self._state.notes + [note])[-50:]
+            self._dirty = True
+        self._maybe_write("safe_mode")
+
     # ---- snapshot/export ----
     def get_snapshot(self) -> Dict[str, Any]:
         with self._lock:

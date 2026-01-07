@@ -264,6 +264,16 @@ def main() -> None:
     event_bus.telemetry = telemetry
     telemetry.attach(event_bus=event_bus)
 
+    # Resource Governor (local-only admission control for heavy operations)
+    from jarvis.core.resources.governor import ResourceGovernor
+    from jarvis.core.resources.models import ResourceGovernorConfig
+
+    rg_cfg = ResourceGovernorConfig.model_validate(cfg_obj.resources.model_dump())
+    resource_governor = ResourceGovernor(cfg=rg_cfg, telemetry=telemetry, event_bus=event_bus, runtime_state=runtime_state, logger=logger)
+    telemetry.attach(resource_governor=resource_governor)
+    # Make capability engine consult it (single enforcement still in dispatcher via cap engine)
+    cap_engine.resource_governor = resource_governor
+
     # Error handling + recovery subsystem
     recovery_cfg = RecoveryConfig.model_validate(cfg_obj.recovery.model_dump())
     error_reporter = ErrorReporter(cfg=ErrorReporterConfig(include_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False))), telemetry=telemetry, runtime_state=runtime_state, event_bus=event_bus)
@@ -366,9 +376,11 @@ def main() -> None:
 
     # LLM lifecycle policy (new)
     llm_policy = LLMPolicy.model_validate(cfg_obj.llm.model_dump())
-    llm_lifecycle = LLMLifecycleController(policy=llm_policy, event_logger=event_logger, logger=logger, telemetry=telemetry, event_bus=event_bus) if (llm_policy.roles and llm_policy.enabled) else None
+    llm_lifecycle = LLMLifecycleController(policy=llm_policy, event_logger=event_logger, logger=logger, telemetry=telemetry, event_bus=event_bus, resource_governor=resource_governor) if (llm_policy.roles and llm_policy.enabled) else None
     telemetry.attach(llm_lifecycle=llm_lifecycle)
     runtime_state.attach(llm_lifecycle=llm_lifecycle)
+    # Allow governor to reclaim LLM under pressure
+    resource_governor.llm_lifecycle = llm_lifecycle
 
     # Stage-B router uses lifecycle if available; otherwise stays in safe mock mode.
     stage_b = StageBLLMRouter(StageBLegacyConfig(mock_mode=True), lifecycle=llm_lifecycle)
@@ -415,6 +427,7 @@ def main() -> None:
         debug_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False)),
         telemetry=telemetry,
         event_bus=event_bus,
+        resource_governor=resource_governor,
     )
     telemetry.attach(job_manager=job_manager)
     runtime_state.attach(job_manager=job_manager)
@@ -425,6 +438,12 @@ def main() -> None:
     job_manager.register_job("system.write_test_file", job_system_write_test_file, schema_model=WriteTestFileArgs)
     job_manager.register_job("system.cleanup_jobs", job_system_cleanup_jobs)
     job_manager.register_job("system.sleep_llm", job_system_sleep_llm)
+    # Prove governor gating end-to-end (heavy core job kind; not a feature module).
+    job_manager.register_job("system.test_heavy", job_system_sleep, schema_model=SleepArgs)
+    try:
+        job_manager.mark_kind_heavy("system.test_heavy", heavy=True)
+    except Exception:
+        pass
 
     # Post-complete hooks that must run in main process (stateful operations / retention).
     def _hook_cleanup(_st):
@@ -735,6 +754,39 @@ def main() -> None:
                 print("Unknown run target. Use: health_check | cleanup")
                 continue
             print("Usage: /jobs list [STATUS] | /jobs show <id> | /jobs cancel <id> | /jobs tail <id> [n] | /jobs run health_check|cleanup")
+            continue
+        if text.startswith("/resources"):
+            parts = text.split()
+            if len(parts) == 1 or parts[1] == "status":
+                print(resource_governor.get_status())
+                continue
+            if len(parts) >= 2 and parts[1] == "snapshot":
+                print(resource_governor.get_snapshot())
+                continue
+            if len(parts) >= 2 and parts[1] == "policy":
+                st = resource_governor.get_status()
+                print({"budgets": st.get("budgets"), "policy": st.get("policy"), "throttles": st.get("throttles"), "safe_mode": st.get("safe_mode")})
+                continue
+            if len(parts) >= 3 and parts[1] == "safe_mode":
+                if not security.is_admin():
+                    print("Admin required.")
+                    continue
+                val = parts[2].lower()
+                if val == "on":
+                    resource_governor.set_forced_safe_mode(True, reason="cli_forced")
+                    print("Safe mode forced ON.")
+                    continue
+                if val == "off":
+                    resource_governor.set_forced_safe_mode(False, reason="cli_forced")
+                    print("Safe mode forced OFF.")
+                    continue
+                print("Usage: /resources safe_mode on|off")
+                continue
+            if len(parts) >= 2 and parts[1] == "test_heavy":
+                jid = job_manager.submit_job("system.test_heavy", {"seconds": 2.0}, {"source": "cli", "client_id": "stdin"})
+                print(f"Submitted heavy job: {jid}")
+                continue
+            print("Usage: /resources status|snapshot|policy|safe_mode on|off|test_heavy")
             continue
         if text.startswith("/web"):
             parts = text.split()

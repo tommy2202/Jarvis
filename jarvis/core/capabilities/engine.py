@@ -23,6 +23,8 @@ class CapabilityEngine:
         self.audit = audit
         self.logger = logger
         self.event_bus = event_bus
+        # Optional: resource governor (set by app.py after initialization)
+        self.resource_governor = None
 
     def get_capabilities(self) -> Dict[str, Dict[str, Any]]:
         return {k: v.model_dump() for k, v in self.cfg.capabilities.items()}
@@ -109,6 +111,27 @@ class CapabilityEngine:
         denied_by_breaker = self._deny_by_breakers(ctx, required)
         if denied_by_breaker:
             return self._deny(ctx, required, denied_by_breaker, ["Subsystem temporarily disabled (circuit breaker open)."], remediation="Wait for cooldown or fix underlying issue.", severity=DecisionSeverity.WARN, audit_anyway=True)
+
+        # Resource governor admission control (deterministic, local-only)
+        rg = getattr(self, "resource_governor", None)
+        if rg is not None:
+            try:
+                # Only consult for potentially heavy/dangerous capabilities.
+                gate_caps = {"CAP_HEAVY_COMPUTE", "CAP_RUN_SUBPROCESS", "CAP_NETWORK_ACCESS"}
+                if any(c in gate_caps for c in required):
+                    adm = rg.admit(operation="intent.execute", trace_id=ctx.trace_id, required_caps=list(required), allow_delay=False)
+                    if not bool(adm.allowed):
+                        return self._deny(
+                            ctx,
+                            required,
+                            [c for c in required if c in gate_caps],
+                            list(adm.reasons or []) + [f"Resource governor action: {adm.action.value}"],
+                            remediation=str(adm.remediation or "System is under resource pressure. Try again later."),
+                            severity=DecisionSeverity.WARN,
+                            audit_anyway=True,
+                        )
+            except Exception:
+                pass
 
         # Default policy check
         for c in required:

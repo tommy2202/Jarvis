@@ -146,6 +146,9 @@ class Dispatcher:
                 if any("admin" in r.lower() for r in dec.reasons) or dec.remediation.lower().startswith("unlock admin"):
                     err = AdminRequiredError()
                     msg = err.user_message
+                elif dec.remediation:
+                    # Prefer a resource/safety-oriented remediation if provided.
+                    msg = str(dec.remediation)[:200]
                 self.error_reporter.write_error(JarvisError(code="permission_denied", user_message=msg, context={"intent_id": intent_id, "denied_caps": dec.denied_capabilities}), trace_id=trace_id, subsystem="dispatcher", internal_exc=None)
                 return DispatchResult(ok=False, reply=msg, denied_reason="capability_denied")
             if self.event_bus is not None:

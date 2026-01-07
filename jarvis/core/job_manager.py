@@ -33,6 +33,7 @@ class JobSpec(BaseModel):
     created_at: float = Field(default_factory=lambda: time.time())
     max_runtime_seconds: Optional[int] = None
     priority: int = 50
+    heavy: bool = False
 
 
 class JobError(BaseModel):
@@ -58,6 +59,7 @@ class JobState(BaseModel):
     requested_by: Dict[str, Any] = Field(default_factory=dict)
     max_runtime_seconds: Optional[int] = None
     priority: int = 50
+    heavy: bool = False
 
 
 class JobEvent(BaseModel):
@@ -71,6 +73,7 @@ class JobEvent(BaseModel):
 class JobHandler:
     handler_ref: str
     schema_model: Optional[Type[BaseModel]] = None
+    heavy: bool = False
 
 
 def _is_jsonable(x: Any) -> bool:
@@ -115,6 +118,7 @@ class JobManager:
         post_complete_hooks: Optional[Dict[str, Callable[[JobState], None]]] = None,
         telemetry: Any = None,
         event_bus: Any = None,
+        resource_governor: Any = None,
     ):
         self.jobs_dir = jobs_dir
         self.events_dir = os.path.join(jobs_dir, "events")
@@ -133,6 +137,7 @@ class JobManager:
         self.post_complete_hooks = post_complete_hooks or {}
         self.telemetry = telemetry
         self.event_bus = event_bus
+        self.resource_governor = resource_governor
 
         self._ctx = mp.get_context("spawn")
         self._lock = threading.Lock()
@@ -167,7 +172,13 @@ class JobManager:
         if not mod.startswith("jarvis.") or not name or name.startswith("<") or name.startswith("_"):
             raise ValueError("handler must be a top-level function under the 'jarvis.' package")
         ref = f"{mod}:{name}"
-        self._registry[kind] = JobHandler(handler_ref=ref, schema_model=schema_model)
+        self._registry[kind] = JobHandler(handler_ref=ref, schema_model=schema_model, heavy=False)
+
+    def mark_kind_heavy(self, kind: str, heavy: bool = True) -> None:
+        h = self._registry.get(kind)
+        if h is None:
+            raise ValueError("Unknown job kind")
+        self._registry[kind] = JobHandler(handler_ref=h.handler_ref, schema_model=h.schema_model, heavy=bool(heavy))
 
     def allowed_kinds(self) -> List[str]:
         return sorted(self._registry.keys())
@@ -231,6 +242,7 @@ class JobManager:
             requested_by=spec.requested_by,
             max_runtime_seconds=spec.max_runtime_seconds,
             priority=spec.priority,
+            heavy=bool(handler.heavy),
         )
 
         with self._lock:
@@ -488,6 +500,12 @@ class JobManager:
         except queue.Empty:
             return
 
+        # Delay scheduling: created_at is used as "not-before" timestamp.
+        if float(created_at) > time.time():
+            # Requeue and try later.
+            self._queue.put((prio, created_at, job_id))
+            return
+
         with self._lock:
             if job_id in self._canceled:
                 return
@@ -503,6 +521,39 @@ class JobManager:
                 st.error = JobError(type="unknown_kind", message="Job kind not registered.")
                 self._persist_index_locked()
                 return
+
+            # Resource governor admission control for heavy jobs (runs in supervisor thread).
+            if bool(handler.heavy) and self.resource_governor is not None:
+                try:
+                    adm = self.resource_governor.admit(
+                        operation="job.start",
+                        trace_id=st.trace_id,
+                        required_caps=["CAP_HEAVY_COMPUTE"],
+                        allow_delay=True,
+                        wants_heavy_job_slot=True,
+                    )
+                    if not bool(adm.allowed):
+                        # Delay -> requeue
+                        if adm.action.value in {"DELAY", "THROTTLE"} and float(adm.delay_seconds or 0) > 0:
+                            self._queue.put((st.priority, time.time() + float(adm.delay_seconds), job_id))
+                            st.status = JobStatus.QUEUED
+                            st.message = "resource_delayed"
+                            st.updated_at = time.time()
+                            self._persist_index_locked()
+                            return
+                        # Deny -> fail fast
+                        st.status = JobStatus.FAILED
+                        st.message = "resource_denied"
+                        st.updated_at = time.time()
+                        st.finished_at = st.updated_at
+                        st.error = JobError(type="resource_denied", message=str(adm.remediation or "Denied by resource governor."))
+                        self._append_event_locked(job_id, JobEvent(job_id=job_id, event_type="error", payload={"type": "resource_denied"}).model_dump())
+                        self._append_event_locked(job_id, JobEvent(job_id=job_id, event_type="finished", payload={"status": "FAILED"}).model_dump())
+                        self._persist_index_locked()
+                        self._exec_args.pop(job_id, None)
+                        return
+                except Exception:
+                    pass
 
             timeout = st.max_runtime_seconds if st.max_runtime_seconds is not None else self.default_timeout_seconds
             start_ts = time.time()

@@ -92,6 +92,37 @@ class TelemetryConfigFile(BaseModel):
     gpu: Dict[str, Any] = Field(default_factory=lambda: {"enable_nvml": True})
 
 
+class ResourcesConfigFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    sample_interval_seconds: float = 2.0
+    budgets: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "cpu_max_percent": 85,
+            "ram_max_percent": 85,
+            "process_ram_max_mb": 8000,
+            "disk_min_free_gb": 5,
+            "gpu_vram_max_percent": 90,
+        }
+    )
+    policies: Dict[str, Any] = Field(default_factory=lambda: {"on_over_budget": "THROTTLE", "cooldown_seconds": 30, "max_delay_seconds": 15})
+    gating: Dict[str, str] = Field(
+        default_factory=lambda: {
+            "heavy_compute_capability": "CAP_HEAVY_COMPUTE",
+            "subprocess_capability": "CAP_RUN_SUBPROCESS",
+            "network_capability": "CAP_NETWORK_ACCESS",
+            "llm_capability": "CAP_HEAVY_COMPUTE",
+        }
+    )
+    throttles: Dict[str, Any] = Field(default_factory=lambda: {"max_concurrent_heavy_jobs": 1, "max_concurrent_llm_requests": 1, "max_total_jobs": 2})
+    safe_mode: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "enter_after_consecutive_violations": 5,
+            "exit_after_seconds_stable": 120,
+            "deny_caps": ["CAP_NETWORK_ACCESS", "CAP_RUN_SUBPROCESS", "CAP_HEAVY_COMPUTE"],
+        }
+    )
+
 class EventsBusConfigFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = True
@@ -215,6 +246,7 @@ class AppConfigV2(BaseModel):
     web: WebConfig
     ui: UiConfig
     telemetry: TelemetryConfigFile
+    resources: ResourcesConfigFile
     events: EventsBusConfigFile
     runtime: RuntimeControlConfigFile
     runtime_state: RuntimeStateConfigFile

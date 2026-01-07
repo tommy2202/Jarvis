@@ -57,12 +57,13 @@ class RoleState:
 
 
 class LLMLifecycleController:
-    def __init__(self, *, policy: LLMPolicy, event_logger: EventLogger, logger, telemetry: Any = None, event_bus: Any = None):
+    def __init__(self, *, policy: LLMPolicy, event_logger: EventLogger, logger, telemetry: Any = None, event_bus: Any = None, resource_governor: Any = None):
         self.policy = policy
         self.event_logger = event_logger
         self.logger = logger
         self.telemetry = telemetry
         self.event_bus = event_bus
+        self.resource_governor = resource_governor
         self._lock = threading.Lock()
         self._role_state: Dict[str, RoleState] = {k: RoleState() for k in policy.roles.keys()}
         self._backends: Dict[str, LLMBackend] = {}
@@ -104,6 +105,16 @@ class LLMLifecycleController:
             return
         if role not in self.policy.roles:
             raise ValueError("unknown role")
+        if self.resource_governor is not None:
+            try:
+                adm = self.resource_governor.admit(operation="llm.load", trace_id=trace_id, required_caps=["CAP_HEAVY_COMPUTE"], allow_delay=True)
+                if not bool(adm.allowed):
+                    with self._lock:
+                        self._role_state[role].loaded = False
+                        self._role_state[role].last_error = "resource_denied"
+                    return
+            except Exception:
+                pass
         with self._lock:
             st = self._role_state[role]
             if st.disabled:
@@ -189,6 +200,27 @@ class LLMLifecycleController:
 
         cfg = self.policy.roles[role]
         backend = self._get_backend(role)
+
+        # Resource governor admission (before request)
+        if self.resource_governor is not None:
+            try:
+                adm = self.resource_governor.admit(
+                    operation="llm.request",
+                    trace_id=req.trace_id,
+                    required_caps=["CAP_HEAVY_COMPUTE"],
+                    allow_delay=True,
+                    wants_llm_slot=True,
+                )
+                if not bool(adm.allowed):
+                    return LLMResponse(
+                        trace_id=req.trace_id,
+                        role=req.role,
+                        status=LLMStatus.error,
+                        error={"type": "resource_denied", "message": str(adm.remediation or "Denied by resource governor.")},
+                        latency_seconds=time.time() - t0,
+                    )
+            except Exception:
+                pass
 
         # Denylist detection (do not block; strengthen prompt and log).
         user_text = " ".join([m.content for m in req.messages if m.role == "user"])
@@ -289,6 +321,13 @@ class LLMLifecycleController:
                 except Exception:
                     pass
             return resp
+        finally:
+            # Release concurrency slot if acquired
+            if self.resource_governor is not None:
+                try:
+                    self.resource_governor.release_llm_slot()
+                except Exception:
+                    pass
 
         # Parse/validate JSON strictly (retry once if invalid)
         for attempt in range(2):
