@@ -69,7 +69,7 @@ class RuntimeController:
             self._status = ShutdownStatus(in_progress=True, mode=mode.value, reason=reason, trace_id=trace_id, started_at=time.time())
         try:
             argv2 = argv or sys.argv
-            self.orchestrator.run_shutdown_sequence(mode=mode, reason=reason, trace_id=trace_id, safe_mode=bool(safe_mode), argv=list(argv2), runtime_state=self.runtime_state)
+            self.orchestrator.run_shutdown_sequence(mode=mode, reason=reason, trace_id=trace_id, safe_mode=bool(safe_mode), argv=list(argv2), runtime_state=self.runtime_state, event_bus=getattr(self.orchestrator, "event_bus", None))
         except Exception as e:  # noqa: BLE001
             self.ops.log(trace_id=trace_id, event="shutdown_failed", outcome="error", details={"error": str(e)})
             with self._lock:

@@ -114,6 +114,7 @@ class JobManager:
         debug_tracebacks: bool = False,
         post_complete_hooks: Optional[Dict[str, Callable[[JobState], None]]] = None,
         telemetry: Any = None,
+        event_bus: Any = None,
     ):
         self.jobs_dir = jobs_dir
         self.events_dir = os.path.join(jobs_dir, "events")
@@ -131,6 +132,7 @@ class JobManager:
         self.debug_tracebacks = bool(debug_tracebacks)
         self.post_complete_hooks = post_complete_hooks or {}
         self.telemetry = telemetry
+        self.event_bus = event_bus
 
         self._ctx = mp.get_context("spawn")
         self._lock = threading.Lock()
@@ -240,6 +242,21 @@ class JobManager:
             self._queue.put((spec.priority, spec.created_at, job_id))
 
         self.event_logger.log(trace_id, "jobs.created", {"job_id": job_id, "kind": kind, "requested_by": spec.requested_by})
+        if self.event_bus is not None:
+            try:
+                from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+
+                self.event_bus.publish_nowait(
+                    BaseEvent(
+                        event_type="job.created",
+                        trace_id=trace_id,
+                        source_subsystem=SourceSubsystem.jobs,
+                        severity=EventSeverity.INFO,
+                        payload={"job_id": job_id, "kind": kind, "priority": spec.priority},
+                    )
+                )
+            except Exception:
+                pass
         if self.telemetry is not None:
             try:
                 self.telemetry.set_gauge("jobs_queued", self.get_counts().get("queued", 0))
@@ -522,6 +539,21 @@ class JobManager:
         try:
             proc.start()
             self.event_logger.log(st.trace_id, "jobs.started", {"job_id": job_id, "kind": st.kind})
+            if self.event_bus is not None:
+                try:
+                    from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+
+                    self.event_bus.publish_nowait(
+                        BaseEvent(
+                            event_type="job.started",
+                            trace_id=st.trace_id,
+                            source_subsystem=SourceSubsystem.jobs,
+                            severity=EventSeverity.INFO,
+                            payload={"job_id": job_id, "kind": st.kind},
+                        )
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             with self._lock:
                 st = self._jobs.get(job_id)
@@ -645,6 +677,21 @@ class JobManager:
                 st.updated_at = time.time()
                 self._append_event_locked(job_id, JobEvent(timestamp=ts, job_id=job_id, event_type="progress", payload={"progress": st.progress, "message": st.message}).model_dump())
                 self._persist_index_locked()
+                if self.event_bus is not None:
+                    try:
+                        from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+
+                        self.event_bus.publish_nowait(
+                            BaseEvent(
+                                event_type="job.progress",
+                                trace_id=st.trace_id,
+                                source_subsystem=SourceSubsystem.jobs,
+                                severity=EventSeverity.INFO,
+                                payload={"job_id": job_id, "progress": st.progress, "message": st.message},
+                            )
+                        )
+                    except Exception:
+                        pass
                 return
 
             if et == "log":
@@ -660,6 +707,21 @@ class JobManager:
                 st.updated_at = time.time()
                 self._append_event_locked(job_id, JobEvent(timestamp=ts, job_id=job_id, event_type="error", payload={"type": st.error.type, "message": st.error.message}).model_dump())
                 self._persist_index_locked()
+                if self.event_bus is not None:
+                    try:
+                        from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+
+                        self.event_bus.publish_nowait(
+                            BaseEvent(
+                                event_type="job.failed",
+                                trace_id=st.trace_id,
+                                source_subsystem=SourceSubsystem.jobs,
+                                severity=EventSeverity.ERROR,
+                                payload={"job_id": job_id, "type": st.error.type, "message": st.error.message},
+                            )
+                        )
+                    except Exception:
+                        pass
                 return
 
             if et == "finished":
@@ -677,6 +739,21 @@ class JobManager:
                 self._append_event_locked(job_id, JobEvent(timestamp=ts, job_id=job_id, event_type="finished", payload={"status": st.status.value}).model_dump())
                 self._persist_index_locked()
                 self.event_logger.log(st.trace_id, "jobs.finished", {"job_id": job_id, "kind": st.kind, "status": st.status.value})
+                if self.event_bus is not None:
+                    try:
+                        from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+
+                        self.event_bus.publish_nowait(
+                            BaseEvent(
+                                event_type="job.completed" if st.status == JobStatus.SUCCEEDED else "job.failed",
+                                trace_id=st.trace_id,
+                                source_subsystem=SourceSubsystem.jobs,
+                                severity=EventSeverity.INFO if st.status == JobStatus.SUCCEEDED else EventSeverity.ERROR,
+                                payload={"job_id": job_id, "kind": st.kind, "status": st.status.value},
+                            )
+                        )
+                    except Exception:
+                        pass
                 self._exec_args.pop(job_id, None)
 
         if et == "finished" and self.telemetry is not None:

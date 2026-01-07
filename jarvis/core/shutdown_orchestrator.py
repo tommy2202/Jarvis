@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, Optional
 
 from jarvis.core.ops_log import OpsLogger
+from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
 
 
 class ShutdownMode(str, Enum):
@@ -58,10 +59,25 @@ class ShutdownOrchestrator:
         self.runtime_state = None
         self.exec_fn = exec_fn or os.execv
         self.root_path = root_path
+        self.event_bus = None
 
-    def run_shutdown_sequence(self, *, mode: ShutdownMode, reason: str, trace_id: str, safe_mode: bool, argv: list[str], runtime_state=None) -> None:
+    def run_shutdown_sequence(self, *, mode: ShutdownMode, reason: str, trace_id: str, safe_mode: bool, argv: list[str], runtime_state=None, event_bus=None) -> None:
         self.runtime_state = runtime_state
+        self.event_bus = event_bus
         self.ops.log(trace_id=trace_id, event="shutdown_begin", outcome="start", details={"mode": mode.value, "reason": reason, "safe_mode": safe_mode})
+        if self.event_bus is not None:
+            try:
+                self.event_bus.publish_nowait(
+                    BaseEvent(
+                        event_type="shutdown.begin",
+                        trace_id=trace_id,
+                        source_subsystem=SourceSubsystem.recovery,
+                        severity=EventSeverity.INFO,
+                        payload={"mode": mode.value, "reason": reason},
+                    )
+                )
+            except Exception:
+                pass
 
         # Phase 0: announce/begin
         self._phase(trace_id, "phase0_begin", self._phase0_begin, timeout=2.0, details={"reason": reason})
@@ -83,6 +99,19 @@ class ShutdownOrchestrator:
 
         # Phase 6: exit/restart
         self.ops.log(trace_id=trace_id, event="shutdown_complete", outcome="ok", details={"mode": mode.value})
+        if self.event_bus is not None:
+            try:
+                self.event_bus.publish_nowait(
+                    BaseEvent(
+                        event_type="shutdown.complete",
+                        trace_id=trace_id,
+                        source_subsystem=SourceSubsystem.recovery,
+                        severity=EventSeverity.INFO,
+                        payload={"mode": mode.value},
+                    )
+                )
+            except Exception:
+                pass
         try:
             if self.runtime_state is not None:
                 self.runtime_state.clear_dirty_shutdown(reason=reason)
@@ -110,6 +139,19 @@ class ShutdownOrchestrator:
     def _phase(self, trace_id: str, name: str, fn: Callable[[], None], *, timeout: float, details: Optional[Dict[str, Any]] = None) -> None:
         t0 = time.time()
         self.ops.log(trace_id=trace_id, event="shutdown_phase_start", outcome=name, details={"timeout": timeout, **(details or {})})
+        if self.event_bus is not None:
+            try:
+                self.event_bus.publish_nowait(
+                    BaseEvent(
+                        event_type="shutdown.phase",
+                        trace_id=trace_id,
+                        source_subsystem=SourceSubsystem.recovery,
+                        severity=EventSeverity.INFO,
+                        payload={"phase": name, "status": "start"},
+                    )
+                )
+            except Exception:
+                pass
         ok = True
         err: Optional[str] = None
 
@@ -147,8 +189,34 @@ class ShutdownOrchestrator:
         dt = time.time() - t0
         if ok:
             self.ops.log(trace_id=trace_id, event="shutdown_phase_ok", outcome=name, details={"seconds": dt})
+            if self.event_bus is not None:
+                try:
+                    self.event_bus.publish_nowait(
+                        BaseEvent(
+                            event_type="shutdown.phase",
+                            trace_id=trace_id,
+                            source_subsystem=SourceSubsystem.recovery,
+                            severity=EventSeverity.INFO,
+                            payload={"phase": name, "status": "ok", "seconds": dt},
+                        )
+                    )
+                except Exception:
+                    pass
         else:
             self.ops.log(trace_id=trace_id, event="shutdown_phase_fail", outcome=name, details={"seconds": dt, "error": err})
+            if self.event_bus is not None:
+                try:
+                    self.event_bus.publish_nowait(
+                        BaseEvent(
+                            event_type="shutdown.phase",
+                            trace_id=trace_id,
+                            source_subsystem=SourceSubsystem.recovery,
+                            severity=EventSeverity.WARN,
+                            payload={"phase": name, "status": "fail", "seconds": dt, "error": err},
+                        )
+                    )
+                except Exception:
+                    pass
 
     # ---- phase methods ----
     def _phase0_begin(self) -> None:
@@ -231,6 +299,12 @@ class ShutdownOrchestrator:
             pass
 
     def _phase5_stop_services(self) -> None:
+        # Stop event bus last (drain prior events)
+        try:
+            if self.event_bus is not None:
+                self.event_bus.shutdown(grace_seconds=float(self.cfg.phase_timeouts_seconds.get("stop_services", 5)))
+        except Exception:
+            pass
         # Web stop
         try:
             if self.web_handle is not None:

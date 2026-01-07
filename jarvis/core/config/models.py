@@ -92,6 +92,16 @@ class TelemetryConfigFile(BaseModel):
     gpu: Dict[str, Any] = Field(default_factory=lambda: {"enable_nvml": True})
 
 
+class EventsBusConfigFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    max_queue_size: int = 1000
+    worker_threads: int = 4
+    overflow_policy: str = "DROP_OLDEST"  # DROP_OLDEST|DROP_NEWEST
+    shutdown_grace_seconds: int = 5
+    log_dropped_events: bool = True
+
+
 class RuntimeControlConfigFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     shutdown: Dict[str, Any] = Field(
@@ -205,6 +215,7 @@ class AppConfigV2(BaseModel):
     web: WebConfig
     ui: UiConfig
     telemetry: TelemetryConfigFile
+    events: EventsBusConfigFile
     runtime: RuntimeControlConfigFile
     runtime_state: RuntimeStateConfigFile
     jobs: JobsConfig

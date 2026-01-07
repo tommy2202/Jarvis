@@ -19,6 +19,7 @@ from jarvis.core.error_reporter import ErrorReporter
 from jarvis.core.errors import AdminRequiredError
 from jarvis.core.recovery import RecoveryPolicy, RecoveryConfig
 from jarvis.core.circuit_breaker import BreakerRegistry
+from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
 
 
 class StateTransitionError(RuntimeError):
@@ -133,6 +134,7 @@ class JarvisRuntime:
         breakers: Optional[BreakerRegistry] = None,
         persist_path: str = os.path.join("logs", "state_machine", "events.jsonl"),
         safe_mode: bool = False,
+        event_bus: Any = None,
     ):
         self.cfg = cfg
         self.jarvis_app = jarvis_app
@@ -150,6 +152,7 @@ class JarvisRuntime:
         self.recovery_policy = recovery_policy or RecoveryPolicy(RecoveryConfig())
         self.breakers = breakers or BreakerRegistry({})
         self.safe_mode = bool(safe_mode)
+        self.event_bus = event_bus
 
         self._writer = _JsonlWriter(persist_path)
         self._q: "queue.Queue[RuntimeEvent]" = queue.Queue()
@@ -537,6 +540,19 @@ class JarvisRuntime:
         if self.runtime_state is not None:
             try:
                 self.runtime_state.record_transition(old.value, new_state.value, trace_id)
+            except Exception:
+                pass
+        if self.event_bus is not None:
+            try:
+                self.event_bus.publish_nowait(
+                    BaseEvent(
+                        event_type="state.transition",
+                        trace_id=trace_id,
+                        source_subsystem=SourceSubsystem.state_machine,
+                        severity=EventSeverity.INFO,
+                        payload={"from": old.value, "to": new_state.value},
+                    )
+                )
             except Exception:
                 pass
 

@@ -47,6 +47,8 @@ from jarvis.core.runtime_state.io import dirty_exists
 from jarvis.core.capabilities.loader import validate_and_normalize
 from jarvis.core.capabilities.audit import CapabilityAuditLogger
 from jarvis.core.capabilities.engine import CapabilityEngine
+from jarvis.core.events.bus import EventBus, EventBusConfig, OverflowPolicy
+from jarvis.core.events.subscribers import CoreEventJsonlSubscriber
 from jarvis.web.api import create_app
 from jarvis.web.auth import build_api_key_auth  # legacy
 from jarvis.web.security.auth import ApiKeyStore
@@ -203,6 +205,19 @@ def main() -> None:
     config = get_config(logger=logger)
     cfg_obj = config.get()
 
+    # Internal Event Bus (initialized early; in-process only)
+    e_cfg = cfg_obj.events.model_dump()
+    eb_cfg = EventBusConfig(
+        enabled=bool(e_cfg.get("enabled", True)),
+        max_queue_size=int(e_cfg.get("max_queue_size", 1000)),
+        worker_threads=int(e_cfg.get("worker_threads", 4)),
+        overflow_policy=OverflowPolicy(str(e_cfg.get("overflow_policy", "DROP_OLDEST"))),
+        shutdown_grace_seconds=float(e_cfg.get("shutdown_grace_seconds", 5)),
+        log_dropped_events=bool(e_cfg.get("log_dropped_events", True)),
+    )
+    event_bus = EventBus(cfg=eb_cfg, logger=logger)
+    event_bus.subscribe("*", CoreEventJsonlSubscriber(), priority=100)
+
     # Persistent runtime state (operational state; no secrets)
     rs_cfg = RuntimeStateManagerConfig.model_validate(cfg_obj.runtime_state.model_dump())
     runtime_state = RuntimeStateManager(cfg=rs_cfg, ops=ops, logger=logger)
@@ -236,16 +251,18 @@ def main() -> None:
     # Capability bus (validated config/capabilities.json)
     cap_cfg = validate_and_normalize(config.read_non_sensitive("capabilities.json"))
     cap_audit = CapabilityAuditLogger(path=os.path.join("logs", "security.jsonl"))
-    cap_engine = CapabilityEngine(cfg=cap_cfg, audit=cap_audit, logger=logger)
+    cap_engine = CapabilityEngine(cfg=cap_cfg, audit=cap_audit, logger=logger, event_bus=event_bus)
 
     telemetry_cfg = TelemetryConfig.model_validate(cfg_obj.telemetry.model_dump())
     telemetry = TelemetryManager(cfg=telemetry_cfg, logger=logger, root_path=".")
     telemetry.attach(config_manager=config)
     runtime_state.attach(telemetry=telemetry)
+    event_bus.telemetry = telemetry
+    telemetry.attach(event_bus=event_bus)
 
     # Error handling + recovery subsystem
     recovery_cfg = RecoveryConfig.model_validate(cfg_obj.recovery.model_dump())
-    error_reporter = ErrorReporter(cfg=ErrorReporterConfig(include_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False))), telemetry=telemetry, runtime_state=runtime_state)
+    error_reporter = ErrorReporter(cfg=ErrorReporterConfig(include_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False))), telemetry=telemetry, runtime_state=runtime_state, event_bus=event_bus)
     recovery_policy = RecoveryPolicy(recovery_cfg)
     breakers_map = {}
     for name, bc in (recovery_cfg.circuit_breakers or {}).items():
@@ -345,7 +362,7 @@ def main() -> None:
 
     # LLM lifecycle policy (new)
     llm_policy = LLMPolicy.model_validate(cfg_obj.llm.model_dump())
-    llm_lifecycle = LLMLifecycleController(policy=llm_policy, event_logger=event_logger, logger=logger, telemetry=telemetry) if (llm_policy.roles and llm_policy.enabled) else None
+    llm_lifecycle = LLMLifecycleController(policy=llm_policy, event_logger=event_logger, logger=logger, telemetry=telemetry, event_bus=event_bus) if (llm_policy.roles and llm_policy.enabled) else None
     telemetry.attach(llm_lifecycle=llm_lifecycle)
     runtime_state.attach(llm_lifecycle=llm_lifecycle)
 
@@ -364,6 +381,7 @@ def main() -> None:
         capability_engine=cap_engine,
         breaker_registry=breaker_registry,
         secure_store=secure_store,
+        event_bus=event_bus,
     )
 
     jarvis = JarvisApp(
@@ -392,6 +410,7 @@ def main() -> None:
         logger=logger,
         debug_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False)),
         telemetry=telemetry,
+        event_bus=event_bus,
     )
     telemetry.attach(job_manager=job_manager)
     runtime_state.attach(job_manager=job_manager)
@@ -515,6 +534,7 @@ def main() -> None:
         recovery_policy=recovery_policy,
         breakers=breaker_registry,
         safe_mode=safe_mode_active,
+        event_bus=event_bus,
     )
     runtime.start()
     telemetry.attach(runtime=runtime, voice_adapter=voice_adapter, tts_adapter=tts_adapter)
@@ -543,6 +563,7 @@ def main() -> None:
         ui_handle=None,
         root_path=".",
     )
+    orchestrator.event_bus = event_bus
     controller = RuntimeController(runtime_cfg=cfg_obj.runtime.model_dump(), ops=ops, logger=logger, orchestrator=orchestrator, runtime_state=runtime_state, security_manager=security)
 
     if args.ui:
@@ -825,6 +846,39 @@ def main() -> None:
                 print(f"Exported to {path}")
                 continue
             print("Usage: /caps list | /caps show <cap_id> | /caps intent <intent_id> | /caps eval <intent_id> --source=cli|web|voice|ui --admin=true|false --safe_mode=true|false --shutting_down=true|false | /caps export <path>")
+            continue
+        if text.startswith("/events"):
+            parts = text.split()
+            if len(parts) == 1 or parts[1] == "status":
+                print({"enabled": event_bus.cfg.enabled, "accepting": True, "queue_depth": event_bus.get_stats().get("queue_depth")})
+                continue
+            if parts[1] == "stats":
+                print(event_bus.get_stats())
+                continue
+            if parts[1] == "list-subscribers":
+                print(event_bus.list_subscribers())
+                continue
+            if parts[1] == "enable":
+                event_bus.set_enabled(True)
+                print("enabled")
+                continue
+            if parts[1] == "disable":
+                event_bus.set_enabled(False)
+                print("disabled")
+                continue
+            if parts[1] == "dump" and len(parts) >= 3:
+                if not security.is_admin():
+                    print("Admin required.")
+                    continue
+                path = parts[2]
+                import json, os
+
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(event_bus.dump_recent(500), f, indent=2, ensure_ascii=False)
+                print(f"Exported to {path}")
+                continue
+            print("Usage: /events status|stats|list-subscribers|enable|disable|dump <path>")
             continue
         if text.startswith("/secure"):
             parts = text.split()

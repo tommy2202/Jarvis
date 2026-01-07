@@ -70,6 +70,10 @@ class ConfigFsPaths:
         return os.path.join(self.config_dir, "capabilities.json")
 
     @property
+    def events(self) -> str:
+        return os.path.join(self.config_dir, "events.json")
+
+    @property
     def jobs(self) -> str:
         return os.path.join(self.config_dir, "jobs.json")
 

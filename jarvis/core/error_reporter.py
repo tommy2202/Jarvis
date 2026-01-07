@@ -31,11 +31,12 @@ class ErrorReporterConfig:
 
 
 class ErrorReporter:
-    def __init__(self, *, path: str = os.path.join("logs", "errors.jsonl"), cfg: Optional[ErrorReporterConfig] = None, telemetry: Any = None, runtime_state: Any = None):
+    def __init__(self, *, path: str = os.path.join("logs", "errors.jsonl"), cfg: Optional[ErrorReporterConfig] = None, telemetry: Any = None, runtime_state: Any = None, event_bus: Any = None):
         self.path = path
         self.cfg = cfg or ErrorReporterConfig()
         self.telemetry = telemetry
         self.runtime_state = runtime_state
+        self.event_bus = event_bus
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self._debug_override: Optional[bool] = None
@@ -79,6 +80,21 @@ class ErrorReporter:
         if self.runtime_state is not None:
             try:
                 self.runtime_state.record_error(subsystem=subsystem, jarvis_error=err)
+            except Exception:
+                pass
+        if self.event_bus is not None:
+            try:
+                from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+
+                self.event_bus.publish_nowait(
+                    BaseEvent(
+                        event_type="error.raised",
+                        trace_id=trace_id,
+                        source_subsystem=SourceSubsystem.telemetry,
+                        severity=EventSeverity.ERROR,
+                        payload={"subsystem": subsystem, "code": err.code, "severity": err.severity.value},
+                    )
+                )
             except Exception:
                 pass
 

@@ -57,11 +57,12 @@ class RoleState:
 
 
 class LLMLifecycleController:
-    def __init__(self, *, policy: LLMPolicy, event_logger: EventLogger, logger, telemetry: Any = None):
+    def __init__(self, *, policy: LLMPolicy, event_logger: EventLogger, logger, telemetry: Any = None, event_bus: Any = None):
         self.policy = policy
         self.event_logger = event_logger
         self.logger = logger
         self.telemetry = telemetry
+        self.event_bus = event_bus
         self._lock = threading.Lock()
         self._role_state: Dict[str, RoleState] = {k: RoleState() for k in policy.roles.keys()}
         self._backends: Dict[str, LLMBackend] = {}
@@ -113,6 +114,21 @@ class LLMLifecycleController:
                 self._role_state[role].loaded = True
                 self._role_state[role].last_used = time.time()
                 self._role_state[role].last_error = None
+            if self.event_bus is not None:
+                try:
+                    from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+
+                    self.event_bus.publish_nowait(
+                        BaseEvent(
+                            event_type="llm.loaded",
+                            trace_id=trace_id,
+                            source_subsystem=SourceSubsystem.llm,
+                            severity=EventSeverity.INFO,
+                            payload={"role": role, "mode": self.policy.mode},
+                        )
+                    )
+                except Exception:
+                    pass
             return
         if self.policy.mode == "managed":
             ok = backend.start_server()
@@ -141,6 +157,21 @@ class LLMLifecycleController:
             started_by_us = st.started_by_us
             st.started_by_us = False
         self.event_logger.log(trace_id, "llm.role.unload", {"role": role, "reason": reason})
+        if self.event_bus is not None:
+            try:
+                from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+
+                self.event_bus.publish_nowait(
+                    BaseEvent(
+                        event_type="llm.unloaded",
+                        trace_id=trace_id,
+                        source_subsystem=SourceSubsystem.llm,
+                        severity=EventSeverity.INFO,
+                        payload={"role": role, "reason": reason},
+                    )
+                )
+            except Exception:
+                pass
         if self.policy.mode == "managed" and self.policy.managed_kill_server_on_idle and started_by_us:
             ok = backend.stop_server()
             self.event_logger.log(trace_id, "llm.server.stop", {"backend": backend.name, "ok": ok, "reason": reason})
@@ -215,6 +246,21 @@ class LLMLifecycleController:
                     self.telemetry.record_latency("llm_latency_ms", float(resp.latency_seconds) * 1000.0, tags={"role": role, "status": "timeout"})
                 except Exception:
                     pass
+            if self.event_bus is not None:
+                try:
+                    from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+
+                    self.event_bus.publish_nowait(
+                        BaseEvent(
+                            event_type="llm.error",
+                            trace_id=req.trace_id,
+                            source_subsystem=SourceSubsystem.llm,
+                            severity=EventSeverity.WARN,
+                            payload={"role": role, "type": "timeout"},
+                        )
+                    )
+                except Exception:
+                    pass
             return resp
         except Exception as e:  # noqa: BLE001
             self.event_logger.log(req.trace_id, "llm.error", {"role": role, "error": str(e)})
@@ -225,6 +271,21 @@ class LLMLifecycleController:
                 try:
                     self.telemetry.increment_counter("errors_total", 1, tags={"subsystem": "llm", "severity": "ERROR"})
                     self.telemetry.record_latency("llm_latency_ms", float(resp.latency_seconds) * 1000.0, tags={"role": role, "status": "error"})
+                except Exception:
+                    pass
+            if self.event_bus is not None:
+                try:
+                    from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+
+                    self.event_bus.publish_nowait(
+                        BaseEvent(
+                            event_type="llm.error",
+                            trace_id=req.trace_id,
+                            source_subsystem=SourceSubsystem.llm,
+                            severity=EventSeverity.ERROR,
+                            payload={"role": role, "type": "error"},
+                        )
+                    )
                 except Exception:
                     pass
             return resp

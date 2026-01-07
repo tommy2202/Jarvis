@@ -280,6 +280,23 @@ class TelemetryManager:
                 details={"remediation": new_res.remediation},
             )
         )
+        # Publish to internal event bus if attached.
+        try:
+            bus = self._deps.get("event_bus")
+            if bus is not None:
+                from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+
+                bus.publish_nowait(
+                    BaseEvent(
+                        event_type="telemetry.health_change",
+                        trace_id=trace_id,
+                        source_subsystem=SourceSubsystem.telemetry,
+                        severity=EventSeverity.WARN,
+                        payload={"subsystem": subsystem.value, "from": old_status.value, "to": new_res.status.value, "message": new_res.message},
+                    )
+                )
+        except Exception:
+            pass
 
     def _build_checks(self) -> List[CheckSpec]:
         with self._lock:

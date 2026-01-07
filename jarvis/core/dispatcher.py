@@ -9,6 +9,7 @@ from jarvis.core.security import PermissionPolicy, SecurityManager
 from jarvis.core.error_reporter import ErrorReporter
 from jarvis.core.errors import AdminRequiredError, JarvisError, PermissionDeniedError
 from jarvis.core.capabilities.models import RequestContext, RequestSource
+from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class Dispatcher:
         capability_engine: Any = None,
         breaker_registry: Any = None,
         secure_store: Any = None,
+        event_bus: Any = None,
     ):
         self.registry = registry
         self.policy = policy
@@ -51,6 +53,7 @@ class Dispatcher:
         self.capability_engine = capability_engine
         self.breaker_registry = breaker_registry
         self.secure_store = secure_store
+        self.event_bus = event_bus
 
     def _enforce(self, trace_id: str, intent_id: str) -> Tuple[bool, str]:
         perms = self.policy.for_intent(intent_id)
@@ -125,6 +128,19 @@ class Dispatcher:
             dec = self.capability_engine.evaluate(ctx)
             self.event_logger.log(trace_id, "dispatch.capabilities", {"allowed": dec.allowed, "required": dec.required_capabilities, "denied": dec.denied_capabilities, "reasons": dec.reasons})
             if not dec.allowed:
+                if self.event_bus is not None:
+                    try:
+                        self.event_bus.publish_nowait(
+                            BaseEvent(
+                                event_type="intent.denied",
+                                trace_id=trace_id,
+                                source_subsystem=SourceSubsystem.dispatcher,
+                                severity=EventSeverity.WARN,
+                                payload={"intent_id": intent_id, "denied_caps": dec.denied_capabilities, "reasons": dec.reasons},
+                            )
+                        )
+                    except Exception:
+                        pass
                 # Standard user-facing denial (safe)
                 msg = "I can’t do that right now."
                 if any("admin" in r.lower() for r in dec.reasons) or dec.remediation.lower().startswith("unlock admin"):
@@ -132,6 +148,19 @@ class Dispatcher:
                     msg = err.user_message
                 self.error_reporter.write_error(JarvisError(code="permission_denied", user_message=msg, context={"intent_id": intent_id, "denied_caps": dec.denied_capabilities}), trace_id=trace_id, subsystem="dispatcher", internal_exc=None)
                 return DispatchResult(ok=False, reply=msg, denied_reason="capability_denied")
+            if self.event_bus is not None:
+                try:
+                    self.event_bus.publish_nowait(
+                        BaseEvent(
+                            event_type="intent.routed",
+                            trace_id=trace_id,
+                            source_subsystem=SourceSubsystem.dispatcher,
+                            severity=EventSeverity.INFO,
+                            payload={"intent_id": intent_id, "module_id": module_id},
+                        )
+                    )
+                except Exception:
+                    pass
 
         else:
             # Fallback legacy enforcement if capability engine not configured

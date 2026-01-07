@@ -243,6 +243,24 @@ CLI:
 - `/caps eval <intent_id> --source=cli|web|voice|ui --admin=true|false --safe_mode=true|false --shutting_down=true|false`
 - `/caps export <path>`
 
+## Internal event bus (in-process)
+
+Jarvis includes an **in-process internal event bus** used for monitoring and decoupled notifications (no IPC/network).
+
+Config:
+- `config/events.json`
+
+Core events are written to:
+- `logs/events/core_events.jsonl`
+
+CLI:
+- `/events status`
+- `/events stats`
+- `/events list-subscribers`
+- `/events enable`
+- `/events disable`
+- `/events dump <path>` (admin-only)
+
 CLI commands:
 - `/admin unlock` (prompts for passphrase; no echo)
 - `/admin lock`

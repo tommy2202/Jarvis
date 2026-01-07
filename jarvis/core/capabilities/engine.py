@@ -10,6 +10,7 @@ from jarvis.core.capabilities.models import (
     DecisionSeverity,
     RequestContext,
 )
+from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
 
 
 class CapabilityEngine:
@@ -17,10 +18,11 @@ class CapabilityEngine:
     Deterministic capability evaluation.
     """
 
-    def __init__(self, *, cfg: CapabilitiesConfig, audit: CapabilityAuditLogger, logger=None):
+    def __init__(self, *, cfg: CapabilitiesConfig, audit: CapabilityAuditLogger, logger=None, event_bus=None):
         self.cfg = cfg
         self.audit = audit
         self.logger = logger
+        self.event_bus = event_bus
 
     def get_capabilities(self) -> Dict[str, Dict[str, Any]]:
         return {k: v.model_dump() for k, v in self.cfg.capabilities.items()}
@@ -225,4 +227,18 @@ class CapabilityEngine:
                 ip=None,
                 endpoint="dispatcher",
             )
+        # Always publish internal capability decision event (for telemetry/UI), redacted payload only.
+        if self.event_bus is not None:
+            try:
+                self.event_bus.publish_nowait(
+                    BaseEvent(
+                        event_type="capability.decision",
+                        trace_id=ctx.trace_id,
+                        source_subsystem=SourceSubsystem.dispatcher,
+                        severity=EventSeverity.WARN if not dec.allowed else EventSeverity.INFO,
+                        payload=dec.audit_event,
+                    )
+                )
+            except Exception:
+                pass
 
