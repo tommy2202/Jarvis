@@ -36,6 +36,7 @@ from jarvis.core.recovery import RecoveryPolicy, RecoveryConfig
 from jarvis.core.circuit_breaker import CircuitBreaker, BreakerConfig, BreakerRegistry
 from jarvis.core.llm_lifecycle import LLMPolicy, LLMLifecycleController
 from jarvis.core.llm_router import LLMConfig as StageBLegacyConfig, StageBLLMRouter
+from jarvis.core.telemetry.manager import TelemetryManager, TelemetryConfig
 from jarvis.web.api import create_app
 from jarvis.web.auth import build_api_key_auth  # legacy
 from jarvis.web.security.auth import ApiKeyStore
@@ -70,6 +71,7 @@ def _start_web_thread(
     logger,
     job_manager: JobManager | None,
     runtime: JarvisRuntime | None,
+    telemetry: TelemetryManager | None,
 ) -> None:
     web_cfg = config_manager.get().web.model_dump()
     if not web_cfg.get("enabled", False):
@@ -115,6 +117,7 @@ def _start_web_thread(
         runtime=runtime,
         secure_store=secure_store,
         web_cfg=web_cfg,
+        telemetry=telemetry,
         allowed_origins=list(allowed_origins),
         enable_web_ui=enable_web_ui,
         allow_remote_admin_unlock=False,
@@ -126,6 +129,11 @@ def _start_web_thread(
 
     t = threading.Thread(target=run, name="jarvis-web", daemon=True)
     t.start()
+    if telemetry is not None:
+        try:
+            telemetry.set_web_server_info(enabled=True, bind_host=bind_host, port=port, allow_remote=allow_remote, thread_alive=t.is_alive())
+        except Exception:
+            pass
     logger.info(f"Web server started on http://{bind_host}:{port}")
 
 
@@ -141,9 +149,13 @@ def main() -> None:
     config = get_config(logger=logger)
     cfg_obj = config.get()
 
+    telemetry_cfg = TelemetryConfig.model_validate(cfg_obj.telemetry.model_dump())
+    telemetry = TelemetryManager(cfg=telemetry_cfg, logger=logger, root_path=".")
+    telemetry.attach(config_manager=config)
+
     # Error handling + recovery subsystem
     recovery_cfg = RecoveryConfig.model_validate(cfg_obj.recovery.model_dump())
-    error_reporter = ErrorReporter(cfg=ErrorReporterConfig(include_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False))))
+    error_reporter = ErrorReporter(cfg=ErrorReporterConfig(include_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False))), telemetry=telemetry)
     recovery_policy = RecoveryPolicy(recovery_cfg)
     breakers_map = {}
     for name, bc in (recovery_cfg.circuit_breakers or {}).items():
@@ -169,6 +181,7 @@ def main() -> None:
         read_only=bool(cfg_obj.security.secure_store_read_only),
     )
     security = SecurityManager(secure_store=secure_store, admin_session=AdminSession(timeout_seconds=int(cfg_obj.security.admin_session_timeout_seconds)))
+    telemetry.attach(secure_store=secure_store, security_manager=security)
 
     _ensure_admin_passphrase(security, logger)
 
@@ -217,13 +230,14 @@ def main() -> None:
 
     # LLM lifecycle policy (new)
     llm_policy = LLMPolicy.model_validate(cfg_obj.llm.model_dump())
-    llm_lifecycle = LLMLifecycleController(policy=llm_policy, event_logger=event_logger, logger=logger) if llm_policy.roles else None
+    llm_lifecycle = LLMLifecycleController(policy=llm_policy, event_logger=event_logger, logger=logger, telemetry=telemetry) if llm_policy.roles else None
+    telemetry.attach(llm_lifecycle=llm_lifecycle)
 
     # Stage-B router uses lifecycle if available; otherwise stays in safe mock mode.
     stage_b = StageBLLMRouter(StageBLegacyConfig(mock_mode=True), lifecycle=llm_lifecycle)
 
     policy = PermissionPolicy(intents=dict(perms_cfg.get("intents") or {}))
-    dispatcher = Dispatcher(registry=registry, policy=policy, security=security, event_logger=event_logger, logger=logger, error_reporter=error_reporter)
+    dispatcher = Dispatcher(registry=registry, policy=policy, security=security, event_logger=event_logger, logger=logger, error_reporter=error_reporter, telemetry=telemetry)
 
     jarvis = JarvisApp(
         stage_a=stage_a,
@@ -234,7 +248,9 @@ def main() -> None:
         event_logger=event_logger,
         logger=logger,
         threshold=threshold,
+        telemetry=telemetry,
     )
+    telemetry.attach(jarvis_app=jarvis, dispatcher=dispatcher)
 
     # Job manager (core subsystem)
     jobs_cfg = cfg_obj.jobs
@@ -248,7 +264,9 @@ def main() -> None:
         event_logger=event_logger,
         logger=logger,
         debug_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False)),
+        telemetry=telemetry,
     )
+    telemetry.attach(job_manager=job_manager)
 
     # Register allowlisted job kinds (no shell, no arbitrary code).
     job_manager.register_job("system.sleep", job_system_sleep, schema_model=SleepArgs)
@@ -361,13 +379,15 @@ def main() -> None:
         tts_adapter=tts_adapter,
         security_manager=security,
         secure_store=secure_store,
+        telemetry=telemetry,
         error_reporter=error_reporter,
         recovery_policy=recovery_policy,
         breakers=breaker_registry,
     )
     runtime.start()
+    telemetry.attach(runtime=runtime, voice_adapter=voice_adapter, tts_adapter=tts_adapter)
 
-    _start_web_thread(jarvis, security, secure_store, config, event_logger, logger, job_manager, runtime)
+    _start_web_thread(jarvis, security, secure_store, config, event_logger, logger, job_manager, runtime, telemetry)
 
     if args.ui:
         from jarvis.ui.app import run_desktop_ui
@@ -393,6 +413,10 @@ def main() -> None:
             try:
                 if job_manager is not None:
                     job_manager.stop()
+            except Exception:
+                pass
+            try:
+                telemetry.stop()
             except Exception:
                 pass
         return
@@ -664,15 +688,42 @@ def main() -> None:
                 continue
             print("Usage: /errors last [n] | /errors show <trace_id> | /errors export <path>")
             continue
-        if text == "/health":
-            print(
-                {
-                    "runtime": runtime.get_status(),
-                    "breakers": breaker_registry.status(),
-                    "secure_store": secure_store.export_public_status(),
-                    "llm": (llm_lifecycle.get_status() if llm_lifecycle else {"enabled": False}),
-                }
-            )
+        if text.startswith("/health"):
+            parts = text.split()
+            sub = parts[1] if len(parts) >= 2 else None
+            if sub:
+                print({"health": telemetry.get_health(subsystem=sub)})
+            else:
+                snap = telemetry.get_snapshot()
+                print(
+                    {
+                        "uptime_seconds": snap.get("uptime_seconds"),
+                        "resources": snap.get("resources"),
+                        "health": snap.get("health"),
+                    }
+                )
+            continue
+        if text.startswith("/metrics"):
+            parts = text.split()
+            if len(parts) >= 3 and parts[1] == "export":
+                path = parts[2]
+                print({"exported": telemetry.export_snapshot(path)})
+                continue
+            print(telemetry.get_metrics_summary())
+            continue
+        if text.startswith("/telemetry"):
+            parts = text.split()
+            if len(parts) == 1 or parts[1] == "status":
+                print({"enabled": telemetry.cfg.enabled, "retention_days": telemetry.cfg.retention_days})
+                continue
+            if parts[1] == "reset":
+                if not security.is_admin():
+                    print("Admin required.")
+                    continue
+                telemetry.reset()
+                print("Telemetry reset.")
+                continue
+            print("Usage: /telemetry status | /telemetry reset")
             continue
         if text.startswith("/debug"):
             parts = text.split()
@@ -772,6 +823,10 @@ def main() -> None:
     try:
         if job_manager is not None:
             job_manager.stop()
+    except Exception:
+        pass
+    try:
+        telemetry.stop()
     except Exception:
         pass
 

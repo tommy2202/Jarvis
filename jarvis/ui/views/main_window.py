@@ -165,6 +165,9 @@ class MainWindow(ttk.Frame):
             self.logs.set_errors(self.core.get_recent_errors(n=n))
             self.logs.set_security(self.core.get_recent_security_events(n=n))
             self.logs.set_system_lines(self.core.get_recent_system_logs(n=n))
+            snap = getattr(self.core, "get_telemetry_snapshot", lambda: None)()
+            if snap:
+                self.logs.set_health_snapshot(snap)
         except Exception as e:  # noqa: BLE001
             self._ui_error(e)
 
@@ -202,6 +205,10 @@ class MainWindow(ttk.Frame):
             self._set_banner("")
             self._apply_status(st)
             self._poll_pending()
+            try:
+                getattr(self.core, "ui_heartbeat")()
+            except Exception:
+                pass
         except Exception:
             self._core_ok = False
             self._set_banner("Jarvis core unavailable")

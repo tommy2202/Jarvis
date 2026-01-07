@@ -13,6 +13,7 @@ This repo is a **minimal but functional** “Jarvis” assistant designed to run
 - **Module setup wizard** (detects modules and guides configuration)
 - **Production-grade configuration system** (validated schemas, migrations, backups, hot reload)
 - **Desktop UI (Tkinter)** (`python app.py --ui`) as a thin client over core runtime APIs
+- **Telemetry + health monitoring** (local-only; `/health`, `/metrics`, UI “Health” tab, and authenticated web endpoints)
 
 ## Configuration system (production-grade)
 
@@ -142,6 +143,35 @@ Security model:
 
 Keyboard shortcuts:
 - **Enter**: send message (in the input box)
+
+## Telemetry & health monitoring (local-only)
+
+Jarvis collects **local-only** telemetry to help diagnose issues safely:
+
+- **Health** (subsystems): config, secure store, runtime/state machine, dispatcher/router, LLM, jobs, web, voice/STT/TTS, UI
+- **Metrics**: rolling counters/latencies/gauges (bounded in-memory)
+- **Resources**: CPU/RAM/disk, best-effort GPU/VRAM on Windows (optional NVML)
+
+Privacy guarantees:
+- **No network export** (no external telemetry)
+- **No secrets** (details are redacted)
+- **No raw user messages** in telemetry
+
+Config:
+- `config/telemetry.json`
+
+CLI:
+- `/health` or `/health <subsystem>`
+- `/metrics`
+- `/metrics export <path>`
+- `/telemetry status`
+- `/telemetry reset` (admin only)
+
+Web (authenticated):
+- `GET /v1/health`
+- `GET /v1/health/{subsystem}`
+- `GET /v1/metrics`
+- `GET /v1/telemetry/snapshot`
 
 CLI commands:
 - `/admin unlock` (prompts for passphrase; no echo)

@@ -54,6 +54,10 @@ class ConfigFsPaths:
         return os.path.join(self.config_dir, "ui.json")
 
     @property
+    def telemetry(self) -> str:
+        return os.path.join(self.config_dir, "telemetry.json")
+
+    @property
     def jobs(self) -> str:
         return os.path.join(self.config_dir, "jobs.json")
 

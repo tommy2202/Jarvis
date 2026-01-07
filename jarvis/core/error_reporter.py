@@ -31,9 +31,10 @@ class ErrorReporterConfig:
 
 
 class ErrorReporter:
-    def __init__(self, *, path: str = os.path.join("logs", "errors.jsonl"), cfg: Optional[ErrorReporterConfig] = None):
+    def __init__(self, *, path: str = os.path.join("logs", "errors.jsonl"), cfg: Optional[ErrorReporterConfig] = None, telemetry: Any = None):
         self.path = path
         self.cfg = cfg or ErrorReporterConfig()
+        self.telemetry = telemetry
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self._debug_override: Optional[bool] = None
@@ -68,6 +69,12 @@ class ErrorReporter:
         with self._lock:
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
+        # Passive telemetry signal (never throw)
+        if self.telemetry is not None:
+            try:
+                self.telemetry.record_error(subsystem=subsystem, severity=entry.get("severity", "ERROR"), error_code=err.code, trace_id=trace_id)
+            except Exception:
+                pass
 
     def tail(self, n: int = 20) -> list[Dict[str, Any]]:
         if not os.path.exists(self.path):

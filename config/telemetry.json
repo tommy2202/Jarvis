@@ -1,0 +1,17 @@
+{
+  "enabled": true,
+  "poll_interval_seconds": 5,
+  "sample_interval_seconds": 5,
+  "max_samples_per_histogram": 200,
+  "retention_days": 14,
+  "thresholds": {
+    "cpu_warn_percent": 85,
+    "ram_warn_percent": 85,
+    "disk_warn_percent_used": 90,
+    "gpu_vram_warn_percent": 90
+  },
+  "gpu": {
+    "enable_nvml": true
+  }
+}
+

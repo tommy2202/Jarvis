@@ -74,6 +74,24 @@ class WebConfig(BaseModel):
     enable_web_ui: bool = True
 
 
+class TelemetryConfigFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    poll_interval_seconds: float = 5.0
+    sample_interval_seconds: float = 5.0
+    max_samples_per_histogram: int = 200
+    retention_days: int = 14
+    thresholds: Dict[str, float] = Field(
+        default_factory=lambda: {
+            "cpu_warn_percent": 85,
+            "ram_warn_percent": 85,
+            "disk_warn_percent_used": 90,
+            "gpu_vram_warn_percent": 90,
+        }
+    )
+    gpu: Dict[str, Any] = Field(default_factory=lambda: {"enable_nvml": True})
+
+
 class UiConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     refresh_interval_ms: int = 350
@@ -155,6 +173,7 @@ class AppConfigV2(BaseModel):
     models: ModelsConfig
     web: WebConfig
     ui: UiConfig
+    telemetry: TelemetryConfigFile
     jobs: JobsConfig
     llm: LLMConfigFile
     recovery: RecoveryConfigFile

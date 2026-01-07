@@ -41,6 +41,7 @@ def create_app(
     runtime=None,
     secure_store=None,
     web_cfg: Optional[dict] = None,
+    telemetry=None,
     allowed_origins: list[str] | None = None,
     enable_web_ui: bool = True,
     allow_remote_admin_unlock: bool = False,
@@ -64,7 +65,7 @@ def create_app(
         raise ValueError("secure_store and web_cfg required for hardened web app.")
     from jarvis.core.security_events import SecurityAuditLogger
 
-    app.middleware("http")(WebSecurityMiddleware(web_cfg=web_cfg, secure_store=secure_store, event_logger=event_logger, audit_logger=SecurityAuditLogger()))
+    app.middleware("http")(WebSecurityMiddleware(web_cfg=web_cfg, secure_store=secure_store, event_logger=event_logger, audit_logger=SecurityAuditLogger(), telemetry=telemetry))
 
     @app.exception_handler(JarvisError)
     async def jarvis_error_handler(request: Request, exc: JarvisError):
@@ -161,6 +162,34 @@ def create_app(
         if runtime is None:
             return {"state": "unknown"}
         return runtime.get_status()
+
+    @app.get("/v1/health")
+    async def telemetry_health(request: Request):
+        tm = telemetry or getattr(runtime, "telemetry", None)
+        if tm is None:
+            return {"health": [], "status": "unavailable"}
+        return {"health": tm.get_health()}
+
+    @app.get("/v1/health/{subsystem}")
+    async def telemetry_health_one(subsystem: str, request: Request):
+        tm = telemetry or getattr(runtime, "telemetry", None)
+        if tm is None:
+            raise HTTPException(status_code=503, detail="Telemetry unavailable.")
+        return {"health": tm.get_health(subsystem=subsystem)}
+
+    @app.get("/v1/metrics")
+    async def telemetry_metrics(request: Request):
+        tm = telemetry or getattr(runtime, "telemetry", None)
+        if tm is None:
+            raise HTTPException(status_code=503, detail="Telemetry unavailable.")
+        return tm.get_metrics_summary()
+
+    @app.get("/v1/telemetry/snapshot")
+    async def telemetry_snapshot(request: Request):
+        tm = telemetry or getattr(runtime, "telemetry", None)
+        if tm is None:
+            raise HTTPException(status_code=503, detail="Telemetry unavailable.")
+        return tm.get_snapshot()
 
     @app.get("/v1/llm/status")
     async def llm_status(request: Request):

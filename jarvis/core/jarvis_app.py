@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -33,6 +34,7 @@ class JarvisApp:
         event_logger: EventLogger,
         logger,
         threshold: float = 0.55,
+        telemetry: Any = None,
     ):
         self.stage_a = stage_a
         self.stage_b = stage_b
@@ -42,6 +44,7 @@ class JarvisApp:
         self.event_logger = event_logger
         self.logger = logger
         self.threshold = threshold
+        self.telemetry = telemetry
         self._lock = threading.Lock()
 
     def _render_confirmation(self, intent_id: str, args: Dict[str, Any]) -> str:
@@ -62,6 +65,7 @@ class JarvisApp:
             self.event_logger.log(trace_id, "request.received", {"message": message, "client": client or {}})
 
             # Stage A
+            t_route0 = time.time()
             a: IntentResult = self.stage_a.route(message)
             self.event_logger.log(trace_id, "router.stage_a", a.model_dump())
 
@@ -89,6 +93,11 @@ class JarvisApp:
                     conf = float(b.confidence)
                 else:
                     # Never execute unknown intents
+                    if self.telemetry is not None:
+                        try:
+                            self.telemetry.record_latency("routing_latency_ms", (time.time() - t_route0) * 1000.0, tags={"source": "stage_b"})
+                        except Exception:
+                            pass
                     return MessageResponse(
                         trace_id=trace_id,
                         reply="I couldn’t map that to a safe action.",
@@ -102,6 +111,11 @@ class JarvisApp:
             assert chosen_intent_id is not None
             if chosen_intent_id not in self.intent_config_by_id:
                 self.event_logger.log(trace_id, "router.refused", {"reason": "intent not in registry", "intent_id": chosen_intent_id})
+                if self.telemetry is not None:
+                    try:
+                        self.telemetry.record_latency("routing_latency_ms", (time.time() - t_route0) * 1000.0, tags={"source": source})
+                    except Exception:
+                        pass
                 return MessageResponse(
                     trace_id=trace_id,
                     reply="I can’t execute unknown intents.",
@@ -128,8 +142,19 @@ class JarvisApp:
 
             # Enforced execution decision happens in dispatcher.
             dispatch_context = {"client": client or {}}
+            if self.telemetry is not None:
+                try:
+                    self.telemetry.record_latency("routing_latency_ms", (time.time() - t_route0) * 1000.0, tags={"source": source})
+                except Exception:
+                    pass
+            t_disp0 = time.time()
             dr = self.dispatcher.dispatch(trace_id, chosen_intent_id, module_id, chosen_args, dispatch_context)
             self.event_logger.log(trace_id, "dispatch.result", {"ok": dr.ok, "denied_reason": dr.denied_reason})
+            if self.telemetry is not None:
+                try:
+                    self.telemetry.record_latency("dispatch_latency_ms", (time.time() - t_disp0) * 1000.0, tags={"ok": dr.ok})
+                except Exception:
+                    pass
 
             if not dr.ok:
                 return MessageResponse(

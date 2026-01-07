@@ -113,6 +113,7 @@ class JobManager:
         logger,
         debug_tracebacks: bool = False,
         post_complete_hooks: Optional[Dict[str, Callable[[JobState], None]]] = None,
+        telemetry: Any = None,
     ):
         self.jobs_dir = jobs_dir
         self.events_dir = os.path.join(jobs_dir, "events")
@@ -129,6 +130,7 @@ class JobManager:
         self.logger = logger
         self.debug_tracebacks = bool(debug_tracebacks)
         self.post_complete_hooks = post_complete_hooks or {}
+        self.telemetry = telemetry
 
         self._ctx = mp.get_context("spawn")
         self._lock = threading.Lock()
@@ -166,6 +168,15 @@ class JobManager:
 
     def allowed_kinds(self) -> List[str]:
         return sorted(self._registry.keys())
+
+    def get_counts(self) -> Dict[str, int]:
+        """
+        Read-only counts for telemetry/UI.
+        """
+        with self._lock:
+            queued = sum(1 for j in self._jobs.values() if j.status == JobStatus.QUEUED)
+            running = sum(1 for j in self._jobs.values() if j.status == JobStatus.RUNNING)
+            return {"queued": int(queued), "running": int(running), "total": int(len(self._jobs))}
 
     # ---------- Public API ----------
     def submit_job(
@@ -226,6 +237,11 @@ class JobManager:
             self._queue.put((spec.priority, spec.created_at, job_id))
 
         self.event_logger.log(trace_id, "jobs.created", {"job_id": job_id, "kind": kind, "requested_by": spec.requested_by})
+        if self.telemetry is not None:
+            try:
+                self.telemetry.set_gauge("jobs_queued", self.get_counts().get("queued", 0))
+            except Exception:
+                pass
         return job_id
 
     def cancel_job(self, job_id: str) -> bool:
@@ -432,6 +448,16 @@ class JobManager:
 
             self._running[job_id] = {"proc": proc, "q": q, "start_ts": start_ts, "deadline": deadline}
 
+        # metrics outside lock
+        if self.telemetry is not None:
+            try:
+                wait_ms = float((start_ts - float(st.created_at)) * 1000.0)
+                self.telemetry.record_latency("job_queue_wait_ms", wait_ms, tags={"kind": st.kind})
+                self.telemetry.set_gauge("jobs_running", self.get_counts().get("running", 0))
+                self.telemetry.set_gauge("jobs_queued", self.get_counts().get("queued", 0))
+            except Exception:
+                pass
+
         try:
             proc.start()
             self.event_logger.log(st.trace_id, "jobs.started", {"job_id": job_id, "kind": st.kind})
@@ -591,6 +617,16 @@ class JobManager:
                 self._persist_index_locked()
                 self.event_logger.log(st.trace_id, "jobs.finished", {"job_id": job_id, "kind": st.kind, "status": st.status.value})
                 self._exec_args.pop(job_id, None)
+
+        if et == "finished" and self.telemetry is not None:
+            try:
+                if st and st.started_at and st.finished_at:
+                    rt_ms = float((float(st.finished_at) - float(st.started_at)) * 1000.0)
+                    self.telemetry.record_latency("job_runtime_ms", rt_ms, tags={"kind": st.kind, "status": st.status.value})
+                self.telemetry.set_gauge("jobs_running", self.get_counts().get("running", 0))
+                self.telemetry.set_gauge("jobs_queued", self.get_counts().get("queued", 0))
+            except Exception:
+                pass
 
         # hooks outside lock
         try:

@@ -35,6 +35,7 @@ class Dispatcher:
         event_logger: EventLogger,
         logger,
         error_reporter: ErrorReporter | None = None,
+        telemetry: Any = None,
     ):
         self.registry = registry
         self.policy = policy
@@ -42,6 +43,7 @@ class Dispatcher:
         self.event_logger = event_logger
         self.logger = logger
         self.error_reporter = error_reporter or ErrorReporter()
+        self.telemetry = telemetry
 
     def _enforce(self, trace_id: str, intent_id: str) -> Tuple[bool, str]:
         perms = self.policy.for_intent(intent_id)
@@ -64,6 +66,11 @@ class Dispatcher:
         mod = self.registry.get_by_id(module_id)
         if not mod:
             self.event_logger.log(trace_id, "dispatch.refused", {"reason": "unknown module_id", "module_id": module_id})
+            if self.telemetry is not None:
+                try:
+                    self.telemetry.increment_counter("errors_total", 1, tags={"subsystem": "dispatcher", "severity": "WARN"})
+                except Exception:
+                    pass
             return DispatchResult(ok=False, reply="I can’t execute that module.", denied_reason="unknown module")
 
         # MODULE_META fail-safe: resource_intensive => admin-only regardless of config.

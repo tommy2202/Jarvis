@@ -47,10 +47,11 @@ class WebSecurityMiddleware:
     6) audit outcome
     """
 
-    def __init__(self, *, web_cfg: Dict[str, Any], secure_store, event_logger: EventLogger, audit_logger: SecurityAuditLogger):
+    def __init__(self, *, web_cfg: Dict[str, Any], secure_store, event_logger: EventLogger, audit_logger: SecurityAuditLogger, telemetry=None):
         self.web_cfg = web_cfg
         self.event_logger = event_logger
         self.audit_logger = audit_logger
+        self.telemetry = telemetry
         self.api_keys = ApiKeyStore(secure_store)
         self.rate = RateLimiter()
         self.strikes = StrikeManager(secure_store, LockoutConfig.model_validate(web_cfg.get("lockout") or {}))
@@ -62,6 +63,13 @@ class WebSecurityMiddleware:
         path = request.url.path
         method = request.method
         client_id = request.headers.get("X-Client-Id", "")
+        t0 = time.time()
+
+        if self.telemetry is not None:
+            try:
+                self.telemetry.increment_counter("requests_total", 1, tags={"source": "web"})
+            except Exception:
+                pass
 
         self.audit_logger.log(trace_id=trace_id, severity="INFO", event="web.request", ip=ip, endpoint=path, outcome="received", details={"method": method, "client_id": client_id})
         self.event_logger.log(trace_id, "web.request", {"path": path, "method": method, "client_host": ip})
@@ -80,6 +88,11 @@ class WebSecurityMiddleware:
                         json_depth(obj, max_depth=10)
             except Exception as e:
                 self.strikes.record_strike(ip=ip, key_id=None)
+                if self.telemetry is not None:
+                    try:
+                        self.telemetry.increment_counter("errors_total", 1, tags={"subsystem": "web", "severity": "WARN"})
+                    except Exception:
+                        pass
                 self.audit_logger.log(trace_id=trace_id, severity="WARN", event="web.request_rejected", ip=ip, endpoint=path, outcome="rejected", details={"reason": str(e)})
                 return JSONResponse(status_code=413 if "large" in str(e) else 400, content={"detail": "Request rejected."})
 
@@ -97,6 +110,11 @@ class WebSecurityMiddleware:
             if not v.get("ok"):
                 key_id = v.get("key_id")
                 self.strikes.record_strike(ip=ip, key_id=key_id)
+                if self.telemetry is not None:
+                    try:
+                        self.telemetry.increment_counter("auth_failures_total", 1, tags={"source": "web"})
+                    except Exception:
+                        pass
                 self.audit_logger.log(
                     trace_id=trace_id,
                     severity="WARN",
@@ -145,8 +163,19 @@ class WebSecurityMiddleware:
         try:
             resp = await call_next(request)
             self.audit_logger.log(trace_id=trace_id, severity="INFO", event="web.response", ip=ip, endpoint=path, outcome=str(resp.status_code), details={"key_id": key_id, "client_id": client_id})
+            if self.telemetry is not None:
+                try:
+                    self.telemetry.record_latency("web_request_latency_ms", (time.time() - t0) * 1000.0, tags={"path": path, "method": method, "status": resp.status_code})
+                except Exception:
+                    pass
             return resp
         except Exception as e:
             self.audit_logger.log(trace_id=trace_id, severity="ERROR", event="web.exception", ip=ip, endpoint=path, outcome="error", details={"error": str(e)})
+            if self.telemetry is not None:
+                try:
+                    self.telemetry.increment_counter("errors_total", 1, tags={"subsystem": "web", "severity": "ERROR"})
+                    self.telemetry.record_latency("web_request_latency_ms", (time.time() - t0) * 1000.0, tags={"path": path, "method": method, "status": "error"})
+                except Exception:
+                    pass
             raise
 

@@ -126,6 +126,7 @@ class JarvisRuntime:
         tts_adapter: Any = None,
         security_manager: Any = None,
         secure_store: Any = None,
+        telemetry: Any = None,
         error_reporter: Optional[ErrorReporter] = None,
         recovery_policy: Optional[RecoveryPolicy] = None,
         breakers: Optional[BreakerRegistry] = None,
@@ -141,6 +142,7 @@ class JarvisRuntime:
         self.tts_adapter = tts_adapter
         self.security_manager = security_manager
         self.secure_store = secure_store
+        self.telemetry = telemetry
         self.error_reporter = error_reporter or ErrorReporter()
         self.recovery_policy = recovery_policy or RecoveryPolicy(RecoveryConfig())
         self.breakers = breakers or BreakerRegistry({})
@@ -168,6 +170,11 @@ class JarvisRuntime:
 
         self._set_state("boot", AssistantState.BOOTING, {})
         self._set_state("boot", AssistantState.SLEEPING, {})
+        if self.telemetry is not None:
+            try:
+                self.telemetry.set_gauge("current_state_machine_state", self._state.value)
+            except Exception:
+                pass
 
     # ---------- Public control surface ----------
     def start(self) -> None:
@@ -198,6 +205,11 @@ class JarvisRuntime:
         trace_id = uuid.uuid4().hex
         ev = RuntimeEvent(trace_id=trace_id, source=source, type=EventType.TextInputReceived, payload={"text": text, "client": redact(client_meta or {})})
         self._enqueue(ev)
+        if self.telemetry is not None:
+            try:
+                self.telemetry.increment_counter("requests_total", 1, tags={"source": source})
+            except Exception:
+                pass
         return trace_id
 
     def request_listen(self, source: str = "ui") -> str:
@@ -246,6 +258,38 @@ class JarvisRuntime:
                 "busy_policy": self.cfg.busy_policy,
             },
         }
+
+    def get_telemetry_snapshot(self) -> Optional[Dict[str, Any]]:
+        if self.telemetry is None:
+            return None
+        try:
+            return self.telemetry.get_snapshot()
+        except Exception:
+            return None
+
+    def get_health(self, subsystem: Optional[str] = None) -> list[Dict[str, Any]]:
+        if self.telemetry is None:
+            return []
+        try:
+            return self.telemetry.get_health(subsystem=subsystem)
+        except Exception:
+            return []
+
+    def get_metrics_summary(self) -> Dict[str, Any]:
+        if self.telemetry is None:
+            return {}
+        try:
+            return self.telemetry.get_metrics_summary()
+        except Exception:
+            return {}
+
+    def ui_heartbeat(self) -> None:
+        if self.telemetry is None:
+            return
+        try:
+            self.telemetry.ui_heartbeat()
+        except Exception:
+            pass
 
     def get_result(self, trace_id: str) -> Optional[Dict[str, Any]]:
         self._gc_results()
@@ -435,6 +479,11 @@ class JarvisRuntime:
             }
         )
         self.event_logger.log(trace_id, "core.state", {"from": old.value, "to": new_state.value, **redact(details)})
+        if self.telemetry is not None:
+            try:
+                self.telemetry.set_gauge("current_state_machine_state", new_state.value)
+            except Exception:
+                pass
 
     def _allowed_transitions(self) -> Dict[AssistantState, set[AssistantState]]:
         return {
@@ -471,6 +520,11 @@ class JarvisRuntime:
             pass
         self._llm_loaded = True
         self._log_sm("llm.loaded", {})
+        if self.telemetry is not None:
+            try:
+                self.telemetry.set_gauge("llm_loaded", 1, tags={"role": "chat"})
+            except Exception:
+                pass
 
     def _unload_llm(self, trace_id: str) -> None:
         if not self._llm_loaded:
@@ -493,6 +547,11 @@ class JarvisRuntime:
             pass
         self._llm_loaded = False
         self._log_sm("llm.unloaded", {})
+        if self.telemetry is not None:
+            try:
+                self.telemetry.set_gauge("llm_loaded", 0, tags={"role": "chat"})
+            except Exception:
+                pass
 
     # ---------- Runtime loop ----------
     def _run(self) -> None:
@@ -671,6 +730,7 @@ class JarvisRuntime:
 
     def _start_speaking(self, trace_id: str, text: str) -> None:
         def run():
+            t0 = time.time()
             try:
                 br = self.breakers.breakers.get("tts") if hasattr(self.breakers, "breakers") else None
                 if br is not None and not br.allow():
@@ -683,6 +743,11 @@ class JarvisRuntime:
                     br.record_failure()
                 self.error_reporter.report_exception(e, trace_id=trace_id, subsystem="tts", context={})
             finally:
+                if self.telemetry is not None:
+                    try:
+                        self.telemetry.record_latency("tts_latency_ms", (time.time() - t0) * 1000.0)
+                    except Exception:
+                        pass
                 self._enqueue(RuntimeEvent(trace_id=trace_id, source="system", type=EventType.SpeakComplete, payload={}))
 
         self._executor.submit(run)
@@ -702,6 +767,7 @@ class JarvisRuntime:
 
     def _start_transcribe(self, trace_id: str, wav_path: str) -> None:
         def run():
+            t0 = time.time()
             try:
                 br = self.breakers.breakers.get("stt") if hasattr(self.breakers, "breakers") else None
                 if br is not None and not br.allow():
@@ -717,6 +783,12 @@ class JarvisRuntime:
                     br.record_failure()
                 self.error_reporter.report_exception(e, trace_id=trace_id, subsystem="stt", context={})
                 self._enqueue(RuntimeEvent(trace_id=trace_id, source="voice", type=EventType.STTFailed, payload={"error": str(e)}))
+            finally:
+                if self.telemetry is not None:
+                    try:
+                        self.telemetry.record_latency("stt_latency_ms", (time.time() - t0) * 1000.0)
+                    except Exception:
+                        pass
 
         self._executor.submit(run)
 

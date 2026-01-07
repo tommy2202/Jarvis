@@ -4,6 +4,8 @@ import json
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
+from jarvis.ui.views.health_panel import HealthPanel
+
 
 class LogsPanel(ttk.Frame):
     def __init__(self, master, *, on_refresh, on_export):  # noqa: ANN001
@@ -27,12 +29,14 @@ class LogsPanel(ttk.Frame):
         self._errors = ScrolledText(self._nb, height=10, wrap="word")
         self._security = ScrolledText(self._nb, height=10, wrap="word")
         self._system = ScrolledText(self._nb, height=10, wrap="none")
+        self._health = HealthPanel(self._nb)
         for t in (self._errors, self._security, self._system):
             t.configure(state="disabled")
 
         self._nb.add(self._errors, text="Errors")
         self._nb.add(self._security, text="Security")
         self._nb.add(self._system, text="System")
+        self._nb.add(self._health, text="Health")
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -51,6 +55,9 @@ class LogsPanel(ttk.Frame):
         self._system.delete("1.0", "end")
         self._system.insert("end", "\n".join(lines))
         self._system.configure(state="disabled")
+
+    def set_health_snapshot(self, snap: dict) -> None:
+        self._health.set_snapshot(snap)
 
     def _set_jsonl(self, widget: ScrolledText, items: list[dict], *, severity_key: str) -> None:
         sev = self.severity_filter()

@@ -57,10 +57,11 @@ class RoleState:
 
 
 class LLMLifecycleController:
-    def __init__(self, *, policy: LLMPolicy, event_logger: EventLogger, logger):
+    def __init__(self, *, policy: LLMPolicy, event_logger: EventLogger, logger, telemetry: Any = None):
         self.policy = policy
         self.event_logger = event_logger
         self.logger = logger
+        self.telemetry = telemetry
         self._lock = threading.Lock()
         self._role_state: Dict[str, RoleState] = {k: RoleState() for k in policy.roles.keys()}
         self._backends: Dict[str, LLMBackend] = {}
@@ -168,7 +169,13 @@ class LLMLifecycleController:
         if not backend.is_server_running():
             with self._lock:
                 self._role_state[role].last_error = "server_unreachable"
-            return LLMResponse(trace_id=req.trace_id, role=req.role, status=LLMStatus.error, error={"type": "server_unreachable", "message": "LLM server not reachable"}, latency_seconds=time.time() - t0)
+            resp = LLMResponse(trace_id=req.trace_id, role=req.role, status=LLMStatus.error, error={"type": "server_unreachable", "message": "LLM server not reachable"}, latency_seconds=time.time() - t0)
+            if self.telemetry is not None:
+                try:
+                    self.telemetry.increment_counter("errors_total", 1, tags={"subsystem": "llm", "severity": "WARN"})
+                except Exception:
+                    pass
+            return resp
 
         # Compose messages; if JSON schema required, force JSON-only response.
         messages = [m.model_dump() for m in req.messages]
@@ -201,12 +208,26 @@ class LLMLifecycleController:
             raw = backend.chat(model=cfg.model, messages=messages, options=options, timeout_seconds=timeout)
         except requests.Timeout:
             self.event_logger.log(req.trace_id, "llm.timeout", {"role": role})
-            return LLMResponse(trace_id=req.trace_id, role=req.role, status=LLMStatus.timeout, error={"type": "timeout", "message": "LLM request timed out"}, latency_seconds=time.time() - t0)
+            resp = LLMResponse(trace_id=req.trace_id, role=req.role, status=LLMStatus.timeout, error={"type": "timeout", "message": "LLM request timed out"}, latency_seconds=time.time() - t0)
+            if self.telemetry is not None:
+                try:
+                    self.telemetry.increment_counter("errors_total", 1, tags={"subsystem": "llm", "severity": "WARN"})
+                    self.telemetry.record_latency("llm_latency_ms", float(resp.latency_seconds) * 1000.0, tags={"role": role, "status": "timeout"})
+                except Exception:
+                    pass
+            return resp
         except Exception as e:  # noqa: BLE001
             self.event_logger.log(req.trace_id, "llm.error", {"role": role, "error": str(e)})
             with self._lock:
                 self._role_state[role].last_error = str(e)
-            return LLMResponse(trace_id=req.trace_id, role=req.role, status=LLMStatus.error, error={"type": "error", "message": str(e)}, latency_seconds=time.time() - t0)
+            resp = LLMResponse(trace_id=req.trace_id, role=req.role, status=LLMStatus.error, error={"type": "error", "message": str(e)}, latency_seconds=time.time() - t0)
+            if self.telemetry is not None:
+                try:
+                    self.telemetry.increment_counter("errors_total", 1, tags={"subsystem": "llm", "severity": "ERROR"})
+                    self.telemetry.record_latency("llm_latency_ms", float(resp.latency_seconds) * 1000.0, tags={"role": role, "status": "error"})
+                except Exception:
+                    pass
+            return resp
 
         # Parse/validate JSON strictly (retry once if invalid)
         for attempt in range(2):
@@ -223,7 +244,14 @@ class LLMLifecycleController:
                     self._role_state[role].loaded = True
                     self._role_state[role].last_used = time.time()
                     self._role_state[role].last_error = None
-                return LLMResponse(trace_id=req.trace_id, role=req.role, status=LLMStatus.ok, raw_text=None if not self.policy.debug_log_prompts else raw[:2000], parsed_json=parsed, latency_seconds=time.time() - t0)
+                resp = LLMResponse(trace_id=req.trace_id, role=req.role, status=LLMStatus.ok, raw_text=None if not self.policy.debug_log_prompts else raw[:2000], parsed_json=parsed, latency_seconds=time.time() - t0)
+                if self.telemetry is not None:
+                    try:
+                        self.telemetry.record_latency("llm_latency_ms", float(resp.latency_seconds) * 1000.0, tags={"role": role, "status": "ok"})
+                        self.telemetry.set_gauge("llm_loaded", 1, tags={"role": role})
+                    except Exception:
+                        pass
+                return resp
             except Exception as e:  # noqa: BLE001
                 if attempt == 0:
                     # Retry with stricter system prompt
@@ -233,7 +261,14 @@ class LLMLifecycleController:
                         continue
                     except Exception:
                         pass
-                return LLMResponse(trace_id=req.trace_id, role=req.role, status=LLMStatus.invalid, raw_text=None, parsed_json=None, error={"type": "invalid_json", "message": str(e)}, latency_seconds=time.time() - t0)
+                resp = LLMResponse(trace_id=req.trace_id, role=req.role, status=LLMStatus.invalid, raw_text=None, parsed_json=None, error={"type": "invalid_json", "message": str(e)}, latency_seconds=time.time() - t0)
+                if self.telemetry is not None:
+                    try:
+                        self.telemetry.increment_counter("errors_total", 1, tags={"subsystem": "llm", "severity": "WARN"})
+                        self.telemetry.record_latency("llm_latency_ms", float(resp.latency_seconds) * 1000.0, tags={"role": role, "status": "invalid"})
+                    except Exception:
+                        pass
+                return resp
 
         return LLMResponse(trace_id=req.trace_id, role=req.role, status=LLMStatus.invalid, error={"type": "invalid_json", "message": "invalid"}, latency_seconds=time.time() - t0)
 
