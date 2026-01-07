@@ -123,6 +123,20 @@ class ResourcesConfigFile(BaseModel):
         }
     )
 
+
+class AuditConfigFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    store: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "path_jsonl": "logs/audit/audit_events.jsonl",
+            "use_sqlite_index": True,
+            "sqlite_path": "logs/audit/index.sqlite",
+        }
+    )
+    integrity: Dict[str, Any] = Field(default_factory=lambda: {"enabled": True, "verify_on_startup": True, "verify_last_n": 2000})
+    retention: Dict[str, Any] = Field(default_factory=lambda: {"days": 90, "max_events": 50000})
+    export: Dict[str, Any] = Field(default_factory=lambda: {"max_rows": 20000})
 class EventsBusConfigFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = True
@@ -247,6 +261,7 @@ class AppConfigV2(BaseModel):
     ui: UiConfig
     telemetry: TelemetryConfigFile
     resources: ResourcesConfigFile
+    audit: AuditConfigFile
     events: EventsBusConfigFile
     runtime: RuntimeControlConfigFile
     runtime_state: RuntimeStateConfigFile

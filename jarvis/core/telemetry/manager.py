@@ -207,8 +207,9 @@ class TelemetryManager:
 
     # -------- internal loop --------
     def _loop(self) -> None:
-        poll = max(1.0, float(self.cfg.poll_interval_seconds))
-        sample = max(1.0, float(self.cfg.sample_interval_seconds))
+        # Allow faster polling in tests; keep a small floor to avoid tight loops.
+        poll = max(0.2, float(self.cfg.poll_interval_seconds))
+        sample = max(0.2, float(self.cfg.sample_interval_seconds))
         next_health = time.time()
         next_sample = time.time()
         while not self._stop.is_set():

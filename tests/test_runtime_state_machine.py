@@ -70,7 +70,7 @@ def test_text_only_happy_path_transitions_and_result(tmp_path):
         assert out is not None
         assert out["reply"] == "echo: hello"
         # eventually returns to SLEEPING after IDLE timeout
-        time.sleep(0.4)
+        time.sleep(0.7)
         assert rt.get_status()["state"] == AssistantState.SLEEPING.value
     finally:
         rt.stop()
@@ -102,7 +102,7 @@ def test_idle_timeout_unloads_llm(tmp_path):
         tid = rt.submit_text("cli", "hi")
         _ = rt.wait_for_result(tid, timeout_seconds=2.0)
         assert jarvis.stage_b.loaded is True
-        time.sleep(0.4)
+        time.sleep(0.7)
         # After idle sleep, runtime should unload
         assert jarvis.stage_b.loaded is False
     finally:

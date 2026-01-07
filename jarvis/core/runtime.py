@@ -135,6 +135,7 @@ class JarvisRuntime:
         persist_path: str = os.path.join("logs", "state_machine", "events.jsonl"),
         safe_mode: bool = False,
         event_bus: Any = None,
+        audit_timeline: Any = None,
     ):
         self.cfg = cfg
         self.jarvis_app = jarvis_app
@@ -153,6 +154,7 @@ class JarvisRuntime:
         self.breakers = breakers or BreakerRegistry({})
         self.safe_mode = bool(safe_mode)
         self.event_bus = event_bus
+        self.audit_timeline = audit_timeline
 
         self._writer = _JsonlWriter(persist_path)
         self._q: "queue.Queue[RuntimeEvent]" = queue.Queue()
@@ -293,12 +295,37 @@ class JarvisRuntime:
             "secure_store": secure,
             "llm": llm,
             "voice": voice,
+            "audit": self.get_audit_status(),
             "runtime_state": rs,
             "runtime_cfg": {
                 "max_concurrent_interactions": self.cfg.max_concurrent_interactions,
                 "busy_policy": self.cfg.busy_policy,
             },
         }
+
+    def get_audit_status(self) -> Dict[str, Any]:
+        if self.audit_timeline is None:
+            return {"enabled": False}
+        try:
+            return {"enabled": True, "integrity_broken": bool(self.audit_timeline.integrity_broken())}
+        except Exception:
+            return {"enabled": True, "error": "status_failed"}
+
+    def get_audit_tail(self, n: int = 30) -> list[str]:
+        if self.audit_timeline is None:
+            return []
+        try:
+            return self.audit_timeline.tail_formatted(n=int(n))
+        except Exception:
+            return []
+
+    def audit_verify_integrity(self) -> Dict[str, Any]:
+        if self.audit_timeline is None:
+            return {"ok": True, "message": "audit disabled"}
+        try:
+            return self.audit_timeline.verify_integrity(limit_last_n=2000).model_dump()
+        except Exception as e:
+            return {"ok": False, "message": str(e)}
 
     def get_telemetry_snapshot(self) -> Optional[Dict[str, Any]]:
         if self.telemetry is None:

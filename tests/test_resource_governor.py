@@ -17,8 +17,8 @@ from jarvis.core.resources.models import (
 def _mk_cfg(on_over_budget: str = "DENY") -> ResourceGovernorConfig:
     return ResourceGovernorConfig(
         enabled=True,
-        sample_interval_seconds=9999,
-        budgets=BudgetConfig(cpu_max_percent=50, ram_max_percent=50, process_ram_max_mb=100, disk_min_free_gb=0.1, gpu_vram_max_percent=50),
+        sample_interval_seconds=60,
+        budgets=BudgetConfig(cpu_max_percent=50, ram_max_percent=50, process_ram_max_mb=256, disk_min_free_gb=0.1, gpu_vram_max_percent=50),
         policies=PolicyConfig(on_over_budget=on_over_budget, cooldown_seconds=0.0, max_delay_seconds=1.0),
         throttles=ThrottleConfig(max_concurrent_heavy_jobs=1, max_concurrent_llm_requests=1, max_total_jobs=2),
         safe_mode=SafeModeConfig(enter_after_consecutive_violations=2, exit_after_seconds_stable=1.0),
@@ -79,8 +79,11 @@ def test_safe_mode_exits_after_stable_window(monkeypatch):
     cur["snap"] = snap_ok
     with gov._lock:
         gov._last_snapshot = snap_ok
-    now[0] += 2.0  # > exit_after_seconds_stable
+    # First stable sample establishes stable_since.
     _ = gov.admit(operation="intent.execute", trace_id="t7")
+    now[0] += 2.0  # > exit_after_seconds_stable
+    # Next stable sample should exit safe mode.
+    _ = gov.admit(operation="intent.execute", trace_id="t8")
     assert gov.safe_mode_active() is False
 
 

@@ -253,6 +253,54 @@ def create_app(
         except Exception:
             return {"mode": "unavailable"}
 
+    @app.get("/v1/audit")
+    async def audit_list(
+        request: Request,
+        since: float | None = None,
+        until: float | None = None,
+        category: str | None = None,
+        outcome: str | None = None,
+        actor_source: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ):
+        if runtime is None or getattr(runtime, "audit_timeline", None) is None:
+            raise HTTPException(status_code=503, detail="Audit timeline unavailable.")
+        rows = runtime.audit_timeline.list_events(
+            since=since,
+            until=until,
+            category=category,
+            outcome=outcome,
+            actor_source=actor_source,
+            limit=limit,
+            offset=offset,
+        )
+        return {"events": [r.model_dump() for r in rows], "integrity_broken": bool(runtime.audit_timeline.integrity_broken())}
+
+    @app.get("/v1/audit/integrity")
+    async def audit_integrity(request: Request):
+        if runtime is None or getattr(runtime, "audit_timeline", None) is None:
+            raise HTTPException(status_code=503, detail="Audit timeline unavailable.")
+        return runtime.audit_timeline.verify_integrity(limit_last_n=2000).model_dump()
+
+    @app.get("/v1/audit/{audit_id}")
+    async def audit_get(audit_id: str, request: Request):
+        if runtime is None or getattr(runtime, "audit_timeline", None) is None:
+            raise HTTPException(status_code=503, detail="Audit timeline unavailable.")
+        ev = runtime.audit_timeline.get_event(audit_id)
+        if ev is None:
+            raise HTTPException(status_code=404, detail="Not found.")
+        return ev.model_dump()
+
+    @app.post("/v1/audit/purge")
+    async def audit_purge(request: Request):
+        if runtime is None or getattr(runtime, "audit_timeline", None) is None:
+            raise HTTPException(status_code=503, detail="Audit timeline unavailable.")
+        # Admin scope is enforced by middleware; additionally require admin session if available.
+        if security_manager is not None and not bool(security_manager.is_admin()):
+            raise PermissionDeniedError("Admin required.")
+        return runtime.audit_timeline.purge_and_compact()
+
     @app.post("/v1/admin/unlock", response_model=AdminUnlockResponse)
     async def admin_unlock(req: AdminUnlockRequest, request: Request):
         if draining_event is not None and getattr(draining_event, "is_set", lambda: False)():

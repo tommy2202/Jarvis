@@ -14,6 +14,7 @@ This repo is a **minimal but functional** “Jarvis” assistant designed to run
 - **Production-grade configuration system** (validated schemas, migrations, backups, hot reload)
 - **Desktop UI (Tkinter)** (`python app.py --ui`) as a thin client over core runtime APIs
 - **Telemetry + health monitoring** (local-only; `/health`, `/metrics`, UI “Health” tab, and authenticated web endpoints)
+- **Audit timeline** (privacy-safe “what Jarvis did” timeline with tamper-evident hash chaining)
 
 ## Configuration system (production-grade)
 
@@ -78,6 +79,26 @@ CLI commands:
 - `/config validate`
 - `/config reload`
 - `/config diff`
+
+## Audit timeline (tamper-evident, privacy-safe)
+
+Jarvis maintains a **chronological “what happened” timeline** under `logs/audit/`:
+- `logs/audit/audit_events.jsonl`: append-only audit records with **hash chaining** (`prev_hash` + `hash`)
+- `logs/audit/head.json`: rolling head hash
+- `logs/audit/index.sqlite`: optional local index for fast queries (enabled by default)
+
+**Privacy guarantees**:
+- never stores raw user messages/transcripts
+- never stores passphrases, API keys, access keys, tokens
+- redacts common secret patterns and truncates long strings
+
+CLI commands:
+- `/audit tail [n]`
+- `/audit integrity`
+- `/audit show <audit_id>`
+- `/audit query --since=... --category=... --outcome=... --source=... --limit=...`
+- `/audit export json|csv <path>`
+- `/audit purge` (admin-only; compacts to retention window)
 
 ## Windows setup
 

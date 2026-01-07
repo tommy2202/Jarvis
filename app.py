@@ -251,6 +251,12 @@ def main() -> None:
                 pass
     runtime_state.mark_dirty_startup()
 
+    # Audit Timeline (hash-chained, privacy-safe)
+    from jarvis.core.audit.timeline import AuditTimelineManager
+
+    audit = AuditTimelineManager(cfg=cfg_obj.audit.model_dump(), logger=logger, event_bus=event_bus, telemetry=None, ops_logger=ops)
+    audit.start()
+
     # Capability bus (validated config/capabilities.json)
     cap_raw = config.read_non_sensitive("capabilities.json")
     cap_cfg = validate_and_normalize(cap_raw)
@@ -263,6 +269,8 @@ def main() -> None:
     runtime_state.attach(telemetry=telemetry)
     event_bus.telemetry = telemetry
     telemetry.attach(event_bus=event_bus)
+    # Attach telemetry to audit timeline (optional counters)
+    audit.telemetry = telemetry
 
     # Resource Governor (local-only admission control for heavy operations)
     from jarvis.core.resources.governor import ResourceGovernor
@@ -600,6 +608,7 @@ def main() -> None:
         breakers=breaker_registry,
         safe_mode=safe_mode_active,
         event_bus=event_bus,
+        audit_timeline=audit,
     )
     runtime.start()
     telemetry.attach(runtime=runtime, voice_adapter=voice_adapter, tts_adapter=tts_adapter)
@@ -944,6 +953,64 @@ def main() -> None:
                 print(f"Exported to {path}")
                 continue
             print("Usage: /caps list | /caps show <cap_id> | /caps intent <intent_id> | /caps eval <intent_id> --source=cli|web|voice|ui --admin=true|false --safe_mode=true|false --shutting_down=true|false | /caps export <path>")
+            continue
+        if text.startswith("/audit"):
+            from jarvis.core.audit.formatter import format_line
+
+            parts = text.split()
+            if len(parts) == 1 or parts[1] == "tail":
+                n = int(parts[2]) if len(parts) >= 3 else 20
+                for line in audit.tail_formatted(n=n):
+                    print(line)
+                continue
+            if len(parts) >= 2 and parts[1] == "integrity":
+                rep = audit.verify_integrity(limit_last_n=int((cfg_obj.audit.integrity or {}).get("verify_last_n", 2000)))
+                print(rep.model_dump())
+                continue
+            if len(parts) >= 3 and parts[1] == "show":
+                ev = audit.get_event(parts[2])
+                print(ev.model_dump() if ev else {"error": "not found"})
+                continue
+            if len(parts) >= 2 and parts[1] == "query":
+                # minimal flag parser: --since= --until= --category= --outcome= --source= --limit=
+                filters: dict = {"limit": 50}
+                for p in parts[2:]:
+                    if p.startswith("--since="):
+                        filters["since"] = float(p.split("=", 1)[1])
+                    if p.startswith("--until="):
+                        filters["until"] = float(p.split("=", 1)[1])
+                    if p.startswith("--category="):
+                        filters["category"] = p.split("=", 1)[1]
+                    if p.startswith("--outcome="):
+                        filters["outcome"] = p.split("=", 1)[1]
+                    if p.startswith("--source="):
+                        filters["actor_source"] = p.split("=", 1)[1]
+                    if p.startswith("--limit="):
+                        filters["limit"] = int(p.split("=", 1)[1])
+                rows = audit.list_events(**filters)
+                for ev in reversed(rows):
+                    print(format_line(ev))
+                continue
+            if len(parts) >= 4 and parts[1] == "export":
+                fmt = parts[2]
+                out_path = parts[3]
+                filters: dict = {"limit": int((cfg_obj.audit.export or {}).get("max_rows", 20000))}
+                if fmt == "json":
+                    print(audit.export_json(out_path, filters=filters))
+                    continue
+                if fmt == "csv":
+                    print(audit.export_csv(out_path, filters=filters))
+                    continue
+                print("Usage: /audit export json|csv <path>")
+                continue
+            if len(parts) >= 2 and parts[1] == "purge":
+                if not security.is_admin():
+                    print("Admin required.")
+                    continue
+                res = audit.purge_and_compact()
+                print(res)
+                continue
+            print("Usage: /audit tail [n] | /audit query [--since=.. --category=.. --outcome=.. --source=.. --limit=N] | /audit show <id> | /audit export json|csv <path> | /audit integrity | /audit purge")
             continue
         if text.startswith("/events"):
             parts = text.split()
