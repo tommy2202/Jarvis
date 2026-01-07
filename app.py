@@ -196,6 +196,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Jarvis (offline-first) CLI/voice/web")
     ap.add_argument("--mode", choices=["text", "voice", "hybrid"], default="hybrid", help="Run mode.")
     ap.add_argument("--ui", action="store_true", help="Launch desktop UI (Tkinter) instead of CLI.")
+    ap.add_argument("--force-start", action="store_true", help="Force start even if self-check would block (requires confirmation).")
+    ap.add_argument("--safe-mode", action="store_true", help="Start in safe mode (restrictions enabled).")
+    ap.add_argument("--diagnostics-only", action="store_true", help="Run startup self-check and exit.")
     args = ap.parse_args()
 
     logger = setup_logging("logs")
@@ -249,7 +252,8 @@ def main() -> None:
     runtime_state.mark_dirty_startup()
 
     # Capability bus (validated config/capabilities.json)
-    cap_cfg = validate_and_normalize(config.read_non_sensitive("capabilities.json"))
+    cap_raw = config.read_non_sensitive("capabilities.json")
+    cap_cfg = validate_and_normalize(cap_raw)
     cap_audit = CapabilityAuditLogger(path=os.path.join("logs", "security.jsonl"))
     cap_engine = CapabilityEngine(cfg=cap_cfg, audit=cap_audit, logger=logger, event_bus=event_bus)
 
@@ -454,6 +458,48 @@ def main() -> None:
 
     # Core Runtime State Machine
     sm_cfg = RuntimeConfig.model_validate(cfg_obj.state_machine.model_dump())
+
+    # --- Startup self-check (deterministic, before starting web/voice/UI) ---
+    from jarvis.core.startup.runner import StartupSelfCheckRunner, StartupFlags
+    from jarvis.core.startup.reporting import to_human
+
+    runner = StartupSelfCheckRunner(ops=ops, logger=logger, event_bus=event_bus, telemetry=telemetry)
+    # Secure store mode from phase 2 is derived from secure_store.status(); safe_mode uses args + dirty shutdown.
+    core_ready = {
+        "capability_ok": True,
+        "event_bus_ok": True,
+        "telemetry_ok": True,
+        "job_manager_ok": job_manager is not None,
+        "error_policy_ok": True,
+        "runtime_ok": True,
+    }
+    result = runner.run(
+        flags=StartupFlags(force_start=bool(args.force_start), safe_mode=bool(args.safe_mode), diagnostics_only=bool(args.diagnostics_only)),
+        root_dir=".",
+        logs_dir="logs",
+        config_manager=config,
+        secure_store=secure_store,
+        runtime_state=runtime_state,
+        cfg_obj=cfg_obj,
+        capabilities_cfg_raw=cap_raw,
+        core_ready=core_ready,
+    )
+    try:
+        runtime_state.record_startup_self_check(
+            overall_status=result.overall_status.value,
+            safe_mode=bool(result.started_in_safe_mode),
+            runtime_fingerprint=result.runtime_fingerprint,
+            warnings=result.warnings,
+            blocking_reasons=result.blocking_reasons,
+        )
+    except Exception:
+        pass
+    if bool(args.diagnostics_only):
+        print(to_human(result))
+        return
+    if result.overall_status.value == "BLOCKED":
+        print(to_human(result))
+        raise SystemExit(2)
 
     # Build optional voice adapters (reuse existing voice package components)
     voice_adapter = None

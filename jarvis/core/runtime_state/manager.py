@@ -142,6 +142,32 @@ class RuntimeStateManager:
             self._state.security.lockouts_summary = redact(summary or {})
             self._dirty = True
 
+    def record_startup_self_check(
+        self,
+        *,
+        overall_status: str,
+        safe_mode: bool,
+        runtime_fingerprint: str,
+        warnings: list[str],
+        blocking_reasons: list[str],
+    ) -> None:
+        """
+        Persist a safe summary of the last startup self-check.
+        Never includes secrets or user message contents.
+        """
+        with self._lock:
+            self._state.startup_last = {
+                "overall_status": str(overall_status),
+                "safe_mode": bool(safe_mode),
+                "runtime_fingerprint": str(runtime_fingerprint),
+                "warnings": list(warnings)[:50],
+                "blocking_reasons": list(blocking_reasons)[:50],
+                "ts": time.time(),
+            }
+            self._state.safe_mode_active = bool(safe_mode)
+            self._dirty = True
+        self._maybe_write("startup_self_check")
+
     # ---- snapshot/export ----
     def get_snapshot(self) -> Dict[str, Any]:
         with self._lock:

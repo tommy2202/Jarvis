@@ -115,3 +115,7 @@ class RuntimeState(BaseModel):
 
     notes: List[str] = Field(default_factory=list)
 
+    # Startup self-check summary (safe, no secrets)
+    startup_last: Dict[str, Any] = Field(default_factory=dict)
+    safe_mode_active: bool = False
+
