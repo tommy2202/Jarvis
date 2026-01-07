@@ -31,6 +31,10 @@ def _required_scope(method: str, path: str) -> Optional[str]:
         return "read"
     if path in {"/v1/capabilities", "/v1/capabilities/intents", "/v1/capabilities/eval"}:
         return "read"
+    if path == "/v1/policy/status" or path == "/v1/policy/rules":
+        return "read"
+    if path == "/v1/policy/eval":
+        return "read"
     if path == "/v1/audit" or path.startswith("/v1/audit/"):
         # Read-only by default; purge endpoint below is admin.
         if path == "/v1/audit/purge":

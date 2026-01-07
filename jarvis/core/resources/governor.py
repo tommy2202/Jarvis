@@ -99,6 +99,14 @@ class ResourceGovernor:
         with self._lock:
             return bool(self._safe_mode)
 
+    def is_over_budget(self) -> bool:
+        snap = self._get_snapshot_locked()
+        return bool(self._over_budget_reasons(snap))
+
+    def over_budget_reasons(self) -> list[str]:
+        snap = self._get_snapshot_locked()
+        return list(self._over_budget_reasons(snap))
+
     # ---- admission control ----
     def admit(
         self,

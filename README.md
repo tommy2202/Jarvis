@@ -100,6 +100,26 @@ CLI commands:
 - `/audit export json|csv <path>`
 - `/audit purge` (admin-only; compacts to retention window)
 
+## Policy engine (config-driven constraints)
+
+Jarvis enforces an additional **config-driven policy layer** (`config/policy.json`) inside the authorization chain:
+
+`Intent router → Dispatcher → CapabilityEngine → PolicyEngine → (ResourceGovernor) → allow/deny`
+
+This policy layer can:
+- **deny** actions based on capabilities/source/admin/safe-mode/time windows/resources
+- **require confirmation** (user must reply `confirm` to proceed, `cancel` to abort)
+- **apply safe modifications** (restrictions only), e.g. disable TTS during quiet hours
+
+CLI commands:
+- `/policy status`
+- `/policy list`
+- `/policy show <rule_id>`
+- `/policy eval <intent_id> --source=cli|web|voice --admin=true|false`
+- `/policy reload`
+- `/policy enable` (admin-only)
+- `/policy disable` (admin-only)
+
 ## Windows setup
 
 ### 1) Create a venv + install dependencies

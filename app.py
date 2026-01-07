@@ -263,6 +263,14 @@ def main() -> None:
     cap_audit = CapabilityAuditLogger(path=os.path.join("logs", "security.jsonl"))
     cap_engine = CapabilityEngine(cfg=cap_cfg, audit=cap_audit, logger=logger, event_bus=event_bus)
 
+    # Policy engine (config-driven constraints)
+    from jarvis.core.policy.engine import PolicyEngine
+    from jarvis.core.policy.loader import load_policy_config
+
+    pol_cfg, pol_failsafe, pol_err = load_policy_config(config)
+    policy_engine = PolicyEngine(cfg=pol_cfg, failsafe=pol_failsafe, fail_message=pol_err, event_bus=event_bus)
+    cap_engine.policy_engine = policy_engine
+
     telemetry_cfg = TelemetryConfig.model_validate(cfg_obj.telemetry.model_dump())
     telemetry = TelemetryManager(cfg=telemetry_cfg, logger=logger, root_path=".")
     telemetry.attach(config_manager=config)
@@ -893,6 +901,70 @@ def main() -> None:
                 print(d.changed_files)
                 continue
             print("Usage: /config status|open|validate|reload|diff")
+            continue
+        if text.startswith("/policy"):
+            parts = text.split()
+            if len(parts) == 1 or parts[1] == "status":
+                print(policy_engine.status())
+                continue
+            if len(parts) >= 2 and parts[1] == "list":
+                for r in policy_engine.rules():
+                    print(f"{r.get('priority'):3d} | {r.get('id')} | {r.get('effect')} | {r.get('description')}")
+                continue
+            if len(parts) >= 3 and parts[1] == "show":
+                rid = parts[2]
+                print(policy_engine.get_rule(rid) or {"error": "not found"})
+                continue
+            if len(parts) >= 3 and parts[1] == "eval":
+                iid = parts[2]
+                src = "cli"
+                is_admin = False
+                # time is controlled by engine matcher in tests; here we use real time
+                for p in parts[3:]:
+                    if p.startswith("--source="):
+                        src = p.split("=", 1)[1]
+                    if p.startswith("--admin="):
+                        is_admin = p.split("=", 1)[1].lower() == "true"
+                from jarvis.core.policy.models import PolicyContext
+
+                ctx = PolicyContext(trace_id="policy", intent_id=iid, source=src, is_admin=is_admin, required_capabilities=cap_engine.get_intent_requirements().get(iid) or [])
+                dec = policy_engine.evaluate(ctx)
+                print(dec.model_dump())
+                continue
+            if len(parts) >= 2 and parts[1] == "reload":
+                pol_cfg, pol_failsafe, pol_err = load_policy_config(config)
+                policy_engine.cfg = pol_cfg
+                policy_engine._failsafe = bool(pol_failsafe)  # noqa: SLF001
+                policy_engine._fail_message = str(pol_err or "")  # noqa: SLF001
+                print(policy_engine.status())
+                continue
+            if len(parts) >= 2 and parts[1] == "enable":
+                if not security.is_admin():
+                    print("Admin required.")
+                    continue
+                raw = config.read_non_sensitive("policy.json")
+                raw["enabled"] = True
+                config.save_non_sensitive("policy.json", raw)
+                pol_cfg, pol_failsafe, pol_err = load_policy_config(config)
+                policy_engine.cfg = pol_cfg
+                policy_engine._failsafe = bool(pol_failsafe)  # noqa: SLF001
+                policy_engine._fail_message = str(pol_err or "")  # noqa: SLF001
+                print("Enabled.")
+                continue
+            if len(parts) >= 2 and parts[1] == "disable":
+                if not security.is_admin():
+                    print("Admin required.")
+                    continue
+                raw = config.read_non_sensitive("policy.json")
+                raw["enabled"] = False
+                config.save_non_sensitive("policy.json", raw)
+                pol_cfg, pol_failsafe, pol_err = load_policy_config(config)
+                policy_engine.cfg = pol_cfg
+                policy_engine._failsafe = bool(pol_failsafe)  # noqa: SLF001
+                policy_engine._fail_message = str(pol_err or "")  # noqa: SLF001
+                print("Disabled.")
+                continue
+            print("Usage: /policy status|list|show <id>|eval <intent_id> --source=.. --admin=true|false|reload|enable|disable")
             continue
         if text.startswith("/caps"):
             parts = text.split()

@@ -806,6 +806,7 @@ class JarvisRuntime:
                 ev.trace_id,
                 resp.reply,
                 intent={"id": resp.intent_id, "source": resp.intent_source, "confidence": resp.confidence},
+                modifications=getattr(resp, "modifications", {}) or {},
             )
             return
 
@@ -821,14 +822,22 @@ class JarvisRuntime:
             return
         self._q.put(nxt)
 
-    def _finalize_reply(self, trace_id: str, reply: str, intent: Dict[str, Any]) -> None:
+    def _finalize_reply(self, trace_id: str, reply: str, intent: Dict[str, Any], *, modifications: Dict[str, Any] | None = None) -> None:
         reply = str(reply or "")
         with self._results_lock:
             self._results[trace_id] = InteractionResult(trace_id=trace_id, reply=reply, intent=redact(intent), created_at=time.time())
         self._writer.write({"ts": time.time(), "trace_id": trace_id, "event": "response.ready", "reply_len": len(reply), "intent": redact(intent)})
         self.event_logger.log(trace_id, "core.reply", {"reply_len": len(reply), "intent": intent})
 
-        if self.cfg.enable_tts and self.tts_adapter is not None:
+        tts_allowed = True
+        try:
+            flags = (modifications or {}).get("flags") if isinstance(modifications, dict) else None
+            if isinstance(flags, dict) and flags.get("tts_enabled") is False:
+                tts_allowed = False
+        except Exception:
+            tts_allowed = True
+
+        if self.cfg.enable_tts and self.tts_adapter is not None and tts_allowed:
             self._set_state(trace_id, AssistantState.SPEAKING, {})
             self._start_speaking(trace_id, reply)
         else:

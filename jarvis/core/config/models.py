@@ -137,6 +137,14 @@ class AuditConfigFile(BaseModel):
     integrity: Dict[str, Any] = Field(default_factory=lambda: {"enabled": True, "verify_on_startup": True, "verify_last_n": 2000})
     retention: Dict[str, Any] = Field(default_factory=lambda: {"days": 90, "max_events": 50000})
     export: Dict[str, Any] = Field(default_factory=lambda: {"max_rows": 20000})
+
+
+class PolicyConfigFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    default: Dict[str, Any] = Field(default_factory=lambda: {"deny_unknown_intents": True, "deny_high_sensitivity_without_admin": True})
+    rules: List[Dict[str, Any]] = Field(default_factory=list)
+
 class EventsBusConfigFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = True
@@ -262,6 +270,7 @@ class AppConfigV2(BaseModel):
     telemetry: TelemetryConfigFile
     resources: ResourcesConfigFile
     audit: AuditConfigFile
+    policy: PolicyConfigFile
     events: EventsBusConfigFile
     runtime: RuntimeControlConfigFile
     runtime_state: RuntimeStateConfigFile

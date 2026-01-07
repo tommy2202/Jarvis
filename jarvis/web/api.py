@@ -25,6 +25,7 @@ from jarvis.core.errors import JarvisError
 from jarvis.core.error_reporter import ErrorReporter
 from jarvis.core.errors import PermissionDeniedError
 from jarvis.core.capabilities.models import RequestContext, RequestSource
+from jarvis.core.policy.models import PolicyContext
 
 
 def _is_localhost(request: Request) -> bool:
@@ -252,6 +253,37 @@ def create_app(
             return secure_store.export_public_status()
         except Exception:
             return {"mode": "unavailable"}
+
+    @app.get("/v1/policy/status")
+    async def policy_status(request: Request):
+        eng = getattr(getattr(jarvis_app, "dispatcher", None), "capability_engine", None)
+        pe = getattr(eng, "policy_engine", None) if eng is not None else None
+        if pe is None:
+            return {"enabled": False}
+        return pe.status()
+
+    @app.get("/v1/policy/rules")
+    async def policy_rules(request: Request):
+        eng = getattr(getattr(jarvis_app, "dispatcher", None), "capability_engine", None)
+        pe = getattr(eng, "policy_engine", None) if eng is not None else None
+        if pe is None:
+            raise HTTPException(status_code=503, detail="Policy unavailable.")
+        return {"rules": pe.rules()}
+
+    @app.post("/v1/policy/eval")
+    async def policy_eval(request: Request):
+        eng = getattr(getattr(jarvis_app, "dispatcher", None), "capability_engine", None)
+        pe = getattr(eng, "policy_engine", None) if eng is not None else None
+        if pe is None:
+            raise HTTPException(status_code=503, detail="Policy unavailable.")
+        body = await request.json()
+        intent_id = str(body.get("intent_id") or "")
+        src = str(body.get("source") or "web")
+        is_admin = bool(body.get("is_admin", False))
+        trace_id = getattr(getattr(request, "state", None), "trace_id", "web")
+        req_caps = eng.get_intent_requirements().get(intent_id) if eng is not None else []
+        pctx = PolicyContext(trace_id=trace_id, intent_id=intent_id, source=src, is_admin=is_admin, required_capabilities=list(req_caps or []))
+        return pe.evaluate(pctx).model_dump()
 
     @app.get("/v1/audit")
     async def audit_list(

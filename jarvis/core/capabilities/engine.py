@@ -25,6 +25,8 @@ class CapabilityEngine:
         self.event_bus = event_bus
         # Optional: resource governor (set by app.py after initialization)
         self.resource_governor = None
+        # Optional: policy engine (set by app.py after initialization)
+        self.policy_engine = None
 
     def get_capabilities(self) -> Dict[str, Dict[str, Any]]:
         return {k: v.model_dump() for k, v in self.cfg.capabilities.items()}
@@ -112,6 +114,57 @@ class CapabilityEngine:
         if denied_by_breaker:
             return self._deny(ctx, required, denied_by_breaker, ["Subsystem temporarily disabled (circuit breaker open)."], remediation="Wait for cooldown or fix underlying issue.", severity=DecisionSeverity.WARN, audit_anyway=True)
 
+        # Policy engine (config-driven constraints)
+        pol = getattr(self, "policy_engine", None)
+        if pol is not None:
+            try:
+                from jarvis.core.policy.models import PolicyContext
+
+                rc = None
+                try:
+                    if self.resource_governor is not None:
+                        rc = bool(self.resource_governor.is_over_budget())
+                except Exception:
+                    rc = None
+                pctx = PolicyContext(
+                    trace_id=ctx.trace_id,
+                    intent_id=ctx.intent_id,
+                    required_capabilities=list(required),
+                    source=ctx.source.value,
+                    client_id=ctx.client_id,
+                    client_ip=None,
+                    is_admin=bool(ctx.is_admin),
+                    safe_mode=bool(ctx.safe_mode),
+                    shutting_down=bool(ctx.shutting_down),
+                    secure_store_mode=ctx.secure_store_mode,
+                    tags=[("resource_intensive" if ctx.resource_intensive else ""), ("networked" if ctx.network_requested else "")],
+                    resource_over_budget=rc,
+                    confirmed=bool(getattr(ctx, "confirmed", False)),
+                )
+                pctx.tags = [t for t in pctx.tags if t]
+                pdec = pol.evaluate(pctx)
+                # Deny (including "require confirmation" which policy engine models as deny + flag)
+                if not bool(pdec.allowed):
+                    dec = self._deny(
+                        ctx,
+                        required,
+                        [c for c in required if c in {"CAP_NETWORK_ACCESS", "CAP_RUN_SUBPROCESS", "CAP_HEAVY_COMPUTE"}] or list(required),
+                        [str(pdec.final_reason or "Denied by policy.")],
+                        remediation=str(pdec.remediation or "Denied by policy."),
+                        severity=DecisionSeverity.WARN,
+                        audit_anyway=True,
+                    )
+                    dec.require_confirmation = bool(pdec.require_confirmation)
+                    dec.modifications = dict(pdec.modifications or {})
+                    dec.audit_event = {**(dec.audit_event or {}), "policy": {"matched_rules": [m.id for m in pdec.matched_rules], "require_confirmation": bool(pdec.require_confirmation)}}
+                    return dec
+                # Allowed: carry modifications forward
+                policy_mods = dict(pdec.modifications or {})
+            except Exception:
+                policy_mods = {}
+        else:
+            policy_mods = {}
+
         # Resource governor admission control (deterministic, local-only)
         rg = getattr(self, "resource_governor", None)
         if rg is not None:
@@ -155,6 +208,8 @@ class CapabilityEngine:
         # Allowed
         dec = CapabilityDecision(
             allowed=True,
+            require_confirmation=False,
+            modifications=dict(policy_mods or {}),
             denied_capabilities=[],
             required_capabilities=list(required),
             reasons=["Allowed by capability policy."],

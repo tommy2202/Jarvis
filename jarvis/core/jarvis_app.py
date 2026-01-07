@@ -21,6 +21,7 @@ class MessageResponse:
     confidence: float
     requires_followup: bool
     followup_question: Optional[str]
+    modifications: Dict[str, Any] = None  # policy modifications (safe restrictions)
 
 
 class JarvisApp:
@@ -46,6 +47,21 @@ class JarvisApp:
         self.threshold = threshold
         self.telemetry = telemetry
         self._lock = threading.Lock()
+        self._pending_confirmations: Dict[str, Dict[str, Any]] = {}
+
+    def _confirmation_key(self, source: str, client: Optional[Dict[str, Any]]) -> str:
+        c = client or {}
+        cid = str(c.get("id") or c.get("client_id") or c.get("name") or source or "cli")
+        return f"{source}:{cid}"
+
+    def _consume_confirmation(self, key: str) -> Optional[Dict[str, Any]]:
+        p = self._pending_confirmations.get(key)
+        if not p:
+            return None
+        if float(p.get("expires_at") or 0) < time.time():
+            self._pending_confirmations.pop(key, None)
+            return None
+        return p
 
     def _render_confirmation(self, intent_id: str, args: Dict[str, Any]) -> str:
         tmpl = self.confirmation_templates.get(intent_id) or "Okay."
@@ -63,6 +79,64 @@ class JarvisApp:
         with self._lock:
             trace_id = uuid.uuid4().hex
             self.event_logger.log(trace_id, "request.received", {"message": message, "client": client or {}})
+
+            key = self._confirmation_key(source, client)
+            normalized = str(message or "").strip().lower()
+            if normalized in {"confirm", "cancel"}:
+                pending = self._consume_confirmation(key)
+                if not pending:
+                    return MessageResponse(
+                        trace_id=trace_id,
+                        reply="Nothing to confirm.",
+                        intent_id="system.confirm",
+                        intent_source="system",
+                        confidence=1.0,
+                        requires_followup=False,
+                        followup_question=None,
+                        modifications={},
+                    )
+                if normalized == "cancel":
+                    self._pending_confirmations.pop(key, None)
+                    return MessageResponse(
+                        trace_id=trace_id,
+                        reply="Canceled.",
+                        intent_id=str(pending.get("intent_id") or "unknown"),
+                        intent_source="system",
+                        confidence=1.0,
+                        requires_followup=False,
+                        followup_question=None,
+                        modifications={},
+                    )
+                # confirm: execute pending action
+                self._pending_confirmations.pop(key, None)
+                intent_id = str(pending.get("intent_id") or "unknown")
+                module_id = str(pending.get("module_id") or "")
+                args = dict(pending.get("args") or {})
+                dispatch_context = dict(pending.get("context") or {})
+                dispatch_context["confirmed"] = True
+                dr = self.dispatcher.dispatch(trace_id, intent_id, module_id, args, dispatch_context)
+                if not dr.ok:
+                    return MessageResponse(
+                        trace_id=trace_id,
+                        reply=dr.reply,
+                        intent_id=intent_id,
+                        intent_source="system",
+                        confidence=1.0,
+                        requires_followup=False,
+                        followup_question=None,
+                        modifications=dict(dr.modifications or {}),
+                    )
+                confirmation = self._render_confirmation(intent_id, args)
+                return MessageResponse(
+                    trace_id=trace_id,
+                    reply=confirmation,
+                    intent_id=intent_id,
+                    intent_source="system",
+                    confidence=1.0,
+                    requires_followup=False,
+                    followup_question=None,
+                    modifications=dict(dr.modifications or {}),
+                )
 
             # Stage A
             t_route0 = time.time()
@@ -157,6 +231,22 @@ class JarvisApp:
                     pass
 
             if not dr.ok:
+                if dr.denied_reason == "confirmation_required" and dr.pending_confirmation:
+                    # store pending; require user confirm/cancel
+                    expires = float(dr.pending_confirmation.get("expires_seconds") or 15)
+                    pending = dict(dr.pending_confirmation)
+                    pending["expires_at"] = time.time() + expires
+                    self._pending_confirmations[key] = pending
+                    return MessageResponse(
+                        trace_id=trace_id,
+                        reply=str(dr.reply or "Confirmation required."),
+                        intent_id=chosen_intent_id,
+                        intent_source=source,
+                        confidence=conf,
+                        requires_followup=True,
+                        followup_question="Reply 'confirm' to proceed or 'cancel' to abort.",
+                        modifications=dict(dr.modifications or {}),
+                    )
                 return MessageResponse(
                     trace_id=trace_id,
                     reply=dr.reply,
@@ -165,6 +255,7 @@ class JarvisApp:
                     confidence=conf,
                     requires_followup=False,
                     followup_question=None,
+                    modifications=dict(dr.modifications or {}),
                 )
 
             # Always confirm what we're doing (even if execution already simulated).
@@ -180,5 +271,6 @@ class JarvisApp:
                 confidence=conf,
                 requires_followup=requires_followup,
                 followup_question=followup_question,
+                modifications=dict(dr.modifications or {}),
             )
 

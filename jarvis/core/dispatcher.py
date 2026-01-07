@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from jarvis.core.events import EventLogger
+from jarvis.core.events import redact
 from jarvis.core.module_registry import ModuleRegistry
 from jarvis.core.security import PermissionPolicy, SecurityManager
 from jarvis.core.error_reporter import ErrorReporter
@@ -18,6 +19,9 @@ class DispatchResult:
     reply: str
     module_output: Optional[Dict[str, Any]] = None
     denied_reason: Optional[str] = None
+    require_confirmation: bool = False
+    modifications: Optional[Dict[str, Any]] = None
+    pending_confirmation: Optional[Dict[str, Any]] = None
 
 
 class Dispatcher:
@@ -124,9 +128,26 @@ class Dispatcher:
                 resource_intensive=resource_intensive,
                 network_requested=network_access,
                 secure_store_mode=secure_mode,
+                confirmed=bool((context or {}).get("confirmed", False)),
             )
             dec = self.capability_engine.evaluate(ctx)
             self.event_logger.log(trace_id, "dispatch.capabilities", {"allowed": dec.allowed, "required": dec.required_capabilities, "denied": dec.denied_capabilities, "reasons": dec.reasons})
+            # Policy confirmation flow: do not execute, return pending action.
+            if (not dec.allowed) and bool(getattr(dec, "require_confirmation", False)):
+                return DispatchResult(
+                    ok=False,
+                    reply=str(dec.remediation or "Confirmation required. Reply 'confirm' to proceed or 'cancel' to abort."),
+                    denied_reason="confirmation_required",
+                    require_confirmation=True,
+                    modifications=dict(getattr(dec, "modifications", {}) or {}),
+                    pending_confirmation={
+                        "intent_id": intent_id,
+                        "module_id": module_id,
+                        "args": redact(args or {}),
+                        "context": redact(context or {}),
+                        "expires_seconds": 15,
+                    },
+                )
             if not dec.allowed:
                 if self.event_bus is not None:
                     try:
@@ -179,9 +200,18 @@ class Dispatcher:
             self.security.touch_admin()
 
         try:
+            # Apply policy modifications into execution context (restrictions only).
+            mods = {}
+            try:
+                mods = dict(getattr(dec, "modifications", {}) or {}) if "dec" in locals() else {}
+            except Exception:
+                mods = {}
+            if mods:
+                context = dict(context or {})
+                context["policy"] = redact(mods)
             self.event_logger.log(trace_id, "dispatch.execute", {"module_id": module_id, "intent_id": intent_id})
             out = mod.handler(intent_id=intent_id, args=args, context=context)
-            return DispatchResult(ok=True, reply="", module_output=out)
+            return DispatchResult(ok=True, reply="", module_output=out, modifications=mods or {})
         except Exception as e:  # noqa: BLE001
             je = self.error_reporter.report_exception(e, trace_id=trace_id, subsystem="dispatcher", context={"intent_id": intent_id, "module_id": module_id})
             self.logger.error(f"[{trace_id}] Module error: {je.code}")

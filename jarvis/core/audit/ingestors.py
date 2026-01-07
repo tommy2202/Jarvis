@@ -88,6 +88,12 @@ def audit_from_core_event(ev: Any) -> Optional[AuditEvent]:
         action = et
         outcome = AuditOutcome.denied if "denied" in et else AuditOutcome.success
         summary = f"Resource: {et}"
+    elif et == "policy.decision":
+        category = AuditCategory.permission
+        action = "policy.decision"
+        allowed = bool(payload.get("allowed", True))
+        outcome = AuditOutcome.success if allowed else AuditOutcome.denied
+        summary = f"Policy decision: {'allowed' if allowed else 'denied'} ({payload.get('intent_id')})"
 
     actor_source = ActorSource.system
     if src in {"web", "ui", "cli", "voice"}:

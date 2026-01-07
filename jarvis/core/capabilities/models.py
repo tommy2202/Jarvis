@@ -78,6 +78,7 @@ class RequestContext(BaseModel):
     resource_intensive: bool = False
     network_requested: bool = False
     secure_store_mode: Optional[str] = None  # READY|KEY_MISSING|...
+    confirmed: bool = False
 
 
 class DecisionSeverity(str, Enum):
@@ -90,6 +91,8 @@ class CapabilityDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     allowed: bool
+    require_confirmation: bool = False
+    modifications: Dict[str, Any] = Field(default_factory=dict)
     denied_capabilities: List[str] = Field(default_factory=list)
     required_capabilities: List[str] = Field(default_factory=list)
     reasons: List[str] = Field(default_factory=list)
