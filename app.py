@@ -132,6 +132,7 @@ def _start_web_thread(
 def main() -> None:
     ap = argparse.ArgumentParser(description="Jarvis (offline-first) CLI/voice/web")
     ap.add_argument("--mode", choices=["text", "voice", "hybrid"], default="hybrid", help="Run mode.")
+    ap.add_argument("--ui", action="store_true", help="Launch desktop UI (Tkinter) instead of CLI.")
     args = ap.parse_args()
 
     logger = setup_logging("logs")
@@ -358,6 +359,8 @@ def main() -> None:
         llm_lifecycle=llm_lifecycle,
         voice_adapter=voice_adapter,
         tts_adapter=tts_adapter,
+        security_manager=security,
+        secure_store=secure_store,
         error_reporter=error_reporter,
         recovery_policy=recovery_policy,
         breakers=breaker_registry,
@@ -365,6 +368,34 @@ def main() -> None:
     runtime.start()
 
     _start_web_thread(jarvis, security, secure_store, config, event_logger, logger, job_manager, runtime)
+
+    if args.ui:
+        from jarvis.ui.app import run_desktop_ui
+
+        ui_cfg = config.get().ui
+        try:
+            run_desktop_ui(runtime=runtime, config=ui_cfg, logger=logger)
+        finally:
+            # Ensure clean shutdown even if UI raises.
+            try:
+                runtime.request_shutdown()
+            except Exception:
+                pass
+            try:
+                runtime.stop()
+            except Exception:
+                pass
+            try:
+                if llm_lifecycle is not None:
+                    llm_lifecycle.stop()
+            except Exception:
+                pass
+            try:
+                if job_manager is not None:
+                    job_manager.stop()
+            except Exception:
+                pass
+        return
 
     logger.info("Jarvis CLI ready. Type /exit to quit. (/status, /wake, /sleep, /shutdown, /jobs ...)")
 

@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from jarvis.core.events import EventLogger, redact
 from jarvis.core.error_reporter import ErrorReporter
+from jarvis.core.errors import AdminRequiredError
 from jarvis.core.recovery import RecoveryPolicy, RecoveryConfig
 from jarvis.core.circuit_breaker import BreakerRegistry
 
@@ -123,6 +124,8 @@ class JarvisRuntime:
         llm_lifecycle: Any = None,
         voice_adapter: Any = None,
         tts_adapter: Any = None,
+        security_manager: Any = None,
+        secure_store: Any = None,
         error_reporter: Optional[ErrorReporter] = None,
         recovery_policy: Optional[RecoveryPolicy] = None,
         breakers: Optional[BreakerRegistry] = None,
@@ -136,6 +139,8 @@ class JarvisRuntime:
         self.llm_lifecycle = llm_lifecycle
         self.voice_adapter = voice_adapter
         self.tts_adapter = tts_adapter
+        self.security_manager = security_manager
+        self.secure_store = secure_store
         self.error_reporter = error_reporter or ErrorReporter()
         self.recovery_policy = recovery_policy or RecoveryPolicy(RecoveryConfig())
         self.breakers = breakers or BreakerRegistry({})
@@ -152,6 +157,9 @@ class JarvisRuntime:
         self._last_trace_id: Optional[str] = None
         self._llm_loaded = False
 
+        self._voice_enabled = bool(cfg.enable_voice)
+        self._wake_word_enabled = bool(cfg.enable_wake_word)
+
         self._busy_lock = threading.Lock()
         self._pending_interactions: "queue.Queue[RuntimeEvent]" = queue.Queue()
 
@@ -166,7 +174,7 @@ class JarvisRuntime:
         if self._thread.is_alive():
             return
         self._stop.clear()
-        if self.voice_adapter is not None and self.cfg.enable_voice:
+        if self.voice_adapter is not None and self._voice_enabled:
             try:
                 self.voice_adapter.start(on_wake=lambda: self._emit(EventType.WakeWordDetected, source="voice", payload={}))
             except Exception as e:
@@ -192,6 +200,14 @@ class JarvisRuntime:
         self._enqueue(ev)
         return trace_id
 
+    def request_listen(self, source: str = "ui") -> str:
+        """
+        Push-to-talk style: force a LISTENING capture once (uses the core voice adapter).
+        """
+        trace_id = uuid.uuid4().hex
+        self._enqueue(RuntimeEvent(trace_id=trace_id, source=source, type=EventType.WakeWordDetected, payload={"push_to_talk": True}))
+        return trace_id
+
     def request_sleep(self) -> None:
         self._emit(EventType.SleepRequested, source="system", payload={})
 
@@ -209,6 +225,10 @@ class JarvisRuntime:
         return trace_id
 
     def get_status(self) -> Dict[str, Any]:
+        admin = self.get_admin_status()
+        secure = self.get_secure_store_status()
+        llm = self.get_llm_status()
+        voice = self.get_voice_status()
         return {
             "state": self._state.value,
             "last_trace_id": self._last_trace_id,
@@ -217,6 +237,14 @@ class JarvisRuntime:
             "queue_depth": self._q.qsize(),
             "pending_depth": self._pending_interactions.qsize(),
             "results_cached": len(self._results),
+            "admin": admin,
+            "secure_store": secure,
+            "llm": llm,
+            "voice": voice,
+            "runtime_cfg": {
+                "max_concurrent_interactions": self.cfg.max_concurrent_interactions,
+                "busy_policy": self.cfg.busy_policy,
+            },
         }
 
     def get_result(self, trace_id: str) -> Optional[Dict[str, Any]]:
@@ -235,6 +263,144 @@ class JarvisRuntime:
                 return r
             time.sleep(0.05)
         return None
+
+    # ---------- Read-only APIs for UI/web ----------
+    def get_admin_status(self) -> Dict[str, Any]:
+        if self.security_manager is None:
+            return {"available": False, "is_admin": False, "remaining_seconds": 0}
+        try:
+            is_admin = bool(self.security_manager.is_admin())
+            remaining = 0
+            try:
+                sess = getattr(self.security_manager, "admin_session", None)
+                if sess is not None and getattr(sess, "_unlocked", False):
+                    last = float(getattr(sess, "_last_activity", 0.0))
+                    timeout = float(getattr(sess, "timeout_seconds", 0.0))
+                    remaining = max(0, int(timeout - (time.time() - last)))
+            except Exception:
+                remaining = 0
+            return {"available": True, "is_admin": is_admin, "remaining_seconds": remaining}
+        except Exception:
+            return {"available": True, "is_admin": False, "remaining_seconds": 0}
+
+    def admin_unlock(self, passphrase: str) -> bool:
+        if self.security_manager is None:
+            return False
+        # Never log passphrase; do not include in events.
+        ok = bool(self.security_manager.verify_and_unlock_admin(passphrase))
+        if ok:
+            self._log_sm("admin.unlocked", {})
+        else:
+            self._log_sm("admin.unlock_failed", {})
+        return ok
+
+    def admin_lock(self) -> None:
+        if self.security_manager is None:
+            return
+        self.security_manager.lock_admin()
+        self._log_sm("admin.locked", {})
+
+    def get_secure_store_status(self) -> Dict[str, Any]:
+        if self.secure_store is None:
+            return {"available": False, "mode": "UNAVAILABLE", "status": "Secure store unavailable.", "next_steps": "Start Jarvis with secure store enabled."}
+        try:
+            return {"available": True, **(self.secure_store.export_public_status() or {})}
+        except Exception as e:
+            return {"available": True, "mode": "ERROR", "status": "Secure store status error.", "next_steps": "Check logs.", "last_error": str(e)}
+
+    def get_llm_status(self) -> Dict[str, Any]:
+        if self.llm_lifecycle is None:
+            return {"enabled": False}
+        try:
+            return self.llm_lifecycle.get_status()
+        except Exception:
+            return {"enabled": True, "error": "status_failed"}
+
+    def get_voice_status(self) -> Dict[str, Any]:
+        return {
+            "available": self.voice_adapter is not None,
+            "voice_enabled": bool(self._voice_enabled),
+            "wake_word_enabled": bool(self._wake_word_enabled),
+            "tts_enabled": bool(self.cfg.enable_tts and self.tts_adapter is not None),
+        }
+
+    def set_voice_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        self._voice_enabled = enabled
+        if self.voice_adapter is None:
+            return
+        if enabled:
+            try:
+                self.voice_adapter.start(on_wake=lambda: self._emit(EventType.WakeWordDetected, source="voice", payload={}))
+                self._log_sm("voice.enabled", {})
+            except Exception as e:
+                self._log_sm("voice.enable_failed", {"error": str(e)})
+        else:
+            try:
+                self.voice_adapter.stop()
+                self._log_sm("voice.disabled", {})
+            except Exception:
+                pass
+
+    def set_wake_word_enabled(self, enabled: bool) -> None:
+        self._wake_word_enabled = bool(enabled)
+        # Wake-word disabling is best-effort: we stop the wake engine if available.
+        if self.voice_adapter is None:
+            return
+        try:
+            we = getattr(self.voice_adapter, "wake_engine", None)
+            if we is None:
+                return
+            if self._wake_word_enabled:
+                we.start()
+            else:
+                we.stop()
+            self._log_sm("wake_word.toggled", {"enabled": self._wake_word_enabled})
+        except Exception as e:
+            self._log_sm("wake_word.toggle_failed", {"error": str(e)})
+
+    def get_jobs_summary(self, limit: int = 50) -> list[Dict[str, Any]]:
+        if self.job_manager is None:
+            return []
+        try:
+            jobs = self.job_manager.list_jobs()
+        except Exception:
+            return []
+        out: list[Dict[str, Any]] = []
+        for j in jobs[: max(1, int(limit))]:
+            try:
+                out.append(
+                    {
+                        "id": str(j.id),
+                        "kind": str(j.kind),
+                        "status": str(j.status.value if hasattr(j.status, "value") else j.status),
+                        "progress": int(getattr(j, "progress", 0)),
+                        "message": str(getattr(j, "message", "") or ""),
+                        "trace_id": str(getattr(j, "trace_id", "") or ""),
+                    }
+                )
+            except Exception:
+                continue
+        return out
+
+    def cancel_job(self, job_id: str) -> bool:
+        if self.job_manager is None:
+            return False
+        if self.security_manager is not None and not bool(self.security_manager.is_admin()):
+            raise AdminRequiredError()
+        return bool(self.job_manager.cancel_job(job_id))
+
+    def get_recent_errors(self, n: int = 50) -> list[Dict[str, Any]]:
+        try:
+            return self.error_reporter.tail(int(n))
+        except Exception:
+            return []
+
+    def get_recent_security_events(self, n: int = 50) -> list[Dict[str, Any]]:
+        return _tail_jsonl(os.path.join("logs", "security.jsonl"), n=int(n))
+
+    def get_recent_system_logs(self, n: int = 200) -> list[str]:
+        return _tail_text(os.path.join("logs", "jarvis.log"), n=int(n))
 
     # ---------- Internal queueing ----------
     def _emit(self, typ: EventType, *, source: str, payload: Dict[str, Any], trace_id: Optional[str] = None) -> None:
@@ -435,7 +601,7 @@ class JarvisRuntime:
         if ev.type == EventType.WakeWordDetected:
             self._ensure_llm_loaded(ev.trace_id)
             self._set_state(ev.trace_id, AssistantState.WAKE_DETECTED, {"source": ev.source})
-            if self.cfg.enable_voice and self.voice_adapter is not None:
+            if self._voice_enabled and self.voice_adapter is not None:
                 self._set_state(ev.trace_id, AssistantState.LISTENING, {})
                 self._start_voice_listen(ev.trace_id)
             else:
@@ -553,6 +719,36 @@ class JarvisRuntime:
                 self._enqueue(RuntimeEvent(trace_id=trace_id, source="voice", type=EventType.STTFailed, payload={"error": str(e)}))
 
         self._executor.submit(run)
+
+
+def _tail_jsonl(path: str, *, n: int) -> list[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        out: list[Dict[str, Any]] = []
+        for line in lines[-max(1, int(n)) :]:
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
+        return out
+    except Exception:
+        return []
+
+
+def _tail_text(path: str, *, n: int) -> list[str]:
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        return [x.rstrip("\n") for x in lines[-max(1, int(n)) :]]
+    except Exception:
+        return []
 
 
 # ---------- Optional adapters implemented using existing voice package ----------

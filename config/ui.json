@@ -1,0 +1,7 @@
+{
+  "confirm_on_exit": true,
+  "max_log_entries_displayed": 200,
+  "refresh_interval_ms": 350,
+  "theme": "light"
+}
+

@@ -74,6 +74,14 @@ class WebConfig(BaseModel):
     enable_web_ui: bool = True
 
 
+class UiConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    refresh_interval_ms: int = 350
+    max_log_entries_displayed: int = 200
+    theme: str = "light"  # light|dark
+    confirm_on_exit: bool = True
+
+
 class LLMConfigFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = True
@@ -146,6 +154,7 @@ class AppConfigV2(BaseModel):
     voice: VoiceConfig
     models: ModelsConfig
     web: WebConfig
+    ui: UiConfig
     jobs: JobsConfig
     llm: LLMConfigFile
     recovery: RecoveryConfigFile

@@ -12,6 +12,7 @@ This repo is a **minimal but functional** “Jarvis” assistant designed to run
 - **FastAPI remote control** (authenticated via API key stored **only** in encrypted secure store)
 - **Module setup wizard** (detects modules and guides configuration)
 - **Production-grade configuration system** (validated schemas, migrations, backups, hot reload)
+- **Desktop UI (Tkinter)** (`python app.py --ui`) as a thin client over core runtime APIs
 
 ## Configuration system (production-grade)
 
@@ -123,6 +124,25 @@ Security note:
 python app.py
 ```
 
+## Desktop UI (Windows-first)
+
+Launch the desktop UI (Tkinter):
+
+```bash
+python app.py --ui
+```
+
+UI config:
+- `config/ui.json` controls refresh rate and log display limits.
+
+Security model:
+- The UI is a **thin client** only: it never runs intents directly.
+- All actions go through Jarvis core APIs (same routing/dispatcher/admin checks).
+- Admin-only UI controls are disabled unless admin is unlocked.
+
+Keyboard shortcuts:
+- **Enter**: send message (in the input box)
+
 CLI commands:
 - `/admin unlock` (prompts for passphrase; no echo)
 - `/admin lock`
@@ -183,7 +203,7 @@ Lockout state is persisted in the encrypted secure store.
 ### Audit logging
 
 Security events are written to:
-- `logs/security.log` (JSONL)
+- `logs/security.jsonl` (JSONL)
 
 ## Adding a module (setup wizard workflow)
 
