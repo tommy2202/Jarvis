@@ -237,6 +237,8 @@ class ModulesRegistryConfig(BaseModel):
 class ModulesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intents: List[Dict[str, Any]] = Field(default_factory=list)
+    # New (v2): module entries live here as source of truth.
+    modules: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class PermissionsConfig(BaseModel):
