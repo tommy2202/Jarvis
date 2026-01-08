@@ -24,14 +24,14 @@
         {
           "check_id": "project_dir_writable",
           "status": "OK",
-          "message": "Writable: /tmp/pytest-of-ubuntu/pytest-60/test_secure_store_key_mismatch0",
+          "message": "Writable: /tmp/pytest-of-ubuntu/pytest-0/test_secure_store_key_mismatch0",
           "remediation": null,
           "severity": "INFO"
         },
         {
           "check_id": "logs_dir_writable",
           "status": "OK",
-          "message": "Writable: /tmp/pytest-of-ubuntu/pytest-60/test_secure_store_key_mismatch0/logs",
+          "message": "Writable: /tmp/pytest-of-ubuntu/pytest-0/test_secure_store_key_mismatch0/logs",
           "remediation": null,
           "severity": "INFO"
         },
@@ -230,6 +230,6 @@
     "restore backups",
     "No module named 'tkinter'"
   ],
-  "timestamp": 1767820940.9056177,
+  "timestamp": 1767892938.1068556,
   "runtime_fingerprint": "1b2fe5e02ed7e46ad6e28c813ecbca420e3f9e1a5ecd20b64c735a37cd674ab5"
 }

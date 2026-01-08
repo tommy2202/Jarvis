@@ -11,6 +11,12 @@ MODULE_META = {
     "required_args": [],
     # Mark as resource intensive to force admin-only (fail-safe).
     "resource_intensive": True,
+    # Contract metadata (enforced by dispatcher)
+    "resource_class": "local",
+    "execution_mode": "inline",
+    "capabilities_by_intent": {
+        "anime_dubbing.run": ["CAP_HEAVY_COMPUTE", "CAP_RUN_SUBPROCESS", "CAP_WRITE_FILES"],
+    },
 }
 
 

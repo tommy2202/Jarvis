@@ -32,7 +32,18 @@ def test_require_confirmation_blocks_until_confirm(tmp_path):
 
     from jarvis.core.module_registry import LoadedModule
 
-    reg._modules_by_id["mod"] = LoadedModule(module_path="test.mod", module_id="mod", handler=handler, meta={"id": "mod", "resource_intensive": False})  # type: ignore[attr-defined]
+    reg._modules_by_id["mod"] = LoadedModule(
+        module_path="test.mod",
+        module_id="mod",
+        handler=handler,
+        meta={
+            "id": "mod",
+            "resource_intensive": False,
+            "resource_class": "local",
+            "execution_mode": "inline",
+            "capabilities_by_intent": {"intent.x": []},
+        },
+    )  # type: ignore[attr-defined]
 
     policy = PermissionPolicy(intents={"intent.x": {"requires_admin": False}})
     # Use default capability definitions, override intent requirements for our intent.

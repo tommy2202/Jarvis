@@ -29,10 +29,31 @@ def test_dispatcher_never_crashes_on_module_exception(tmp_path):
         raise RuntimeError("boom")
 
     # inject a loaded module directly
-    reg._modules_by_id["x"] = LoadedModule(module_path="jarvis.modules.fake", module_id="x", meta={}, handler=bad_handle)  # type: ignore[attr-defined]
+    reg._modules_by_id["x"] = LoadedModule(
+        module_path="jarvis.modules.fake",
+        module_id="x",
+        meta={"id": "x", "resource_class": "local", "execution_mode": "inline", "capabilities_by_intent": {"x.run": []}},
+        handler=bad_handle,
+    )  # type: ignore[attr-defined]
 
     reporter = ErrorReporter(path=str(tmp_path / "errors.jsonl"))
-    d = Dispatcher(registry=reg, policy=policy, security=sec, event_logger=EventLogger(str(tmp_path / "events.jsonl")), logger=DummyLogger(), error_reporter=reporter)
+    from jarvis.core.capabilities.audit import CapabilityAuditLogger
+    from jarvis.core.capabilities.engine import CapabilityEngine
+    from jarvis.core.capabilities.loader import default_config_dict, validate_and_normalize
+
+    raw = default_config_dict()
+    raw["intent_requirements"] = {"x.run": []}
+    cap_engine = CapabilityEngine(cfg=validate_and_normalize(raw), audit=CapabilityAuditLogger(path=str(tmp_path / "security.jsonl")), logger=None)
+    d = Dispatcher(
+        registry=reg,
+        policy=policy,
+        security=sec,
+        event_logger=EventLogger(str(tmp_path / "events.jsonl")),
+        logger=DummyLogger(),
+        error_reporter=reporter,
+        capability_engine=cap_engine,
+        secure_store=store,
+    )
     res = d.dispatch("t1", "x.run", "x", {}, {})
     assert res.ok is False
     assert res.reply

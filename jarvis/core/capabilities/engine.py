@@ -34,7 +34,7 @@ class CapabilityEngine:
     def get_intent_requirements(self) -> Dict[str, List[str]]:
         return {k: list(v) for k, v in (self.cfg.intent_requirements or {}).items()}
 
-    def evaluate(self, ctx: RequestContext) -> CapabilityDecision:
+    def evaluate(self, ctx: RequestContext, *, run_policy: bool = True) -> CapabilityDecision:
         required = self._required_caps(ctx)
         denied: List[str] = []
         reasons: List[str] = []
@@ -46,7 +46,7 @@ class CapabilityEngine:
                 required_caps=[],
                 denied_caps=[],
                 reasons=["Unknown intent (deny by default)."],
-                remediation="Update capabilities policy to allow this intent.",
+                remediation="Intent is not registered in capabilities policy. Add it to config/capabilities.json intent_requirements.",
                 severity=DecisionSeverity.WARN,
                 audit_anyway=True,
             )
@@ -115,55 +115,57 @@ class CapabilityEngine:
             return self._deny(ctx, required, denied_by_breaker, ["Subsystem temporarily disabled (circuit breaker open)."], remediation="Wait for cooldown or fix underlying issue.", severity=DecisionSeverity.WARN, audit_anyway=True)
 
         # Policy engine (config-driven constraints)
-        pol = getattr(self, "policy_engine", None)
-        if pol is not None:
-            try:
-                from jarvis.core.policy.models import PolicyContext
-
-                rc = None
+        # NOTE: Dispatcher is the single execution gate; it may call this engine with run_policy=False
+        # and apply PolicyEngine separately as "restrict-only". This preserves back-compat for other callers.
+        policy_mods: Dict[str, Any] = {}
+        if run_policy:
+            pol = getattr(self, "policy_engine", None)
+            if pol is not None:
                 try:
-                    if self.resource_governor is not None:
-                        rc = bool(self.resource_governor.is_over_budget())
-                except Exception:
+                    from jarvis.core.policy.models import PolicyContext
+
                     rc = None
-                pctx = PolicyContext(
-                    trace_id=ctx.trace_id,
-                    intent_id=ctx.intent_id,
-                    required_capabilities=list(required),
-                    source=ctx.source.value,
-                    client_id=ctx.client_id,
-                    client_ip=None,
-                    is_admin=bool(ctx.is_admin),
-                    safe_mode=bool(ctx.safe_mode),
-                    shutting_down=bool(ctx.shutting_down),
-                    secure_store_mode=ctx.secure_store_mode,
-                    tags=[("resource_intensive" if ctx.resource_intensive else ""), ("networked" if ctx.network_requested else "")],
-                    resource_over_budget=rc,
-                    confirmed=bool(getattr(ctx, "confirmed", False)),
-                )
-                pctx.tags = [t for t in pctx.tags if t]
-                pdec = pol.evaluate(pctx)
-                # Deny (including "require confirmation" which policy engine models as deny + flag)
-                if not bool(pdec.allowed):
-                    dec = self._deny(
-                        ctx,
-                        required,
-                        [c for c in required if c in {"CAP_NETWORK_ACCESS", "CAP_RUN_SUBPROCESS", "CAP_HEAVY_COMPUTE"}] or list(required),
-                        [str(pdec.final_reason or "Denied by policy.")],
-                        remediation=str(pdec.remediation or "Denied by policy."),
-                        severity=DecisionSeverity.WARN,
-                        audit_anyway=True,
+                    try:
+                        if self.resource_governor is not None:
+                            rc = bool(self.resource_governor.is_over_budget())
+                    except Exception:
+                        rc = None
+                    pctx = PolicyContext(
+                        trace_id=ctx.trace_id,
+                        intent_id=ctx.intent_id,
+                        required_capabilities=list(required),
+                        source=ctx.source.value,
+                        client_id=ctx.client_id,
+                        client_ip=None,
+                        is_admin=bool(ctx.is_admin),
+                        safe_mode=bool(ctx.safe_mode),
+                        shutting_down=bool(ctx.shutting_down),
+                        secure_store_mode=ctx.secure_store_mode,
+                        tags=[("resource_intensive" if ctx.resource_intensive else ""), ("networked" if ctx.network_requested else "")],
+                        resource_over_budget=rc,
+                        confirmed=bool(getattr(ctx, "confirmed", False)),
                     )
-                    dec.require_confirmation = bool(pdec.require_confirmation)
-                    dec.modifications = dict(pdec.modifications or {})
-                    dec.audit_event = {**(dec.audit_event or {}), "policy": {"matched_rules": [m.id for m in pdec.matched_rules], "require_confirmation": bool(pdec.require_confirmation)}}
-                    return dec
-                # Allowed: carry modifications forward
-                policy_mods = dict(pdec.modifications or {})
-            except Exception:
-                policy_mods = {}
-        else:
-            policy_mods = {}
+                    pctx.tags = [t for t in pctx.tags if t]
+                    pdec = pol.evaluate(pctx)
+                    # Deny (including "require confirmation" which policy engine models as deny + flag)
+                    if not bool(pdec.allowed):
+                        dec = self._deny(
+                            ctx,
+                            required,
+                            [c for c in required if c in {"CAP_NETWORK_ACCESS", "CAP_RUN_SUBPROCESS", "CAP_HEAVY_COMPUTE"}] or list(required),
+                            [str(pdec.final_reason or "Denied by policy.")],
+                            remediation=str(pdec.remediation or "Denied by policy."),
+                            severity=DecisionSeverity.WARN,
+                            audit_anyway=True,
+                        )
+                        dec.require_confirmation = bool(pdec.require_confirmation)
+                        dec.modifications = dict(pdec.modifications or {})
+                        dec.audit_event = {**(dec.audit_event or {}), "policy": {"matched_rules": [m.id for m in pdec.matched_rules], "require_confirmation": bool(pdec.require_confirmation)}}
+                        return dec
+                    # Allowed: carry modifications forward
+                    policy_mods = dict(pdec.modifications or {})
+                except Exception:
+                    policy_mods = {}
 
         # Resource governor admission control (deterministic, local-only)
         rg = getattr(self, "resource_governor", None)
