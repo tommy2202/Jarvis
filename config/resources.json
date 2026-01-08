@@ -1,0 +1,37 @@
+{
+  "enabled": true,
+  "sample_interval_seconds": 2,
+  "budgets": {
+    "cpu_max_percent": 85,
+    "ram_max_percent": 85,
+    "process_ram_max_mb": 8000,
+    "disk_min_free_gb": 5,
+    "gpu_vram_max_percent": 90
+  },
+  "policies": {
+    "on_over_budget": "THROTTLE",
+    "cooldown_seconds": 30,
+    "max_delay_seconds": 15
+  },
+  "gating": {
+    "heavy_compute_capability": "CAP_HEAVY_COMPUTE",
+    "subprocess_capability": "CAP_RUN_SUBPROCESS",
+    "network_capability": "CAP_NETWORK_ACCESS",
+    "llm_capability": "CAP_HEAVY_COMPUTE"
+  },
+  "throttles": {
+    "max_concurrent_heavy_jobs": 1,
+    "max_concurrent_llm_requests": 1,
+    "max_total_jobs": 2
+  },
+  "safe_mode": {
+    "enter_after_consecutive_violations": 5,
+    "exit_after_seconds_stable": 120,
+    "deny_caps": [
+      "CAP_NETWORK_ACCESS",
+      "CAP_RUN_SUBPROCESS",
+      "CAP_HEAVY_COMPUTE"
+    ]
+  }
+}
+

@@ -1,0 +1,235 @@
+{
+  "overall_status": "BLOCKED",
+  "started_in_safe_mode": false,
+  "phases": [
+    {
+      "phase_id": 0,
+      "name": "Bootstrap Integrity",
+      "status": "OK",
+      "checks": [
+        {
+          "check_id": "python_version",
+          "status": "OK",
+          "message": "Python 3.12 OK",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "os",
+          "status": "OK",
+          "message": "Windows detected.",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "project_dir_writable",
+          "status": "OK",
+          "message": "Writable: /tmp/pytest-of-ubuntu/pytest-60/test_secure_store_key_mismatch0",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "logs_dir_writable",
+          "status": "OK",
+          "message": "Writable: /tmp/pytest-of-ubuntu/pytest-60/test_secure_store_key_mismatch0/logs",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "clock",
+          "status": "OK",
+          "message": "System clock looks sane.",
+          "remediation": null,
+          "severity": "INFO"
+        }
+      ]
+    },
+    {
+      "phase_id": 1,
+      "name": "Configuration Validation",
+      "status": "OK",
+      "checks": [
+        {
+          "check_id": "config.validate",
+          "status": "OK",
+          "message": "Config validated.",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "config.migrations",
+          "status": "OK",
+          "message": "Migrations OK (version=999).",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "config.fingerprints",
+          "status": "OK",
+          "message": "Fingerprints computed for 0 files.",
+          "remediation": null,
+          "severity": "INFO"
+        }
+      ]
+    },
+    {
+      "phase_id": 2,
+      "name": "Secure Store & USB Key",
+      "status": "FAILED",
+      "checks": [
+        {
+          "check_id": "secure_store",
+          "status": "FAILED",
+          "message": "Secure store error: KEY_MISMATCH.",
+          "remediation": "restore backups",
+          "severity": "CRITICAL"
+        }
+      ]
+    },
+    {
+      "phase_id": 3,
+      "name": "Runtime State Recovery",
+      "status": "OK",
+      "checks": [
+        {
+          "check_id": "runtime_state.load",
+          "status": "OK",
+          "message": "Runtime state loaded.",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "runtime_state.dirty_shutdown",
+          "status": "OK",
+          "message": "No dirty shutdown marker.",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "runtime_state.admin_locked",
+          "status": "OK",
+          "message": "Admin locked on startup.",
+          "remediation": null,
+          "severity": "INFO"
+        }
+      ]
+    },
+    {
+      "phase_id": 4,
+      "name": "Core Subsystem Readiness",
+      "status": "OK",
+      "checks": [
+        {
+          "check_id": "capabilities",
+          "status": "OK",
+          "message": "Capability bus ready.",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "event_bus",
+          "status": "OK",
+          "message": "Event bus ready.",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "telemetry",
+          "status": "OK",
+          "message": "Telemetry running.",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "jobs",
+          "status": "OK",
+          "message": "Job manager ready.",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "recovery_policy",
+          "status": "OK",
+          "message": "Error handling/recovery ready.",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "state_machine",
+          "status": "OK",
+          "message": "State machine instantiated.",
+          "remediation": null,
+          "severity": "INFO"
+        }
+      ]
+    },
+    {
+      "phase_id": 5,
+      "name": "Optional Subsystem Probing",
+      "status": "DEGRADED",
+      "checks": [
+        {
+          "check_id": "voice",
+          "status": "OK",
+          "message": "Voice disabled (skipping probe).",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "llm.config",
+          "status": "OK",
+          "message": "LLM disabled.",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "web.config",
+          "status": "OK",
+          "message": "Web enabled=False allow_remote=False",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "ui.tk",
+          "status": "DEGRADED",
+          "message": "Tkinter not available.",
+          "remediation": "No module named 'tkinter'",
+          "severity": "WARN"
+        }
+      ]
+    },
+    {
+      "phase_id": 6,
+      "name": "Policy & Safety Checks",
+      "status": "OK",
+      "checks": [
+        {
+          "check_id": "web.remote_policy",
+          "status": "OK",
+          "message": "Remote web policy OK.",
+          "remediation": null,
+          "severity": "INFO"
+        },
+        {
+          "check_id": "caps.risky_defaults",
+          "status": "OK",
+          "message": "Capability defaults OK.",
+          "remediation": null,
+          "severity": "INFO"
+        }
+      ]
+    }
+  ],
+  "blocking_reasons": [
+    "Secure Store & USB Key:secure_store: Secure store error: KEY_MISMATCH."
+  ],
+  "warnings": [
+    "Optional Subsystem Probing:ui.tk: Tkinter not available."
+  ],
+  "remediation_steps": [
+    "restore backups",
+    "No module named 'tkinter'"
+  ],
+  "timestamp": 1767820940.9056177,
+  "runtime_fingerprint": "1b2fe5e02ed7e46ad6e28c813ecbca420e3f9e1a5ecd20b64c735a37cd674ab5"
+}

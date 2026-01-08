@@ -1,0 +1,30 @@
+cryptography>=42.0.0
+fastapi>=0.110.0
+pydantic>=2.6.0
+psutil>=5.9.8
+requests>=2.31.0
+rich>=13.7.0
+uvicorn>=0.27.0
+watchdog>=4.0.0
+
+[dev]
+coverage>=7.4.0
+httpx>=0.27.0
+pytest>=8.0.0
+
+[telemetry]
+
+[telemetry:platform_system == "Windows"]
+pynvml>=11.5.0
+
+[voice]
+numpy>=1.26.0
+pvporcupine>=3.0.0
+pvrecorder>=1.2.0
+sounddevice>=0.4.6
+vosk>=0.3.45
+faster-whisper>=1.0.3
+pyttsx3>=2.90
+
+[voice:platform_system == "Windows"]
+pywin32>=306

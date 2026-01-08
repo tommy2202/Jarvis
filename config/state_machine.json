@@ -1,0 +1,17 @@
+{
+  "idle_sleep_seconds": 45,
+  "timeouts": {
+    "LISTENING": 8,
+    "TRANSCRIBING": 15,
+    "UNDERSTANDING": 10,
+    "EXECUTING": 20,
+    "SPEAKING": 20
+  },
+  "enable_voice": false,
+  "enable_tts": true,
+  "enable_wake_word": true,
+  "max_concurrent_interactions": 1,
+  "busy_policy": "queue",
+  "result_ttl_seconds": 120
+}
+

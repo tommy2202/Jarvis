@@ -1,3 +1,33 @@
+Metadata-Version: 2.4
+Name: jarvis-offline
+Version: 0.1.0
+Summary: Secure, offline-first Jarvis assistant (minimal architecture proof).
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: cryptography>=42.0.0
+Requires-Dist: fastapi>=0.110.0
+Requires-Dist: pydantic>=2.6.0
+Requires-Dist: psutil>=5.9.8
+Requires-Dist: requests>=2.31.0
+Requires-Dist: rich>=13.7.0
+Requires-Dist: uvicorn>=0.27.0
+Requires-Dist: watchdog>=4.0.0
+Provides-Extra: dev
+Requires-Dist: coverage>=7.4.0; extra == "dev"
+Requires-Dist: httpx>=0.27.0; extra == "dev"
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+Provides-Extra: telemetry
+Requires-Dist: pynvml>=11.5.0; platform_system == "Windows" and extra == "telemetry"
+Provides-Extra: voice
+Requires-Dist: numpy>=1.26.0; extra == "voice"
+Requires-Dist: pvporcupine>=3.0.0; extra == "voice"
+Requires-Dist: pvrecorder>=1.2.0; extra == "voice"
+Requires-Dist: sounddevice>=0.4.6; extra == "voice"
+Requires-Dist: vosk>=0.3.45; extra == "voice"
+Requires-Dist: faster-whisper>=1.0.3; extra == "voice"
+Requires-Dist: pyttsx3>=2.90; extra == "voice"
+Requires-Dist: pywin32>=306; platform_system == "Windows" and extra == "voice"
+
 ## Jarvis (offline-first, secure, minimal)
 
 This repo is a **minimal but functional** “Jarvis” assistant designed to run **offline-first** on Windows, with:

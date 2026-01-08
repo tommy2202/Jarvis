@@ -1,0 +1,47 @@
+{
+  "enabled": true,
+  "default": {
+    "deny_unknown_intents": true,
+    "deny_high_sensitivity_without_admin": true
+  },
+  "rules": [
+    {
+      "id": "deny_network_when_locked",
+      "description": "Do not allow network access when admin is locked",
+      "priority": 10,
+      "effect": "DENY",
+      "match": {
+        "capabilities_any": [
+          "CAP_NETWORK_ACCESS"
+        ],
+        "is_admin": false
+      },
+      "reason": "Network access requires admin unlock.",
+      "remediation": "Unlock admin to proceed."
+    },
+    {
+      "id": "quiet_hours_no_tts",
+      "description": "Disable TTS during quiet hours for voice/UI",
+      "priority": 20,
+      "effect": "MODIFY",
+      "match": {
+        "time_window": {
+          "start": "23:00",
+          "end": "07:00",
+          "timezone": "UTC"
+        },
+        "source_in": [
+          "voice",
+          "ui"
+        ]
+      },
+      "modify": {
+        "flags": {
+          "tts_enabled": false
+        }
+      },
+      "reason": "Quiet hours: TTS disabled."
+    }
+  ]
+}
+

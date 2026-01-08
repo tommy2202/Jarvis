@@ -1,0 +1,15 @@
+{
+  "intents": {
+    "anime_dubbing.run": {
+      "network_access": false,
+      "requires_admin": true,
+      "resource_intensive": true
+    },
+    "music.play": {
+      "network_access": false,
+      "requires_admin": false,
+      "resource_intensive": false
+    }
+  }
+}
+

@@ -1,0 +1,18 @@
+{
+  "debug": {
+    "include_tracebacks": false,
+    "log_prompts": false
+  },
+  "retry": {
+    "llm_timeout_max_retries": 1,
+    "llm_timeout_backoff_ms": 200
+  },
+  "circuit_breakers": {
+    "llm": { "failures": 3, "window_seconds": 30, "cooldown_seconds": 30 },
+    "stt": { "failures": 3, "window_seconds": 30, "cooldown_seconds": 30 },
+    "tts": { "failures": 3, "window_seconds": 30, "cooldown_seconds": 30 },
+    "wake": { "failures": 3, "window_seconds": 30, "cooldown_seconds": 30 },
+    "web": { "failures": 5, "window_seconds": 60, "cooldown_seconds": 60 }
+  }
+}
+

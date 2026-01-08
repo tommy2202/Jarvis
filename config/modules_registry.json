@@ -1,0 +1,13 @@
+{
+  "modules": [
+    {
+      "module": "jarvis.modules.music",
+      "enabled": true
+    },
+    {
+      "module": "jarvis.modules.anime_dubbing",
+      "enabled": true
+    }
+  ]
+}
+

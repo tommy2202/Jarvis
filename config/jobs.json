@@ -1,0 +1,8 @@
+{
+  "max_concurrent_jobs": 1,
+  "default_timeout_seconds": 600,
+  "retention_max_jobs": 200,
+  "retention_days": 30,
+  "poll_interval_ms": 200
+}
+

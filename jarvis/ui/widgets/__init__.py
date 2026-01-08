@@ -1,0 +1,4 @@
+"""
+Reusable UI widgets (Tkinter).
+"""
+

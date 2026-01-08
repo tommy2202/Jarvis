@@ -1,0 +1,21 @@
+{
+  "enabled": true,
+  "store": {
+    "path_jsonl": "logs/audit/audit_events.jsonl",
+    "use_sqlite_index": true,
+    "sqlite_path": "logs/audit/index.sqlite"
+  },
+  "integrity": {
+    "enabled": true,
+    "verify_on_startup": true,
+    "verify_last_n": 2000
+  },
+  "retention": {
+    "days": 90,
+    "max_events": 50000
+  },
+  "export": {
+    "max_rows": 20000
+  }
+}
+

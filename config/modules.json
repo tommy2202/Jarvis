@@ -1,0 +1,25 @@
+{
+  "intents": [
+    {
+      "id": "music.play",
+      "module_id": "music",
+      "keywords": [
+        "play"
+      ],
+      "required_args": [
+        "song",
+        "service"
+      ]
+    },
+    {
+      "id": "anime_dubbing.run",
+      "module_id": "anime_dubbing",
+      "keywords": [
+        "dubbing",
+        "anime"
+      ],
+      "required_args": []
+    }
+  ]
+}
+
