@@ -16,47 +16,65 @@
     {
       "data_category": "AUDIT",
       "sensitivity": "LOW",
-      "ttl_days": 90
+      "ttl_days": 90,
+      "deletion_action": "delete",
+      "review_required": true
     },
     {
       "data_category": "SECURITY_LOG",
       "sensitivity": "LOW",
-      "ttl_days": 30
+      "ttl_days": 30,
+      "deletion_action": "delete",
+      "review_required": false
     },
     {
       "data_category": "ERROR_LOG",
       "sensitivity": "LOW",
-      "ttl_days": 30
+      "ttl_days": 30,
+      "deletion_action": "delete",
+      "review_required": false
     },
     {
       "data_category": "OPS_LOG",
       "sensitivity": "LOW",
-      "ttl_days": 30
+      "ttl_days": 30,
+      "deletion_action": "delete",
+      "review_required": false
     },
     {
       "data_category": "TELEMETRY",
       "sensitivity": "LOW",
-      "ttl_days": 14
+      "ttl_days": 14,
+      "deletion_action": "delete",
+      "review_required": false
     },
     {
       "data_category": "RUNTIME_STATE",
       "sensitivity": "LOW",
-      "ttl_days": 90
+      "ttl_days": 90,
+      "deletion_action": "delete",
+      "review_required": false
     },
     {
       "data_category": "CONFIG",
       "sensitivity": "LOW",
-      "ttl_days": 365
+      "ttl_days": 365,
+      "deletion_action": "delete",
+      "review_required": true
     },
     {
       "data_category": "MODULES",
       "sensitivity": "LOW",
-      "ttl_days": 90
+      "ttl_days": 90,
+      "deletion_action": "delete",
+      "review_required": false
     },
     {
       "data_category": "JOB_ARTIFACT",
       "sensitivity": "MEDIUM",
-      "ttl_days": 30
+      "ttl_days": 30,
+      "deletion_action": "delete",
+      "review_required": true
     }
   ]
 }

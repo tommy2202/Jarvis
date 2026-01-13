@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -108,6 +109,8 @@ class PrivacyStore:
                 )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_data_records_user ON data_records(user_id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_data_records_expires ON data_records(expires_at)")
+                # speed: retention queries
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_data_records_category ON data_records(data_category)")
 
                 conn.execute(
                     """
@@ -137,6 +140,25 @@ class PrivacyStore:
                     )
                     """
                 )
+
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS retention_pending (
+                      action_id TEXT PRIMARY KEY,
+                      record_id TEXT,
+                      user_id TEXT,
+                      policy_id TEXT,
+                      deletion_action TEXT,
+                      created_at TEXT,
+                      status TEXT,
+                      decided_at TEXT,
+                      decision TEXT,
+                      error TEXT
+                    )
+                    """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_retention_pending_status ON retention_pending(status)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_retention_pending_record ON retention_pending(record_id)")
 
                 conn.execute(
                     """
@@ -207,15 +229,23 @@ class PrivacyStore:
             break
         ttl = None
         keep_forever = False
+        deletion_action = "delete"
+        review_required = False
         if isinstance(best, dict):
             ttl = best.get("ttl_days")
             keep_forever = bool(best.get("keep_forever", False))
+            deletion_action = str(best.get("deletion_action") or "delete").strip().lower()
+            review_required = bool(best.get("review_required", False))
+        if deletion_action not in {"delete", "anonymize", "archive_encrypted"}:
+            deletion_action = "delete"
         pol = RetentionPolicy(
             policy_id=f"{data_category.value}:{sensitivity.value}",
             data_category=data_category,
             sensitivity=sensitivity,
             ttl_days=int(ttl) if ttl else None,
             keep_forever=keep_forever,
+            deletion_action=deletion_action,
+            review_required=review_required,
         )
         return pol
 
@@ -372,6 +402,235 @@ class PrivacyStore:
         )
 
         return record_id
+
+    # ---- retention enforcement ----
+    @staticmethod
+    def _iso_now() -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def _list_expired_record_rows(self, *, now_iso: str) -> List[sqlite3.Row]:
+        with self._lock:
+            conn = self._conn()
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM data_records
+                    WHERE expires_at IS NOT NULL
+                      AND expires_at <= ?
+                      AND data_category != ?
+                      AND record_id NOT IN (SELECT record_id FROM retention_pending WHERE status='PENDING')
+                    ORDER BY expires_at ASC
+                    """,
+                    (now_iso, DataCategory.AUDIT.value),
+                ).fetchall()
+            finally:
+                conn.close()
+        return list(rows or [])
+
+    def retention_run(self, *, trace_id: str = "privacy", now_iso: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Process expired records:
+        - delete/anonymize/archive_encrypted (best-effort)
+        - never touch audit timeline artifacts (append-only)
+        - if policy requires review, create pending actions
+        """
+        now_iso = str(now_iso or self._iso_now())
+        expired = self._list_expired_record_rows(now_iso=now_iso)
+        deleted = 0
+        anonymized = 0
+        archived = 0
+        pending = 0
+        skipped = 0
+        errors = 0
+
+        for r in expired:
+            try:
+                cat = DataCategory(str(r["data_category"]))
+                sens = Sensitivity(str(r["sensitivity"]))
+            except Exception:
+                skipped += 1
+                continue
+            pol = self.resolve_retention_policy(data_category=cat, sensitivity=sens)
+
+            # hard rule: audit timeline is append-only and must not be deleted
+            if cat == DataCategory.AUDIT or "logs/audit" in str(r["storage_ref"] or "").replace("\\", "/"):
+                skipped += 1
+                continue
+
+            if bool(pol.review_required):
+                if self._create_pending_action(
+                    record_id=str(r["record_id"]),
+                    user_id=str(r["user_id"] or "default"),
+                    policy_id=str(pol.policy_id),
+                    deletion_action=str(pol.deletion_action),
+                ):
+                    pending += 1
+                else:
+                    skipped += 1
+                continue
+
+            try:
+                res = self._execute_deletion_action(row=r, deletion_action=str(pol.deletion_action))
+                if res == "deleted":
+                    deleted += 1
+                elif res == "anonymized":
+                    anonymized += 1
+                elif res == "archived":
+                    archived += 1
+                elif res == "skipped":
+                    skipped += 1
+                else:
+                    skipped += 1
+            except Exception:
+                errors += 1
+
+        self._emit(
+            str(trace_id or "privacy"),
+            "retention.expired_handled",
+            {
+                "as_of": now_iso,
+                "expired_found": len(expired),
+                "deleted": deleted,
+                "anonymized": anonymized,
+                "archived": archived,
+                "pending_review": pending,
+                "skipped": skipped,
+                "errors": errors,
+            },
+            severity=EventSeverity.INFO,
+        )
+        return {"ok": True, "as_of": now_iso, "expired_found": len(expired), "deleted": deleted, "anonymized": anonymized, "archived": archived, "pending_review": pending, "skipped": skipped, "errors": errors}
+
+    def _create_pending_action(self, *, record_id: str, user_id: str, policy_id: str, deletion_action: str) -> bool:
+        aid = uuid.uuid4().hex
+        with self._lock:
+            conn = self._conn()
+            try:
+                # idempotency: only one pending per record
+                row = conn.execute("SELECT action_id FROM retention_pending WHERE record_id=? AND status='PENDING' LIMIT 1", (record_id,)).fetchone()
+                if row:
+                    return False
+                conn.execute(
+                    "INSERT INTO retention_pending(action_id, record_id, user_id, policy_id, deletion_action, created_at, status, decided_at, decision, error) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', NULL, NULL, '')",
+                    (aid, record_id, user_id, policy_id, deletion_action, self._iso_now()),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        self._emit("privacy", "retention.review_required_created", {"action_id": aid, "record_id": record_id, "policy_id": policy_id, "deletion_action": deletion_action}, severity=EventSeverity.WARN)
+        return True
+
+    def retention_pending(self, *, limit: int = 200) -> List[Dict[str, Any]]:
+        with self._lock:
+            conn = self._conn()
+            try:
+                rows = conn.execute(
+                    "SELECT action_id, record_id, user_id, policy_id, deletion_action, created_at, status FROM retention_pending WHERE status='PENDING' ORDER BY created_at ASC LIMIT ?",
+                    (max(1, int(limit)),),
+                ).fetchall()
+            finally:
+                conn.close()
+        return [dict(r) for r in (rows or [])]
+
+    def retention_approve(self, *, action_id: str, trace_id: str = "privacy", actor_is_admin: bool = False) -> bool:
+        if not bool(actor_is_admin):
+            raise PermissionError("Admin required (CAP_ADMIN_ACTION).")
+        aid = str(action_id or "").strip()
+        if not aid:
+            return False
+        with self._lock:
+            conn = self._conn()
+            try:
+                row = conn.execute("SELECT * FROM retention_pending WHERE action_id=? AND status='PENDING'", (aid,)).fetchone()
+                if not row:
+                    return False
+                rec = conn.execute("SELECT * FROM data_records WHERE record_id=?", (row["record_id"],)).fetchone()
+                if not rec:
+                    conn.execute("UPDATE retention_pending SET status='DONE', decided_at=?, decision='approved', error='' WHERE action_id=?", (self._iso_now(), aid))
+                    conn.commit()
+                    return True
+            finally:
+                conn.close()
+        # execute outside lock (file ops)
+        res = self._execute_deletion_action(row=rec, deletion_action=str(row["deletion_action"] or "delete"))
+        with self._lock:
+            conn2 = self._conn()
+            try:
+                conn2.execute("UPDATE retention_pending SET status='DONE', decided_at=?, decision='approved', error='' WHERE action_id=?", (self._iso_now(), aid))
+                conn2.commit()
+            finally:
+                conn2.close()
+        self._emit(str(trace_id or "privacy"), "retention.pending_approved", {"action_id": aid, "result": res}, severity=EventSeverity.WARN)
+        return True
+
+    def retention_deny(self, *, action_id: str, trace_id: str = "privacy", actor_is_admin: bool = False) -> bool:
+        if not bool(actor_is_admin):
+            raise PermissionError("Admin required (CAP_ADMIN_ACTION).")
+        aid = str(action_id or "").strip()
+        if not aid:
+            return False
+        with self._lock:
+            conn = self._conn()
+            try:
+                row = conn.execute("SELECT action_id FROM retention_pending WHERE action_id=? AND status='PENDING'", (aid,)).fetchone()
+                if not row:
+                    return False
+                conn.execute("UPDATE retention_pending SET status='DONE', decided_at=?, decision='denied', error='' WHERE action_id=?", (self._iso_now(), aid))
+                conn.commit()
+            finally:
+                conn.close()
+        self._emit(str(trace_id or "privacy"), "retention.pending_denied", {"action_id": aid}, severity=EventSeverity.WARN)
+        return True
+
+    def _execute_deletion_action(self, *, row: sqlite3.Row, deletion_action: str) -> str:
+        action = str(deletion_action or "delete").strip().lower()
+        sk = str(row["storage_kind"] or "FILE").upper()
+        ref = str(row["storage_ref"] or "")
+        ref_norm = ref.replace("\\", "/")
+
+        # never delete audit timeline
+        if "logs/audit" in ref_norm:
+            return "skipped"
+
+        if action == "archive_encrypted":
+            # Placeholder: review-required policies should be used for this until encryption key mgmt is implemented.
+            return "skipped"
+
+        if action == "anonymize":
+            if sk == "FILE" and ref_norm and os.path.exists(ref) and os.path.isfile(ref):
+                try:
+                    with open(ref, "w", encoding="utf-8") as f:
+                        f.write("")
+                    # remove inventory record reference
+                    self._delete_data_record(record_id=str(row["record_id"]))
+                    return "anonymized"
+                except Exception:
+                    return "skipped"
+            self._delete_data_record(record_id=str(row["record_id"]))
+            return "anonymized"
+
+        # default: delete
+        if sk == "FILE" and ref_norm and os.path.exists(ref) and os.path.isfile(ref):
+            try:
+                os.remove(ref)
+            except Exception:
+                # file missing/locked -> still remove reference so inventory doesn't keep stale pointers
+                pass
+        # For SQLITE/OTHER, deletion means deleting the referenced artifact is out of scope here; we drop reference.
+        self._delete_data_record(record_id=str(row["record_id"]))
+        return "deleted"
+
+    def _delete_data_record(self, *, record_id: str) -> None:
+        rid = str(record_id or "").strip()
+        if not rid:
+            return
+        with self._lock:
+            conn = self._conn()
+            try:
+                conn.execute("DELETE FROM data_records WHERE record_id=?", (rid,))
+                conn.commit()
+            finally:
+                conn.close()
 
     def list_records(self, *, user_id: str = "default", limit: int = 200) -> List[DataRecord]:
         uid = str(user_id or "default")

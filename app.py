@@ -1153,6 +1153,25 @@ def main() -> None:
                     out.append({"policy_id": pid, "ttl_days": p.get("ttl_days"), "keep_forever": bool(p.get("keep_forever", False))})
                 print({"policies": out})
                 continue
+            if cmd == "retention" and len(parts) >= 3 and parts[2] == "run":
+                res = privacy_store.retention_run(trace_id="cli")
+                print(res)
+                continue
+            if cmd == "retention" and len(parts) >= 3 and parts[2] == "pending":
+                rows = privacy_store.retention_pending(limit=200)
+                print({"pending": rows})
+                continue
+            if cmd == "retention" and len(parts) >= 4 and parts[2] in {"approve", "deny"}:
+                if not security.is_admin():
+                    print("Admin required (CAP_ADMIN_ACTION).")
+                    continue
+                aid = parts[3]
+                try:
+                    ok = privacy_store.retention_approve(action_id=aid, trace_id="cli", actor_is_admin=True) if parts[2] == "approve" else privacy_store.retention_deny(action_id=aid, trace_id="cli", actor_is_admin=True)
+                except Exception:
+                    ok = False
+                print("OK" if ok else "Failed")
+                continue
             if cmd == "retention" and len(parts) >= 5 and parts[2] == "set":
                 if not security.is_admin():
                     print("Admin required (CAP_ADMIN_ACTION).")
@@ -1165,7 +1184,7 @@ def main() -> None:
                     ok = False
                 print("OK" if ok else "Failed")
                 continue
-            print("Usage: /privacy status | /privacy consent grant <scope> | /privacy consent revoke <scope> | /privacy retention list | /privacy retention set <policy_id> <ttl_days>")
+            print("Usage: /privacy status | /privacy consent grant <scope> | /privacy consent revoke <scope> | /privacy retention list | /privacy retention run | /privacy retention pending | /privacy retention approve <id> | /privacy retention deny <id> | /privacy retention set <policy_id> <ttl_days>")
             continue
         if text.startswith("/audit"):
             from jarvis.core.audit.formatter import format_line

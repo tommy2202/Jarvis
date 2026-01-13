@@ -85,6 +85,8 @@ class RetentionPolicy(BaseModel):
     sensitivity: Sensitivity
     ttl_days: Optional[int] = Field(default=None, ge=1, le=3650)
     keep_forever: bool = False
+    deletion_action: str = Field(default="delete", max_length=40)  # delete|anonymize|archive_encrypted
+    review_required: bool = False
 
     def resolve_expires_at(self, *, created_at: str) -> Optional[str]:
         if self.keep_forever:
@@ -236,15 +238,15 @@ class PrivacyConfigFile(BaseModel):
     default_consent_scopes: Dict[str, bool] = Field(default_factory=lambda: {"telemetry": True, "crash_reports": True, "memory": False, "transcripts": False})
     retention_policies: List[Dict[str, Any]] = Field(
         default_factory=lambda: [
-            {"data_category": "AUDIT", "sensitivity": "LOW", "ttl_days": 90},
-            {"data_category": "SECURITY_LOG", "sensitivity": "LOW", "ttl_days": 30},
-            {"data_category": "ERROR_LOG", "sensitivity": "LOW", "ttl_days": 30},
-            {"data_category": "OPS_LOG", "sensitivity": "LOW", "ttl_days": 30},
-            {"data_category": "TELEMETRY", "sensitivity": "LOW", "ttl_days": 14},
-            {"data_category": "RUNTIME_STATE", "sensitivity": "LOW", "ttl_days": 90},
-            {"data_category": "CONFIG", "sensitivity": "LOW", "ttl_days": 365},
-            {"data_category": "MODULES", "sensitivity": "LOW", "ttl_days": 90},
-            {"data_category": "JOB_ARTIFACT", "sensitivity": "MEDIUM", "ttl_days": 30},
+            {"data_category": "AUDIT", "sensitivity": "LOW", "ttl_days": 90, "deletion_action": "delete", "review_required": True},
+            {"data_category": "SECURITY_LOG", "sensitivity": "LOW", "ttl_days": 30, "deletion_action": "delete", "review_required": False},
+            {"data_category": "ERROR_LOG", "sensitivity": "LOW", "ttl_days": 30, "deletion_action": "delete", "review_required": False},
+            {"data_category": "OPS_LOG", "sensitivity": "LOW", "ttl_days": 30, "deletion_action": "delete", "review_required": False},
+            {"data_category": "TELEMETRY", "sensitivity": "LOW", "ttl_days": 14, "deletion_action": "delete", "review_required": False},
+            {"data_category": "RUNTIME_STATE", "sensitivity": "LOW", "ttl_days": 90, "deletion_action": "delete", "review_required": False},
+            {"data_category": "CONFIG", "sensitivity": "LOW", "ttl_days": 365, "deletion_action": "delete", "review_required": True},
+            {"data_category": "MODULES", "sensitivity": "LOW", "ttl_days": 90, "deletion_action": "delete", "review_required": False},
+            {"data_category": "JOB_ARTIFACT", "sensitivity": "MEDIUM", "ttl_days": 30, "deletion_action": "delete", "review_required": True},
         ]
     )
 
