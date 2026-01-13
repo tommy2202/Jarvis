@@ -252,16 +252,26 @@ def main() -> None:
                 pass
     runtime_state.mark_dirty_startup()
 
+    # Privacy / GDPR core (data inventory + classification)
+    from jarvis.core.privacy.store import PrivacyStore
+
+    privacy_store = PrivacyStore(db_path=os.path.join(runtime_state.paths.runtime_dir, "privacy.sqlite"), config_manager=config, audit_timeline=None, logger=logger)
+
     # Audit Timeline (hash-chained, privacy-safe)
     from jarvis.core.audit.timeline import AuditTimelineManager
 
-    audit = AuditTimelineManager(cfg=cfg_obj.audit.model_dump(), logger=logger, event_bus=event_bus, telemetry=None, ops_logger=ops)
+    audit = AuditTimelineManager(cfg=cfg_obj.audit.model_dump(), logger=logger, event_bus=event_bus, telemetry=None, ops_logger=ops, privacy_store=privacy_store)
     audit.start()
+    privacy_store.attach_audit_timeline(audit)
+
+    # Re-create loggers with privacy inventory wiring for the rest of the process lifetime.
+    event_logger = EventLogger("logs/events.jsonl", privacy_store=privacy_store)
+    ops = OpsLogger(privacy_store=privacy_store)
 
     # Capability bus (validated config/capabilities.json)
     cap_raw = config.read_non_sensitive("capabilities.json")
     cap_cfg = validate_and_normalize(cap_raw)
-    cap_audit = CapabilityAuditLogger(path=os.path.join("logs", "security.jsonl"))
+    cap_audit = CapabilityAuditLogger(path=os.path.join("logs", "security.jsonl"), privacy_store=privacy_store)
     cap_engine = CapabilityEngine(cfg=cap_cfg, audit=cap_audit, logger=logger, event_bus=event_bus)
 
     # Policy engine (config-driven constraints)
@@ -273,7 +283,7 @@ def main() -> None:
     cap_engine.policy_engine = policy_engine
 
     telemetry_cfg = TelemetryConfig.model_validate(cfg_obj.telemetry.model_dump())
-    telemetry = TelemetryManager(cfg=telemetry_cfg, logger=logger, root_path=".")
+    telemetry = TelemetryManager(cfg=telemetry_cfg, logger=logger, root_path=".", privacy_store=privacy_store)
     telemetry.attach(config_manager=config)
     runtime_state.attach(telemetry=telemetry)
     event_bus.telemetry = telemetry
@@ -293,7 +303,13 @@ def main() -> None:
 
     # Error handling + recovery subsystem
     recovery_cfg = RecoveryConfig.model_validate(cfg_obj.recovery.model_dump())
-    error_reporter = ErrorReporter(cfg=ErrorReporterConfig(include_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False))), telemetry=telemetry, runtime_state=runtime_state, event_bus=event_bus)
+    error_reporter = ErrorReporter(
+        cfg=ErrorReporterConfig(include_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False))),
+        telemetry=telemetry,
+        runtime_state=runtime_state,
+        event_bus=event_bus,
+        privacy_store=privacy_store,
+    )
     recovery_policy = RecoveryPolicy(recovery_cfg)
     breakers_map = {}
     for name, bc in (recovery_cfg.circuit_breakers or {}).items():
@@ -1072,18 +1088,19 @@ def main() -> None:
             parts = text.split()
             cmd = parts[1] if len(parts) >= 2 else "list"
             if cmd == "list":
-                reg = module_manager.list_registry().get("modules") or {}
-                for mid in sorted(list(reg.keys())):
-                    r = reg.get(mid) or {}
-                    print({"module_id": mid, "installed": bool(r.get("installed")), "enabled": bool(r.get("enabled")), "requires_admin": bool(r.get("requires_admin_to_enable")), "reason": str(r.get("reason") or "")})
+                from jarvis.core.modules.cli import modules_list_lines
+
+                for line in modules_list_lines(module_manager=module_manager, trace_id="cli"):
+                    print(line)
                 continue
             if cmd == "scan":
                 print(module_manager.scan(trace_id="cli"))
                 continue
             if cmd == "show" and len(parts) >= 3:
                 mid = parts[2]
-                reg = module_manager.list_registry().get("modules") or {}
-                print(reg.get(mid) or {"error": "not found"})
+                from jarvis.core.modules.cli import modules_show_payload
+
+                print(modules_show_payload(module_manager=module_manager, module_id=mid, trace_id="cli"))
                 continue
             if cmd in {"enable", "disable"} and len(parts) >= 3:
                 mid = parts[2]
@@ -1097,7 +1114,7 @@ def main() -> None:
                 out_path = parts[2]
                 print({"exported": module_manager.export(out_path)})
                 continue
-            print("Usage: /modules list|scan|show <id>|enable <id>|disable <id>|export <path>")
+            print("Usage: /modules list | /modules scan | /modules show <id> | /modules enable <id> | /modules disable <id> | /modules export <path>")
             continue
         if text.startswith("/audit"):
             from jarvis.core.audit.formatter import format_line

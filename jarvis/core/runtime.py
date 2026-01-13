@@ -315,7 +315,20 @@ class JarvisRuntime:
         try:
             raw = self.module_manager.list_registry()
             mods = raw.get("modules") if isinstance(raw, dict) else {}
-            return {"enabled": True, "count": len(mods or {}), "modules": mods or {}}
+            statuses = []
+            try:
+                ls = getattr(self.module_manager, "list_status", None)
+                if callable(ls):
+                    statuses = []
+                    reg_mods = mods if isinstance(mods, dict) else {}
+                    for s in (ls(trace_id="runtime") or []):
+                        row = s.model_dump()
+                        rec = reg_mods.get(str(row.get("module_id"))) if isinstance(reg_mods, dict) else None
+                        row["enabled"] = bool(rec.get("enabled")) if isinstance(rec, dict) else False
+                        statuses.append(row)
+            except Exception:
+                statuses = []
+            return {"enabled": True, "count": len(mods or {}), "modules": mods or {}, "statuses": statuses}
         except Exception:
             return {"enabled": True, "error": "status_failed"}
 

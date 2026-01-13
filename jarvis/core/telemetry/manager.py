@@ -52,14 +52,15 @@ class TelemetryManager:
     Thread-safe API for metrics + a background loop for health/resource sampling.
     """
 
-    def __init__(self, *, cfg: TelemetryConfig, logger=None, root_path: str = "."):
+    def __init__(self, *, cfg: TelemetryConfig, logger=None, root_path: str = ".", privacy_store: Any = None):
         self.cfg = cfg
         self.logger = logger
         self.root_path = root_path
+        self.privacy_store = privacy_store
         self._start_ts = time.time()
 
         self.metrics = RollingMetrics(max_samples_per_histogram=int(cfg.max_samples_per_histogram))
-        self._event_writer = TelemetryEventWriter()
+        self._event_writer = TelemetryEventWriter(privacy_store=privacy_store)
         self._sampler = ResourceSampler(root_path=root_path, logs_path=os.path.join(root_path, "logs"), enable_nvml=bool((cfg.gpu or {}).get("enable_nvml", True)))
         try:
             self._thresholds = ResourceThresholds(**(cfg.thresholds or {}))

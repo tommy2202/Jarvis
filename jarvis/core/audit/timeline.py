@@ -29,12 +29,14 @@ class AuditTimelineManager:
         event_bus: Any = None,
         telemetry: Any = None,
         ops_logger: Any = None,
+        privacy_store: Any = None,
     ):
         self.cfg = cfg or {}
         self.logger = logger
         self.event_bus = event_bus
         self.telemetry = telemetry
         self.ops = ops_logger
+        self.privacy_store = privacy_store
 
         store = (self.cfg.get("store") or {})
         self.path_jsonl = str(store.get("path_jsonl") or os.path.join("logs", "audit", "audit_events.jsonl"))
@@ -48,6 +50,40 @@ class AuditTimelineManager:
         self._integrity_broken = False
         self._cursor_path = os.path.join(os.path.dirname(self.path_jsonl), "cursors.json")
         self._cursors = self._load_cursors()
+
+        # Privacy inventory (best-effort, no content)
+        if self.privacy_store is not None:
+            try:
+                from jarvis.core.privacy.models import DataCategory, LawfulBasis, Sensitivity
+                from jarvis.core.privacy.tagging import data_record_for_file
+
+                self.privacy_store.register_record(
+                    data_record_for_file(
+                        user_id="default",
+                        path=self.path_jsonl,
+                        category=DataCategory.AUDIT,
+                        sensitivity=Sensitivity.LOW,
+                        lawful_basis=LawfulBasis.LEGITIMATE_INTERESTS,
+                        trace_id="startup",
+                        producer="audit_timeline",
+                        tags={"format": "jsonl"},
+                    )
+                )
+                if self.use_sqlite:
+                    self.privacy_store.register_record(
+                        data_record_for_file(
+                            user_id="default",
+                            path=self.sqlite_path,
+                            category=DataCategory.AUDIT,
+                            sensitivity=Sensitivity.LOW,
+                            lawful_basis=LawfulBasis.LEGITIMATE_INTERESTS,
+                            trace_id="startup",
+                            producer="audit_timeline",
+                            tags={"format": "sqlite"},
+                        )
+                    )
+            except Exception:
+                pass
 
     # ---- wiring ----
     def start(self) -> None:

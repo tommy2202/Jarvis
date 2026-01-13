@@ -229,15 +229,34 @@ class Dispatcher:
             mm = getattr(self, "module_manager", None)
             if mm is not None:
                 try:
-                    if not bool(mm.is_module_enabled(str(module_id))):
+                    st = None
+                    try:
+                        st = getattr(mm, "get_status", None)(str(module_id), trace_id=trace_id) if callable(getattr(mm, "get_status", None)) else None
+                    except Exception:
+                        st = None
+                    enabled_ok = bool(mm.is_module_enabled(str(module_id)))
+                    if st is not None:
+                        enabled_ok = bool(getattr(st, "state", None) and getattr(st.state, "value", "") == "INSTALLED_ENABLED")
+                    if not enabled_ok:
+                        state_s = str(getattr(getattr(st, "state", None), "value", "") or "UNKNOWN")
+                        reason_code_s = str(getattr(getattr(st, "reason_code", None), "value", "") or "UNKNOWN")
+                        reason_human = str(getattr(st, "reason_human", "") or "Module is not runnable.")
+                        remediation = str(getattr(st, "remediation", "") or "Run /modules scan or /modules enable <id>.")
+                        # User-safe message includes state + reason; remediation is appended by _deny.
+                        reply = f"Module '{module_id}' is {state_s} ({reason_code_s}): {reason_human}"
                         return self._deny(
                             trace_id,
                             intent_id=intent_id,
                             module_id=module_id,
                             denied_reason="module_not_installed_or_disabled",
-                            reply="Module is not installed/enabled.",
-                            remediation="Run /modules scan or /modules enable <id>.",
-                            details={"module_id": module_id},
+                            reply=reply,
+                            remediation=remediation,
+                            details={
+                                "module_id": module_id,
+                                "module_state": state_s,
+                                "module_reason_code": reason_code_s,
+                                "module_remediation": remediation[:200],
+                            },
                         )
                 except Exception:
                     # fail-safe: deny if module manager is unhealthy

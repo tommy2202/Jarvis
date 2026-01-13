@@ -283,6 +283,22 @@ Privacy:
 - no audio recordings
 - no API keys / passphrases / secrets (only stored in encrypted secure store)
 
+## Privacy Core Overview (GDPR / data inventory + classification)
+
+Jarvis maintains a local-only **data inventory** of persistent artifacts it creates (logs, audit timeline, telemetry, operational state, etc.) without storing raw content in the inventory itself.
+
+Storage (local):
+- `runtime/privacy.sqlite` (SQLite; Windows-safe stdlib `sqlite3`)
+
+What’s recorded:
+- `DataRecord` entries with **category**, **sensitivity**, **lawful basis**, timestamps, retention-derived `expires_at`, and a `storage_ref`/hash (**reference only**).
+
+What’s never recorded in the inventory:
+- raw user text, prompts, transcripts, or file contents
+
+Config:
+- `config/privacy.json` (default consent scopes, retention by category/sensitivity, data minimization toggles)
+
 ## Capabilities (unified policy enforcement)
 
 Jarvis uses a **central capability model** as the source of truth for permissions. Capabilities are **independent of intents/modules** and are enforced **only in the dispatcher**.

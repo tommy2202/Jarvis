@@ -70,6 +70,8 @@ class RequestContext(BaseModel):
     trace_id: str
     source: RequestSource
     client_id: Optional[str] = None
+    # Privacy core: single-user mode default. Call sites do not need updating.
+    user_id: str = "default"
     is_admin: bool = False
     safe_mode: bool = False
     shutting_down: bool = False

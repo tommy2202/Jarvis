@@ -14,10 +14,11 @@ import importlib
 import json
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
 from jarvis.core.modules.discovery import ModuleDiscovery
+from jarvis.core.modules.models import ModuleReasonCode, ModuleState, ModuleStatus
 from jarvis.core.modules.redaction import redact_module_payload
 from jarvis.core.modules.wizard import (
     _iso_now,
@@ -172,6 +173,295 @@ class ModuleManager:
             return False
         return bool(rec.get("installed")) and bool(rec.get("enabled")) and not bool(rec.get("missing_on_disk"))
 
+    def list_status(self, *, trace_id: str = "modules") -> List[ModuleStatus]:
+        """
+        Read-only module status listing.
+
+        IMPORTANT:
+        This must not import/execute module code and must not mutate config.
+        """
+        now = _iso_now()
+
+        # Disk scan (read-only)
+        disc = ModuleDiscovery(modules_root=self.modules_root).scan()
+
+        # Registry snapshot (read-only)
+        raw = self._load_modules_file_raw()
+        registry = raw.get("modules") if isinstance(raw, dict) else {}
+        if not isinstance(registry, dict):
+            registry = {}
+
+        # Capabilities mapping snapshot (read-only)
+        caps_raw = self.config.read_non_sensitive("capabilities.json") if self.config is not None else {}
+        if not isinstance(caps_raw, dict):
+            caps_raw = {}
+        intent_reqs = caps_raw.get("intent_requirements") or {}
+        if not isinstance(intent_reqs, dict):
+            intent_reqs = {}
+
+        module_ids = set(disc.keys()) | set(registry.keys())
+        out: List[ModuleStatus] = []
+
+        for mid in sorted(module_ids):
+            d = disc.get(mid)
+            rec = registry.get(mid) if isinstance(registry, dict) else None
+            rec = rec if isinstance(rec, dict) else None
+
+            fp = ""
+            if d is not None:
+                fp = str(d.fingerprint or "")
+            if not fp and rec is not None:
+                fp = str(rec.get("last_seen_fingerprint") or "")
+            fp_short = fp[:8] if fp else ""
+
+            safe_auto_enabled = bool(rec.get("safe_auto_enabled", False)) if rec is not None else False
+            requires_admin = bool(rec.get("requires_admin_to_enable", False)) if rec is not None else False
+
+            # Missing on disk (registry mentions it, but folder not present)
+            if rec is not None and mid not in disc:
+                out.append(
+                    ModuleStatus(
+                        module_id=mid,
+                        state=ModuleState.MISSING_ON_DISK,
+                        reason_code=ModuleReasonCode.MISSING_ON_DISK,
+                        reason_human="Module folder is missing on disk.",
+                        remediation="Restore the module folder then run /modules scan.",
+                        last_seen_at=now,
+                        fingerprint_short=fp_short,
+                        safe_auto_enabled=safe_auto_enabled,
+                        requires_admin_to_enable=requires_admin,
+                    )
+                )
+                continue
+
+            # Discovered but not installed in registry yet
+            if rec is None and d is not None:
+                # Manifest presence/validity drives whether we say DISCOVERED vs BLOCKED.
+                if str(d.manifest_error or "") == "module.json missing":
+                    out.append(
+                        ModuleStatus(
+                            module_id=mid,
+                            state=ModuleState.BLOCKED,
+                            reason_code=ModuleReasonCode.NO_MANIFEST,
+                            reason_human="module.json missing.",
+                            remediation="Run /modules scan to generate a template manifest.",
+                            last_seen_at=now,
+                            fingerprint_short=fp_short,
+                            safe_auto_enabled=False,
+                            requires_admin_to_enable=True,
+                        )
+                    )
+                    continue
+                if not isinstance(d.manifest_raw, dict):
+                    out.append(
+                        ModuleStatus(
+                            module_id=mid,
+                            state=ModuleState.BLOCKED,
+                            reason_code=ModuleReasonCode.MANIFEST_INVALID,
+                            reason_human="module.json invalid.",
+                            remediation="Fix module.json then run /modules scan.",
+                            last_seen_at=now,
+                            fingerprint_short=fp_short,
+                            safe_auto_enabled=False,
+                            requires_admin_to_enable=True,
+                        )
+                    )
+                    continue
+                man, err = validate_manifest_dict(d.manifest_raw)
+                if man is None:
+                    out.append(
+                        ModuleStatus(
+                            module_id=mid,
+                            state=ModuleState.BLOCKED,
+                            reason_code=ModuleReasonCode.MANIFEST_INVALID,
+                            reason_human=("Manifest invalid: " + str(err or ""))[:200],
+                            remediation="Fix module.json schema then run /modules scan.",
+                            last_seen_at=now,
+                            fingerprint_short=fp_short,
+                            safe_auto_enabled=False,
+                            requires_admin_to_enable=True,
+                        )
+                    )
+                    continue
+                missing_map = [it.intent_id for it in (man.intents or []) if it.intent_id not in intent_reqs]
+                if missing_map:
+                    out.append(
+                        ModuleStatus(
+                            module_id=mid,
+                            state=ModuleState.BLOCKED,
+                            reason_code=ModuleReasonCode.CAPABILITIES_MAPPING_MISSING,
+                            reason_human=f"Capabilities mapping missing for {len(missing_map)} intent(s).",
+                            remediation="Add intent requirements in config/capabilities.json or run /modules scan.",
+                            last_seen_at=now,
+                            fingerprint_short=fp_short,
+                            safe_auto_enabled=False,
+                            requires_admin_to_enable=bool(man.module_defaults.admin_required_to_enable),
+                        )
+                    )
+                    continue
+                out.append(
+                    ModuleStatus(
+                        module_id=mid,
+                        state=ModuleState.DISCOVERED,
+                        reason_code=ModuleReasonCode.UNKNOWN,
+                        reason_human="Discovered on disk (not in registry).",
+                        remediation="Run /modules scan to add it to registry (disabled by default).",
+                        last_seen_at=now,
+                        fingerprint_short=fp_short,
+                        safe_auto_enabled=False,
+                        requires_admin_to_enable=bool(man.module_defaults.admin_required_to_enable),
+                    )
+                )
+                continue
+
+            # Registry present (and disk present if discovered)
+            if rec is not None:
+                if bool(rec.get("changed_requires_review", False)):
+                    out.append(
+                        ModuleStatus(
+                            module_id=mid,
+                            state=ModuleState.CHANGED_REVIEW_REQUIRED,
+                            reason_code=ModuleReasonCode.CHANGED_CONTRACT_REVIEW_REQUIRED,
+                            reason_human=str(rec.get("reason") or "Contract changed; review required.")[:200],
+                            remediation="Review the contract changes and re-enable the module.",
+                            last_seen_at=now,
+                            fingerprint_short=fp_short,
+                            safe_auto_enabled=safe_auto_enabled,
+                            requires_admin_to_enable=True,
+                        )
+                    )
+                    continue
+
+                # Validate manifest (fail-safe: an enabled module with invalid manifest should be treated as blocked)
+                man_raw = d.manifest_raw if d is not None and isinstance(d.manifest_raw, dict) else None
+                if d is not None and str(d.manifest_error or "") == "module.json missing":
+                    out.append(
+                        ModuleStatus(
+                            module_id=mid,
+                            state=ModuleState.BLOCKED,
+                            reason_code=ModuleReasonCode.NO_MANIFEST,
+                            reason_human="module.json missing.",
+                            remediation="Restore module.json then run /modules scan.",
+                            last_seen_at=now,
+                            fingerprint_short=fp_short,
+                            safe_auto_enabled=safe_auto_enabled,
+                            requires_admin_to_enable=True,
+                        )
+                    )
+                    continue
+                if man_raw is None:
+                    out.append(
+                        ModuleStatus(
+                            module_id=mid,
+                            state=ModuleState.BLOCKED,
+                            reason_code=ModuleReasonCode.MANIFEST_INVALID,
+                            reason_human="module.json invalid.",
+                            remediation="Fix module.json then run /modules scan.",
+                            last_seen_at=now,
+                            fingerprint_short=fp_short,
+                            safe_auto_enabled=safe_auto_enabled,
+                            requires_admin_to_enable=True,
+                        )
+                    )
+                    continue
+                man, err = validate_manifest_dict(man_raw)
+                if man is None:
+                    out.append(
+                        ModuleStatus(
+                            module_id=mid,
+                            state=ModuleState.BLOCKED,
+                            reason_code=ModuleReasonCode.MANIFEST_INVALID,
+                            reason_human=("Manifest invalid: " + str(err or ""))[:200],
+                            remediation="Fix module.json schema then run /modules scan.",
+                            last_seen_at=now,
+                            fingerprint_short=fp_short,
+                            safe_auto_enabled=safe_auto_enabled,
+                            requires_admin_to_enable=True,
+                        )
+                    )
+                    continue
+                missing_map = [it.intent_id for it in (man.intents or []) if it.intent_id not in intent_reqs]
+                if missing_map:
+                    out.append(
+                        ModuleStatus(
+                            module_id=mid,
+                            state=ModuleState.BLOCKED,
+                            reason_code=ModuleReasonCode.CAPABILITIES_MAPPING_MISSING,
+                            reason_human=f"Capabilities mapping missing for {len(missing_map)} intent(s).",
+                            remediation="Add intent requirements in config/capabilities.json or run /modules scan.",
+                            last_seen_at=now,
+                            fingerprint_short=fp_short,
+                            safe_auto_enabled=safe_auto_enabled,
+                            requires_admin_to_enable=True,
+                        )
+                    )
+                    continue
+
+                enabled = bool(rec.get("installed")) and bool(rec.get("enabled"))
+                if enabled:
+                    out.append(
+                        ModuleStatus(
+                            module_id=mid,
+                            state=ModuleState.INSTALLED_ENABLED,
+                            reason_code=ModuleReasonCode.UNKNOWN,
+                            reason_human="Enabled.",
+                            remediation="",
+                            last_seen_at=now,
+                            fingerprint_short=fp_short,
+                            safe_auto_enabled=safe_auto_enabled,
+                            requires_admin_to_enable=requires_admin,
+                        )
+                    )
+                else:
+                    rc = ModuleReasonCode.REQUIRES_ADMIN_TO_ENABLE if bool(rec.get("requires_admin_to_enable", False)) else ModuleReasonCode.UNKNOWN
+                    out.append(
+                        ModuleStatus(
+                            module_id=mid,
+                            state=ModuleState.INSTALLED_DISABLED,
+                            reason_code=rc,
+                            reason_human=str(rec.get("reason") or "Disabled.")[:200],
+                            remediation=("Unlock admin and run /modules enable <id>." if rc == ModuleReasonCode.REQUIRES_ADMIN_TO_ENABLE else "Run /modules enable <id>."),
+                            last_seen_at=now,
+                            fingerprint_short=fp_short,
+                            safe_auto_enabled=safe_auto_enabled,
+                            requires_admin_to_enable=requires_admin,
+                        )
+                    )
+                continue
+
+            # Fallback (should be rare)
+            out.append(
+                ModuleStatus(
+                    module_id=mid,
+                    state=ModuleState.ERROR,
+                    reason_code=ModuleReasonCode.UNKNOWN,
+                    reason_human="Unable to determine module status.",
+                    remediation="Run /modules scan or check logs.",
+                    last_seen_at=now,
+                    fingerprint_short=fp_short,
+                    safe_auto_enabled=False,
+                    requires_admin_to_enable=True,
+                )
+            )
+
+        return out
+
+    def get_status(self, module_id: str, *, trace_id: str = "modules") -> ModuleStatus:
+        for st in self.list_status(trace_id=trace_id):
+            if st.module_id == module_id:
+                return st
+        return ModuleStatus(
+            module_id=str(module_id),
+            state=ModuleState.ERROR,
+            reason_code=ModuleReasonCode.UNKNOWN,
+            reason_human="Module not found.",
+            remediation="Run /modules scan to discover modules.",
+            last_seen_at=_iso_now(),
+            fingerprint_short="",
+            safe_auto_enabled=False,
+            requires_admin_to_enable=True,
+        )
+
     def scan(self, *, trace_id: str = "modules") -> Dict[str, Any]:
         """
         Scan modules folder, reconcile registry, and write runtime inventory.
@@ -308,6 +598,25 @@ class ModuleManager:
         }
         self._save_inventory_snapshot(trace_id, snapshot)
         self._emit(trace_id, "module.scan_completed", {"action": "scan", "count": len(disc)})
+
+        # Log status for visibility (safe fields only).
+        try:
+            for st in self.list_status(trace_id=trace_id):
+                self._emit(
+                    trace_id,
+                    "module.status",
+                    {
+                        "module_id": st.module_id,
+                        "state": st.state.value,
+                        "reason_code": st.reason_code.value,
+                        "remediation": st.remediation,
+                        "fingerprint": st.fingerprint_short,
+                    },
+                    severity=EventSeverity.INFO,
+                )
+        except Exception:
+            pass
+
         return {"ok": True, "found": sorted(list(disc.keys())), "registry": raw.get("modules")}
 
     def enable(self, module_id: str, *, trace_id: str = "modules") -> bool:
