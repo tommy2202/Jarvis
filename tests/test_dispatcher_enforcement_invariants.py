@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+"""
+Enforcement invariants (lock-in tests).
+
+WHY THIS FILE EXISTS:
+These tests protect the security model: execution must be deny-by-default and
+must flow through the dispatcher + capability enforcement path. If any of these
+regress, web/UI bypasses or config drift could reintroduce enforcement leaks.
+"""
+
+from pathlib import Path
+
 from jarvis.core.capabilities.audit import CapabilityAuditLogger
 from jarvis.core.capabilities.engine import CapabilityEngine
 from jarvis.core.capabilities.loader import default_config_dict, validate_and_normalize
@@ -9,12 +20,11 @@ from jarvis.core.events import EventLogger
 from jarvis.core.module_registry import LoadedModule, ModuleRegistry
 from jarvis.core.security import AdminSession, PermissionPolicy, SecurityManager
 from jarvis.core.secure_store import SecureStore
-from jarvis.core.crypto import generate_usb_master_key_bytes, write_usb_key
 
 
 def _security(tmp_path) -> tuple[SecurityManager, SecureStore]:
-    usb = tmp_path / "usb.bin"
-    write_usb_key(str(usb), generate_usb_master_key_bytes())
+    # No physical USB key required: point to a missing path to simulate KEY_MISSING.
+    usb = tmp_path / "usb_missing.bin"
     store = SecureStore(usb_key_path=str(usb), store_path=str(tmp_path / "store.enc"))
     sec = SecurityManager(secure_store=store, admin_session=AdminSession(timeout_seconds=9999))
     return sec, store
@@ -50,9 +60,15 @@ def _dispatcher(tmp_path, *, cap_cfg) -> tuple[Dispatcher, dict]:
     return disp, called
 
 
-def test_unknown_intent_denied_by_default_and_handler_not_called(tmp_path):
+def test_unknown_intent_denied(tmp_path):
+    # Invariant: unknown/unregistered intents are denied-by-default.
     cfg = validate_and_normalize(default_config_dict())
     disp, called = _dispatcher(tmp_path, cap_cfg=cfg)
+
+    # Capability decision must deny unknown intent deterministically.
+    eng = disp.capability_engine
+    dec = eng.evaluate(RequestContext(trace_id="t", source=RequestSource.cli, intent_id="unknown.intent", secure_store_mode="KEY_MISSING"))
+    assert dec.allowed is False
 
     r = disp.dispatch("t", "unknown.intent", "mod", {}, {"source": "cli"})
     assert r.ok is False
@@ -62,6 +78,7 @@ def test_unknown_intent_denied_by_default_and_handler_not_called(tmp_path):
 
 
 def test_unmapped_intent_denied_even_if_module_exists(tmp_path):
+    # Invariant: dispatcher must deny any intent not mapped in capabilities.json intent_requirements.
     cfg = validate_and_normalize(default_config_dict())
     disp, called = _dispatcher(tmp_path, cap_cfg=cfg)
 
@@ -72,6 +89,7 @@ def test_unmapped_intent_denied_even_if_module_exists(tmp_path):
 
 
 def test_cap_admin_action_hard_rule_denies_without_admin_even_if_config_allows(tmp_path):
+    # Invariant: CAP_ADMIN_ACTION is hard-admin-only (code-level rule); config cannot relax it.
     raw = default_config_dict()
     # Attempt to "allow" CAP_ADMIN_ACTION in config (should not matter)
     raw["capabilities"]["CAP_ADMIN_ACTION"]["requires_admin"] = False
@@ -88,6 +106,7 @@ def test_cap_admin_action_hard_rule_denies_without_admin_even_if_config_allows(t
 
 
 def test_web_source_cannot_perform_admin_actions_even_if_admin(tmp_path):
+    # Invariant: web is never allowed to perform CAP_ADMIN_ACTION (hard source rule).
     raw = default_config_dict()
     raw["intent_requirements"]["x.admin"] = ["CAP_ADMIN_ACTION"]
     cfg = validate_and_normalize(raw)
@@ -100,6 +119,7 @@ def test_web_source_cannot_perform_admin_actions_even_if_admin(tmp_path):
 
 
 def test_shutting_down_restricts_to_safe_caps(tmp_path):
+    # Invariant: shutdown mode restricts execution to a minimal allowlist of safe capabilities.
     raw = default_config_dict()
     raw["intent_requirements"]["x.subproc"] = ["CAP_RUN_SUBPROCESS"]
     raw["intent_requirements"]["x.audio"] = ["CAP_AUDIO_OUTPUT"]
@@ -114,6 +134,7 @@ def test_shutting_down_restricts_to_safe_caps(tmp_path):
 
 
 def test_dispatcher_blocks_execution_when_denied(tmp_path):
+    # Invariant: when denied, dispatcher must not call handlers (no partial execution).
     cfg = validate_and_normalize(default_config_dict())
     disp, called = _dispatcher(tmp_path, cap_cfg=cfg)
 
@@ -123,6 +144,7 @@ def test_dispatcher_blocks_execution_when_denied(tmp_path):
 
 
 def test_secure_store_key_missing_denies_requires_secrets_caps(tmp_path):
+    # Invariant: requires_secrets capabilities are denied when secure store key is missing.
     raw = default_config_dict()
     raw["intent_requirements"]["x.admin"] = ["CAP_ADMIN_ACTION"]
     cfg = validate_and_normalize(raw)
@@ -135,6 +157,7 @@ def test_secure_store_key_missing_denies_requires_secrets_caps(tmp_path):
 
 
 def test_module_contract_incomplete_denied(tmp_path):
+    # Invariant: non-core intents must include contract metadata or dispatcher denies.
     sec, store = _security(tmp_path)
     raw = default_config_dict()
     raw["intent_requirements"]["x.ok"] = []
@@ -168,4 +191,15 @@ def test_module_contract_incomplete_denied(tmp_path):
     assert r.ok is False
     assert called["n"] == 0
     assert "module contract incomplete" in (r.reply or "").lower()
+
+
+def test_audit_log_appends_on_denies(tmp_path):
+    # Invariant: audit logging can append without error (privacy-safe, local).
+    cfg = validate_and_normalize(default_config_dict())
+    audit_path = Path(tmp_path) / "audit.jsonl"
+    eng = CapabilityEngine(cfg=cfg, audit=CapabilityAuditLogger(path=str(audit_path)), logger=None)
+
+    _ = eng.evaluate(RequestContext(trace_id="t", source=RequestSource.cli, intent_id="unknown.intent", secure_store_mode="KEY_MISSING"))
+    assert audit_path.exists()
+    assert audit_path.stat().st_size > 0
 
