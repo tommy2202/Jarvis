@@ -50,6 +50,51 @@ class PermissionPolicy:
     def for_intent(self, intent_id: str) -> Dict[str, Any]:
         return self.intents.get(intent_id, {})
 
+    # ---- Legacy compatibility (DO NOT use for enforcement) ----
+    def evaluate_via_enforcement(self, *, ctx, capability_engine, policy_engine=None) -> bool:  # noqa: ANN001
+        """
+        Deprecated adapter: compute allow/deny using the authoritative capability+policy path.
+
+        This must never return True if capability or policy would deny.
+        """
+        try:
+            cap_dec = capability_engine.evaluate(ctx)
+            if not bool(getattr(cap_dec, "allowed", False)):
+                return False
+        except Exception:
+            return False
+
+        if policy_engine is None:
+            return True
+
+        try:
+            from jarvis.core.policy.models import PolicyContext
+
+            pctx = PolicyContext(
+                trace_id=str(getattr(ctx, "trace_id", "legacy")),
+                intent_id=str(getattr(ctx, "intent_id", "")),
+                required_capabilities=list(getattr(cap_dec, "required_capabilities", []) or []),
+                source=str(getattr(getattr(ctx, "source", None), "value", getattr(ctx, "source", "cli"))),
+                client_id=getattr(ctx, "client_id", None),
+                client_ip=None,
+                is_admin=bool(getattr(ctx, "is_admin", False)),
+                safe_mode=bool(getattr(ctx, "safe_mode", False)),
+                shutting_down=bool(getattr(ctx, "shutting_down", False)),
+                secure_store_mode=getattr(ctx, "secure_store_mode", None),
+                tags=[],
+                resource_over_budget=None,
+                confirmed=bool(getattr(ctx, "confirmed", False)),
+            )
+            pdec = policy_engine.evaluate(pctx)
+            # If policy requires confirmation, treat as not allowed for execution.
+            if not bool(getattr(pdec, "allowed", False)):
+                return False
+            if bool(getattr(pdec, "require_confirmation", False)):
+                return False
+            return True
+        except Exception:
+            return False
+
 
 @dataclass
 class SecurityManager:

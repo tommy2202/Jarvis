@@ -10,6 +10,10 @@ MODULE_META = {
     "default_intent": "music.play",
     "required_args": ["song", "service"],
     "resource_intensive": False,
+    # Contract metadata (enforced by dispatcher)
+    "resource_class": "default",
+    "execution_mode": "inline",
+    "required_capabilities": ["CAP_AUDIO_OUTPUT"],
 }
 
 

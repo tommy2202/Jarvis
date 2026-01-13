@@ -9,6 +9,9 @@ from jarvis.core.module_registry import ModuleRegistry
 from jarvis.core.security import AdminSession, PermissionPolicy, SecurityManager
 from jarvis.core.secure_store import SecureStore
 from jarvis.core.crypto import generate_usb_master_key_bytes, write_usb_key
+from jarvis.core.capabilities.audit import CapabilityAuditLogger
+from jarvis.core.capabilities.engine import CapabilityEngine
+from jarvis.core.capabilities.loader import default_config_dict, validate_and_normalize
 
 
 class DummyLogger:
@@ -34,7 +37,9 @@ def test_stage_a_match_and_confirmation(tmp_path):
     stage_a = StageAIntentRouter(intents, threshold=0.55)
     stage_b = StageBLLMRouter(LLMConfig(mock_mode=True))
     policy = PermissionPolicy(intents={"music.play": {"requires_admin": False, "resource_intensive": False}})
-    dispatcher = Dispatcher(registry=registry, policy=policy, security=sec, event_logger=EventLogger(str(tmp_path / "e.jsonl")), logger=DummyLogger())
+    caps_cfg = validate_and_normalize(default_config_dict())
+    eng = CapabilityEngine(cfg=caps_cfg, audit=CapabilityAuditLogger(path=str(tmp_path / "security.jsonl")), logger=None)
+    dispatcher = Dispatcher(registry=registry, policy=policy, security=sec, event_logger=EventLogger(str(tmp_path / "e.jsonl")), logger=DummyLogger(), capability_engine=eng, secure_store=sec.secure_store)
 
     jarvis = JarvisApp(
         stage_a=stage_a,
@@ -61,7 +66,9 @@ def test_admin_gating_denies_without_admin(tmp_path):
     stage_a = StageAIntentRouter(intents, threshold=0.55)
     stage_b = StageBLLMRouter(LLMConfig(mock_mode=True))
     policy = PermissionPolicy(intents={"anime_dubbing.run": {"requires_admin": True, "resource_intensive": True}})
-    dispatcher = Dispatcher(registry=registry, policy=policy, security=sec, event_logger=EventLogger(str(tmp_path / "e.jsonl")), logger=DummyLogger())
+    caps_cfg = validate_and_normalize(default_config_dict())
+    eng = CapabilityEngine(cfg=caps_cfg, audit=CapabilityAuditLogger(path=str(tmp_path / "security.jsonl")), logger=None)
+    dispatcher = Dispatcher(registry=registry, policy=policy, security=sec, event_logger=EventLogger(str(tmp_path / "e.jsonl")), logger=DummyLogger(), capability_engine=eng, secure_store=sec.secure_store)
 
     jarvis = JarvisApp(
         stage_a=stage_a,
@@ -86,7 +93,9 @@ def test_llm_unknown_intent_refused(tmp_path):
     stage_a = StageAIntentRouter([], threshold=0.55)
     stage_b = StageBLLMRouter(LLMConfig(mock_mode=True))
     policy = PermissionPolicy(intents={"music.play": {"requires_admin": False, "resource_intensive": False}})
-    dispatcher = Dispatcher(registry=registry, policy=policy, security=sec, event_logger=EventLogger(str(tmp_path / "e.jsonl")), logger=DummyLogger())
+    caps_cfg = validate_and_normalize(default_config_dict())
+    eng = CapabilityEngine(cfg=caps_cfg, audit=CapabilityAuditLogger(path=str(tmp_path / "security.jsonl")), logger=None)
+    dispatcher = Dispatcher(registry=registry, policy=policy, security=sec, event_logger=EventLogger(str(tmp_path / "e.jsonl")), logger=DummyLogger(), capability_engine=eng, secure_store=sec.secure_store)
 
     jarvis = JarvisApp(
         stage_a=stage_a,

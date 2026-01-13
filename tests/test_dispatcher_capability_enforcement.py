@@ -30,7 +30,12 @@ def test_dispatcher_blocks_execution_when_capability_denied(tmp_path, monkeypatc
         return {"ok": True}
 
     reg = ModuleRegistry()
-    reg._modules_by_id["music"] = LoadedModule(module_path="test", module_id="music", meta={}, handler=handler)  # noqa: SLF001
+    reg._modules_by_id["music"] = LoadedModule(  # noqa: SLF001
+        module_path="test",
+        module_id="music",
+        meta={"resource_class": "default", "execution_mode": "inline", "required_capabilities": ["CAP_ADMIN_ACTION"]},
+        handler=handler,
+    )
 
     policy = PermissionPolicy(intents={"music.play": {"requires_admin": False, "resource_intensive": False, "network_access": False}})
 
@@ -64,7 +69,12 @@ def test_dispatcher_allows_when_capability_allows(tmp_path, monkeypatch):
         return {"ok": True}
 
     reg = ModuleRegistry()
-    reg._modules_by_id["music"] = LoadedModule(module_path="test", module_id="music", meta={}, handler=handler)  # noqa: SLF001
+    reg._modules_by_id["music"] = LoadedModule(  # noqa: SLF001
+        module_path="test",
+        module_id="music",
+        meta={"resource_class": "default", "execution_mode": "inline", "required_capabilities": ["CAP_AUDIO_OUTPUT"]},
+        handler=handler,
+    )
 
     policy = PermissionPolicy(intents={"music.play": {"requires_admin": False, "resource_intensive": False, "network_access": False}})
     cfg = validate_and_normalize(default_config_dict())

@@ -56,7 +56,8 @@ class PolicyEngine:
             return dec
 
         if not bool(self.cfg.enabled):
-            dec = PolicyDecision(allowed=True, final_reason="Policy disabled.", severity=PolicySeverity.INFO)
+            # Policy is restriction-only; disabled means "no additional restrictions".
+            dec = PolicyDecision(allowed=True, final_reason="No additional policy restrictions (disabled).", severity=PolicySeverity.INFO)
             self._emit(ctx, dec, minimal=True)
             return dec
 
@@ -93,7 +94,7 @@ class PolicyEngine:
                 mods = merge_modifications(mods, rule.modify.model_dump())
 
             if rule.effect == PolicyEffect.ALLOW:
-                # allow does not override later denies; keep scanning
+                # Restriction-only semantics: ALLOW is informational and never grants beyond capabilities.
                 continue
 
         # Defaults (deny unknown/high-sensitivity without admin) are enforced by capability engine;
