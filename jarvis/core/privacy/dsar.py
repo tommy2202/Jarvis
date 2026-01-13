@@ -16,7 +16,7 @@ import zipfile
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
-from jarvis.core.events import redact
+from jarvis.core.privacy.redaction import privacy_redact
 from jarvis.core.events.models import EventSeverity
 from jarvis.core.privacy.models import DataCategory
 from jarvis.core.privacy.models import DSARRequest, DsarRequestType, DsarStatus
@@ -232,12 +232,7 @@ class DsarEngine:
                         obj = json.loads(line)
                     except Exception:
                         continue
-                    safe = redact(obj)
-                    # Avoid accidentally including raw messages if present.
-                    if isinstance(safe, dict):
-                        safe.pop("message", None)
-                        safe.pop("messages", None)
-                        safe.pop("text", None)
+                    safe = privacy_redact(obj)
                     out_lines.append(json.dumps(safe, ensure_ascii=False))
         except Exception:
             return ""

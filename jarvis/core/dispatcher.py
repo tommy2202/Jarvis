@@ -67,6 +67,7 @@ class Dispatcher:
         event_bus: Any = None,
         policy_engine: Any = None,
         module_manager: Any = None,
+        privacy_store: Any = None,
     ):
         self.registry = registry
         self.policy = policy
@@ -81,6 +82,7 @@ class Dispatcher:
         self.event_bus = event_bus
         self.policy_engine = policy_engine
         self.module_manager = module_manager
+        self.privacy_store = privacy_store
 
     def _policy_engine(self) -> Any:
         # For backwards compatibility with existing wiring, allow the capability engine
@@ -478,6 +480,55 @@ class Dispatcher:
             if pmods:
                 context = dict(context or {})
                 context["policy"] = redact(pmods)
+            # Privacy gate (persistence only): if this execution would store personal data,
+            # require consent; otherwise force ephemeral mode (no persistence).
+            # Capability/policy enforcement remains authoritative for allow/deny.
+            try:
+                ps = getattr(self, "privacy_store", None)
+                if ps is not None:
+                    ctx2 = dict(context or {})
+                    scopes = []
+                    if isinstance(ctx2.get("privacy_scopes"), list):
+                        scopes.extend([str(x).lower() for x in ctx2.get("privacy_scopes") if str(x)])
+                    if isinstance((mod.meta or {}).get("privacy_scopes"), list):
+                        scopes.extend([str(x).lower() for x in (mod.meta or {}).get("privacy_scopes") if str(x)])
+                    scopes = sorted(set([s for s in scopes if s]))
+                    if scopes:
+                        user_id = str(ctx2.get("user_id") or "default")
+                        missing = []
+                        restricted = []
+                        for sc in scopes:
+                            try:
+                                if bool(getattr(ps, "is_scope_restricted")(user_id=user_id, scope=sc)):
+                                    restricted.append(sc)
+                                    continue
+                            except Exception:
+                                pass
+                            try:
+                                c = getattr(ps, "get_consent")(user_id=user_id, scope=sc)
+                                if not (c and bool(getattr(c, "granted", False))):
+                                    missing.append(sc)
+                            except Exception:
+                                missing.append(sc)
+                        if missing or restricted:
+                            ctx2["ephemeral"] = True
+                            ctx2["ephemeral_reason"] = {"missing_consent": missing, "restricted": restricted}
+                            context = ctx2
+                            if self.event_bus is not None:
+                                try:
+                                    self.event_bus.publish_nowait(
+                                        BaseEvent(
+                                            event_type="privacy.ephemeral_forced",
+                                            trace_id=trace_id,
+                                            source_subsystem=SourceSubsystem.dispatcher,
+                                            severity=EventSeverity.WARN,
+                                            payload={"intent_id": intent_id, "module_id": module_id, "scopes": scopes, "missing": missing, "restricted": restricted},
+                                        )
+                                    )
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
             self.event_logger.log(trace_id, "dispatch.execute", {"module_id": module_id, "intent_id": intent_id})
             contract = self._resolve_intent_contract(mod.meta or {}, intent_id)
             exec_mode = str(contract.get("execution_mode") or "inline").lower()

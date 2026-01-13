@@ -360,6 +360,10 @@ def main() -> None:
         max_bytes=int(cfg_obj.security.secure_store_max_bytes),
         read_only=bool(cfg_obj.security.secure_store_read_only),
     )
+    try:
+        privacy_store.attach_secure_store(secure_store)
+    except Exception:
+        pass
     security = SecurityManager(secure_store=secure_store, admin_session=AdminSession(timeout_seconds=int(cfg_obj.security.admin_session_timeout_seconds)))
     telemetry.attach(secure_store=secure_store, security_manager=security)
     runtime_state.attach(security_manager=security, secure_store=secure_store)

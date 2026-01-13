@@ -299,6 +299,29 @@ What’s never recorded in the inventory:
 Config:
 - `config/privacy.json` (default consent scopes, retention by category/sensitivity, data minimization toggles)
 
+### Controls mapping (GDPR / UK GDPR / CCPA / NIST PF)
+
+- **GDPR rights covered**:
+
+  - **Access / Portability** (Art. 15 / Art. 20): DSAR export creates a ZIP with `DataRecord` metadata, redacted logs, and optionally allowlisted artifacts.
+  - **Erasure** (Art. 17): DSAR delete removes user-owned artifacts/references per configuration (audit timeline remains append-only).
+  - **Rectification** (Art. 16): DSAR correct updates user profile fields (and supports hook-based correction for any future memory stores).
+  - **Restriction** (Art. 18): DSAR restrict marks processing disabled for specified scopes (e.g. memory).
+
+- **UK GDPR note**: Jarvis’s DSAR workflows are designed to align with UK GDPR’s substantially similar rights model; implementation remains local-only and offline-first.
+
+- **CCPA-style rights** (conceptual coverage):
+
+  - **Know**: DSAR export (inventory + allowlisted artifacts)
+  - **Delete**: DSAR delete
+  - **Correct**: DSAR correct
+
+- **NIST Privacy Framework mapping**:
+
+  - **ID.IM (Inventory and Mapping)**: `runtime/privacy.sqlite` data inventory (`DataRecord`)
+  - **CT.DM (Data Management)**: retention engine + deletion actions
+  - **GV.PO (Policies/Processes)**: `config/privacy.json` controls (consent/retention/minimization)
+
 ## Capabilities (unified policy enforcement)
 
 Jarvis uses a **central capability model** as the source of truth for permissions. Capabilities are **independent of intents/modules** and are enforced **only in the dispatcher**.

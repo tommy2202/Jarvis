@@ -20,6 +20,7 @@ from jarvis.core.errors import AdminRequiredError
 from jarvis.core.recovery import RecoveryPolicy, RecoveryConfig
 from jarvis.core.circuit_breaker import BreakerRegistry
 from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+from jarvis.core.privacy.redaction import privacy_redact
 
 
 class StateTransitionError(RuntimeError):
@@ -584,8 +585,93 @@ class JarvisRuntime:
         self._enqueue(RuntimeEvent(trace_id=tid, source=source, type=typ, payload=redact(payload)))
 
     def _enqueue(self, ev: RuntimeEvent) -> None:
-        self._writer.write({"ts": ev.timestamp, "trace_id": ev.trace_id, "event": ev.type.value, "source": ev.source, "payload": ev.payload})
+        # Persist a privacy-minimized envelope (never raw text/transcripts by default).
+        persist_payload = {"ts": ev.timestamp, "trace_id": ev.trace_id, "event": ev.type.value, "source": ev.source, "payload": self._minimize_payload_for_persistence(ev)}
+        self._writer.write(persist_payload)
         self._q.put(ev)
+
+    def _minimize_payload_for_persistence(self, ev: RuntimeEvent) -> Dict[str, Any]:
+        p = dict(ev.payload or {})
+        # Always remove raw text-like fields from persisted state machine logs.
+        if "text" in p:
+            txt = str(p.get("text") or "")
+            p.pop("text", None)
+            p["text_len"] = len(txt)
+        # never persist audio bytes
+        if "audio" in p:
+            p.pop("audio", None)
+            p["audio_present"] = True
+        # Transcript storage is handled separately and consent-gated.
+        if ev.type == EventType.TranscriptionReady:
+            txt = str(ev.payload.get("text") or "")
+            self._maybe_store_transcript(trace_id=str(ev.trace_id), transcript=txt)
+        return privacy_redact(p)
+
+    def _maybe_store_transcript(self, *, trace_id: str, transcript: str) -> None:
+        """
+        Consent-gated + retention-limited transcript storage.
+
+        Default behavior: disabled (do not store raw transcripts).
+        If enabled via privacy.json and consented, stores encrypted blob in SecureStore and registers a DataRecord.
+        """
+        if not transcript:
+            return
+        ps = getattr(self, "privacy_store", None)
+        if ps is None:
+            return
+        # config gate
+        try:
+            cfg = ps._privacy_cfg_raw()  # noqa: SLF001
+            dm = (cfg.get("data_minimization") or {}) if isinstance(cfg, dict) else {}
+            if bool(dm.get("disable_persistent_transcripts", True)):
+                return
+        except Exception:
+            return
+        # consent gate
+        try:
+            c = ps.get_consent(user_id="default", scope="transcripts")
+            if not (c and bool(c.granted)):
+                return
+        except Exception:
+            return
+        # retention: use TRANSCRIPT policy to compute expires_at
+        try:
+            from jarvis.core.privacy.models import DataCategory, LawfulBasis, Sensitivity, StorageKind, DataRecord
+
+            pol = ps.resolve_retention_policy(data_category=DataCategory.TRANSCRIPT, sensitivity=Sensitivity.HIGH)
+            expires = pol.resolve_expires_at(created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        except Exception:
+            expires = None
+        # store encrypted in secure store if available; otherwise fail-safe: do not store
+        key = f"transcript:{trace_id}"
+        if self.secure_store is None:
+            return
+        try:
+            self.secure_store.set(key, transcript, trace_id=str(trace_id))
+        except Exception:
+            return
+        # register inventory record (no content)
+        try:
+            from jarvis.core.privacy.models import DataCategory, DataRecord, LawfulBasis, Sensitivity, StorageKind
+
+            ps.register_record(
+                DataRecord(
+                    user_id="default",
+                    data_category=DataCategory.TRANSCRIPT,
+                    sensitivity=Sensitivity.HIGH,
+                    lawful_basis=LawfulBasis.CONSENT,
+                    created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    expires_at=expires,
+                    storage_kind=StorageKind.OTHER,
+                    storage_ref=f"secure_store:{key}",
+                    storage_ref_hash="",
+                    trace_id=str(trace_id),
+                    producer="runtime.transcript",
+                    tags={"scope": "transcripts"},
+                )
+            )
+        except Exception:
+            pass
 
     def _log_sm(self, name: str, details: Dict[str, Any]) -> None:
         self._writer.write({"ts": time.time(), "trace_id": self._last_trace_id or "sm", "event": name, "details": redact(details)})

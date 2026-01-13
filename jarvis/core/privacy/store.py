@@ -41,6 +41,7 @@ class PrivacyStore:
         self.config = config_manager
         self.event_bus = event_bus
         self.logger = logger
+        self.secure_store: Any = None
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         self._init_db()
@@ -59,6 +60,9 @@ class PrivacyStore:
 
     def attach_event_bus(self, event_bus: Any) -> None:
         self.event_bus = event_bus
+
+    def attach_secure_store(self, secure_store: Any) -> None:
+        self.secure_store = secure_store
 
     # ---- sqlite helpers ----
     def _conn(self) -> sqlite3.Connection:
@@ -650,6 +654,15 @@ class PrivacyStore:
             return "anonymized"
 
         # default: delete
+        if sk == "OTHER" and ref_norm.startswith("secure_store:"):
+            key = ref_norm.split("secure_store:", 1)[1]
+            if self.secure_store is not None:
+                try:
+                    self.secure_store.delete(key, trace_id="privacy")
+                except Exception:
+                    pass
+            self._delete_data_record(record_id=str(row["record_id"]))
+            return "deleted"
         if sk == "FILE" and ref_norm and os.path.exists(ref) and os.path.isfile(ref):
             try:
                 os.remove(ref)

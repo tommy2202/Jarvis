@@ -27,6 +27,7 @@ class DataCategory(str, Enum):
     CONFIG = "CONFIG"
     MODULES = "MODULES"
     JOB_ARTIFACT = "JOB_ARTIFACT"
+    TRANSCRIPT = "TRANSCRIPT"
 
 
 class Sensitivity(str, Enum):
@@ -260,6 +261,7 @@ class PrivacyConfigFile(BaseModel):
             {"data_category": "CONFIG", "sensitivity": "LOW", "ttl_days": 365, "deletion_action": "delete", "review_required": True},
             {"data_category": "MODULES", "sensitivity": "LOW", "ttl_days": 90, "deletion_action": "delete", "review_required": False},
             {"data_category": "JOB_ARTIFACT", "sensitivity": "MEDIUM", "ttl_days": 30, "deletion_action": "delete", "review_required": True},
+            {"data_category": "TRANSCRIPT", "sensitivity": "HIGH", "ttl_days": 7, "deletion_action": "delete", "review_required": False},
         ]
     )
 

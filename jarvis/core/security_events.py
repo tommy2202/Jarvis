@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from jarvis.core.events import redact
+from jarvis.core.privacy.redaction import privacy_redact
 
 
 @dataclass(frozen=True)
@@ -35,7 +35,7 @@ class SecurityAuditLogger:
             "ip": ip,
             "endpoint": endpoint,
             "outcome": outcome,
-            "details": redact(details or {}),
+            "details": privacy_redact(details or {}),
         }
         line = json.dumps(payload, ensure_ascii=False)
         with self._lock:
