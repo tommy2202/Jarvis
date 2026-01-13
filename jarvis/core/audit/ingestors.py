@@ -94,6 +94,14 @@ def audit_from_core_event(ev: Any) -> Optional[AuditEvent]:
         allowed = bool(payload.get("allowed", True))
         outcome = AuditOutcome.success if allowed else AuditOutcome.denied
         summary = f"Policy decision: {'allowed' if allowed else 'denied'} ({payload.get('intent_id')})"
+    elif et.startswith("module."):
+        # Module lifecycle / configuration changes (manifest/registry).
+        category = AuditCategory.config
+        action = et
+        # outcomes for explicit deny events
+        if "denied" in et or "disabled" in et or "missing" in et:
+            outcome = AuditOutcome.denied if "denied" in et else AuditOutcome.success
+        summary = f"Module: {et.split('.', 1)[1]} ({payload.get('module_id')})"
 
     actor_source = ActorSource.system
     if src in {"web", "ui", "cli", "voice"}:

@@ -156,7 +156,8 @@ class JarvisApp:
             trace_id = uuid.uuid4().hex
             self.event_logger.log(trace_id, "request.received", {"message": message, "client": client or {}})
 
-            key = self._confirmation_key(source, client)
+            request_source = str(source or "cli")
+            key = self._confirmation_key(request_source, client)
             normalized = str(message or "").strip().lower()
             if normalized in {"confirm", "cancel"}:
                 pending = self._consume_confirmation(key)
@@ -317,7 +318,7 @@ class JarvisApp:
 
             chosen_intent_id: Optional[str] = a.intent_id
             chosen_args: Dict[str, Any] = dict(a.args or {})
-            source = "stage_a"
+            router_source = "stage_a"
             conf = float(a.confidence)
 
             # Stage B fallback conditions
@@ -335,7 +336,7 @@ class JarvisApp:
                 if b and b.intent in self.intent_config_by_id:
                     chosen_intent_id = b.intent
                     chosen_args = dict(b.args or {})
-                    source = "stage_b"
+                    router_source = "stage_b"
                     conf = float(b.confidence)
                 else:
                     # Never execute unknown intents
@@ -359,14 +360,14 @@ class JarvisApp:
                 self.event_logger.log(trace_id, "router.refused", {"reason": "intent not in registry", "intent_id": chosen_intent_id})
                 if self.telemetry is not None:
                     try:
-                        self.telemetry.record_latency("routing_latency_ms", (time.time() - t_route0) * 1000.0, tags={"source": source})
+                        self.telemetry.record_latency("routing_latency_ms", (time.time() - t_route0) * 1000.0, tags={"source": router_source})
                     except Exception:
                         pass
                 return MessageResponse(
                     trace_id=trace_id,
                     reply="I can’t execute unknown intents.",
                     intent_id="unknown",
-                    intent_source=source,
+                    intent_source=router_source,
                     confidence=conf,
                     requires_followup=False,
                     followup_question=None,
@@ -390,7 +391,7 @@ class JarvisApp:
             dispatch_context = {"client": client or {}, "source": source, "safe_mode": bool(safe_mode), "shutting_down": bool(shutting_down)}
             if self.telemetry is not None:
                 try:
-                    self.telemetry.record_latency("routing_latency_ms", (time.time() - t_route0) * 1000.0, tags={"source": source})
+                    self.telemetry.record_latency("routing_latency_ms", (time.time() - t_route0) * 1000.0, tags={"source": router_source})
                 except Exception:
                     pass
             t_disp0 = time.time()
@@ -413,7 +414,7 @@ class JarvisApp:
                         trace_id=trace_id,
                         reply=str(dr.reply or "Confirmation required."),
                         intent_id=chosen_intent_id,
-                        intent_source=source,
+                    intent_source=router_source,
                         confidence=conf,
                         requires_followup=True,
                         followup_question="Reply 'confirm' to proceed or 'cancel' to abort.",
@@ -423,7 +424,7 @@ class JarvisApp:
                     trace_id=trace_id,
                     reply=dr.reply,
                     intent_id=chosen_intent_id,
-                    intent_source=source,
+                    intent_source=router_source,
                     confidence=conf,
                     requires_followup=False,
                     followup_question=None,
@@ -439,7 +440,7 @@ class JarvisApp:
                 trace_id=trace_id,
                 reply=reply,
                 intent_id=chosen_intent_id,
-                intent_source=source,
+                intent_source=router_source,
                 confidence=conf,
                 requires_followup=requires_followup,
                 followup_question=followup_question,

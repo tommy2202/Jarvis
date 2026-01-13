@@ -32,7 +32,12 @@ def test_require_confirmation_blocks_until_confirm(tmp_path):
 
     from jarvis.core.module_registry import LoadedModule
 
-    reg._modules_by_id["mod"] = LoadedModule(module_path="test.mod", module_id="mod", handler=handler, meta={"id": "mod", "resource_intensive": False})  # type: ignore[attr-defined]
+    reg._modules_by_id["mod"] = LoadedModule(  # type: ignore[attr-defined]
+        module_path="test.mod",
+        module_id="mod",
+        handler=handler,
+        meta={"id": "mod", "resource_intensive": False, "resource_class": "default", "execution_mode": "inline", "required_capabilities": []},
+    )
 
     policy = PermissionPolicy(intents={"intent.x": {"requires_admin": False}})
     # Use default capability definitions, override intent requirements for our intent.
@@ -43,9 +48,18 @@ def test_require_confirmation_blocks_until_confirm(tmp_path):
     caps_cfg = validate_and_normalize(raw_caps)
     cap_engine = CapabilityEngine(cfg=caps_cfg, audit=CapabilityAuditLogger(path=str(tmp_path / "sec.jsonl")), logger=None, event_bus=None)
     pol_cfg = PolicyConfigFile.model_validate({"enabled": True, "rules": [{"id": "confirm", "priority": 1, "effect": "REQUIRE_CONFIRMATION", "match": {"intent_id_in": ["intent.x"]}, "reason": "Confirm needed"}]})
-    cap_engine.policy_engine = PolicyEngine(cfg=pol_cfg)
+    pol_engine = PolicyEngine(cfg=pol_cfg)
 
-    disp = Dispatcher(registry=reg, policy=policy, security=security, event_logger=EventLogger(str(tmp_path / "events.jsonl")), logger=type("L", (), {"error": lambda *_a, **_k: None})(), capability_engine=cap_engine, secure_store=store)
+    disp = Dispatcher(
+        registry=reg,
+        policy=policy,
+        security=security,
+        event_logger=EventLogger(str(tmp_path / "events.jsonl")),
+        logger=type("L", (), {"error": lambda *_a, **_k: None})(),
+        capability_engine=cap_engine,
+        policy_engine=pol_engine,
+        secure_store=store,
+    )
 
     # Jarvis app
     stage_a = StageAIntentRouter([StageAIntent(id="intent.x", module_id="mod", keywords=["do"], required_args=[])], threshold=0.0)

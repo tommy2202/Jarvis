@@ -285,6 +285,49 @@ def create_app(
         pctx = PolicyContext(trace_id=trace_id, intent_id=intent_id, source=src, is_admin=is_admin, required_capabilities=list(req_caps or []))
         return pe.evaluate(pctx).model_dump()
 
+    # ---- Modules API (authenticated; admin required for enable/disable) ----
+    @app.get("/v1/modules")
+    async def modules_list(request: Request):
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="Runtime unavailable.")
+        return runtime.get_modules_status()
+
+    @app.post("/v1/modules/scan")
+    async def modules_scan(request: Request):
+        if draining_event is not None and getattr(draining_event, "is_set", lambda: False)():
+            raise HTTPException(status_code=503, detail="Shutting down")
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="Runtime unavailable.")
+        return runtime.modules_scan()
+
+    @app.post("/v1/modules/enable")
+    async def modules_enable(request: Request):
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="Runtime unavailable.")
+        body = await request.json()
+        mid = str(body.get("module_id") or "")
+        if not mid:
+            raise HTTPException(status_code=400, detail="module_id required")
+        try:
+            ok = runtime.modules_enable(mid)
+        except PermissionDeniedError:
+            raise HTTPException(status_code=403, detail="Admin required.")
+        return {"ok": bool(ok)}
+
+    @app.post("/v1/modules/disable")
+    async def modules_disable(request: Request):
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="Runtime unavailable.")
+        body = await request.json()
+        mid = str(body.get("module_id") or "")
+        if not mid:
+            raise HTTPException(status_code=400, detail="module_id required")
+        try:
+            ok = runtime.modules_disable(mid)
+        except PermissionDeniedError:
+            raise HTTPException(status_code=403, detail="Admin required.")
+        return {"ok": bool(ok)}
+
     @app.get("/v1/audit")
     async def audit_list(
         request: Request,

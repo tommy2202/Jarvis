@@ -47,6 +47,20 @@ class ModuleRegistry:
         self._modules_by_path[module_path] = loaded
         return loaded
 
+    def register_handler(self, *, module_id: str, module_path: str, meta: Dict[str, Any], handler: Callable[..., Any]) -> LoadedModule:
+        """
+        Register an already-resolved handler without importing module code here.
+
+        WHY:
+        Manifest-based modules use an entrypoint registration function. The module
+        manager is responsible for gating enablement and invoking entrypoints;
+        this registry simply stores the resulting handler.
+        """
+        loaded = LoadedModule(module_path=str(module_path), module_id=str(module_id), meta=dict(meta or {}), handler=handler)
+        self._modules_by_id[loaded.module_id] = loaded
+        self._modules_by_path[loaded.module_path] = loaded
+        return loaded
+
     def get_by_id(self, module_id: str) -> Optional[LoadedModule]:
         return self._modules_by_id.get(module_id)
 

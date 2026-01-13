@@ -6,6 +6,9 @@ from jarvis.core.module_registry import ModuleRegistry
 from jarvis.core.security import AdminSession, PermissionPolicy, SecurityManager
 from jarvis.core.secure_store import SecureStore
 from jarvis.core.crypto import generate_usb_master_key_bytes, write_usb_key
+from jarvis.core.capabilities.audit import CapabilityAuditLogger
+from jarvis.core.capabilities.engine import CapabilityEngine
+from jarvis.core.capabilities.loader import default_config_dict, validate_and_normalize
 
 
 class DummyLogger:
@@ -24,7 +27,9 @@ def test_network_access_flag_is_admin_only_fail_safe(tmp_path):
     reg = ModuleRegistry()
     reg.register("jarvis.modules.music")
     policy = PermissionPolicy(intents={"music.play": {"requires_admin": False, "resource_intensive": False, "network_access": True}})
-    d = Dispatcher(registry=reg, policy=policy, security=sec, event_logger=EventLogger(str(tmp_path / "e.jsonl")), logger=DummyLogger())
+    caps_cfg = validate_and_normalize(default_config_dict())
+    eng = CapabilityEngine(cfg=caps_cfg, audit=CapabilityAuditLogger(path=str(tmp_path / "security.jsonl")), logger=None)
+    d = Dispatcher(registry=reg, policy=policy, security=sec, event_logger=EventLogger(str(tmp_path / "e.jsonl")), logger=DummyLogger(), capability_engine=eng, secure_store=sec.secure_store)
     res = d.dispatch("t", "music.play", "music", {"song": "x", "service": "Spotify"}, {})
     assert res.ok is False
     assert "Admin required" in res.reply

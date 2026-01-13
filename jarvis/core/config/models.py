@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class AppFileConfig(BaseModel):
@@ -246,9 +246,43 @@ class ModulesRegistryConfig(BaseModel):
 
 class ModulesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    # NOTE:
+    # This file historically stored only Stage-A routing intent config.
+    # We now also store the installed/enabled module registry here (schema_version=1),
+    # while keeping backwards compatibility with existing `intents` consumers.
+    schema_version: int = 1
     intents: List[Dict[str, Any]] = Field(default_factory=list)
-    # New (v2): module entries live here as source of truth.
-    modules: List[Dict[str, Any]] = Field(default_factory=list)
+    # Installed registry: module_id -> record (see jarvis.core.modules.models)
+    modules: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+
+    @field_validator("modules", mode="before")
+    @classmethod
+    def _coerce_modules_registry(cls, v: Any) -> Dict[str, Dict[str, Any]]:
+        """
+        Backwards compatibility:
+        - allow missing/None
+        - allow legacy list-of-dicts shape (best-effort)
+        """
+        if v is None:
+            return {}
+        if isinstance(v, dict):
+            # ensure values are dict-like
+            out: Dict[str, Dict[str, Any]] = {}
+            for k, vv in v.items():
+                if isinstance(vv, dict):
+                    out[str(k)] = dict(vv)
+            return out
+        if isinstance(v, list):
+            out2: Dict[str, Dict[str, Any]] = {}
+            for item in v:
+                if not isinstance(item, dict):
+                    continue
+                mid = item.get("module_id") or item.get("id") or item.get("module")
+                if not mid:
+                    continue
+                out2[str(mid)] = dict(item)
+            return out2
+        return {}
 
 
 class PermissionsConfig(BaseModel):

@@ -29,6 +29,7 @@ class SourceSubsystem(str, Enum):
     telemetry = "telemetry"
     recovery = "recovery"
     audit = "audit"
+    modules = "modules"
 
 
 class BaseEvent(BaseModel):
