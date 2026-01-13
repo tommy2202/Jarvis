@@ -136,6 +136,7 @@ class JarvisRuntime:
         safe_mode: bool = False,
         event_bus: Any = None,
         audit_timeline: Any = None,
+        module_manager: Any = None,
     ):
         self.cfg = cfg
         self.jarvis_app = jarvis_app
@@ -155,6 +156,7 @@ class JarvisRuntime:
         self.safe_mode = bool(safe_mode)
         self.event_bus = event_bus
         self.audit_timeline = audit_timeline
+        self.module_manager = module_manager
 
         self._writer = _JsonlWriter(persist_path)
         self._q: "queue.Queue[RuntimeEvent]" = queue.Queue()
@@ -296,12 +298,45 @@ class JarvisRuntime:
             "llm": llm,
             "voice": voice,
             "audit": self.get_audit_status(),
+            "modules": self.get_modules_status(),
             "runtime_state": rs,
             "runtime_cfg": {
                 "max_concurrent_interactions": self.cfg.max_concurrent_interactions,
                 "busy_policy": self.cfg.busy_policy,
             },
         }
+
+    def get_modules_status(self) -> Dict[str, Any]:
+        """
+        Read-only module registry status for UI/web.
+        """
+        if self.module_manager is None:
+            return {"enabled": False}
+        try:
+            raw = self.module_manager.list_registry()
+            mods = raw.get("modules") if isinstance(raw, dict) else {}
+            return {"enabled": True, "count": len(mods or {}), "modules": mods or {}}
+        except Exception:
+            return {"enabled": True, "error": "status_failed"}
+
+    def modules_scan(self) -> Dict[str, Any]:
+        if self.module_manager is None:
+            return {"ok": False, "error": "unavailable"}
+        return self.module_manager.scan(trace_id="runtime")
+
+    def modules_enable(self, module_id: str) -> bool:
+        if self.module_manager is None:
+            return False
+        if self.security_manager is not None and not bool(self.security_manager.is_admin()):
+            raise AdminRequiredError()
+        return bool(self.module_manager.enable(str(module_id), trace_id="runtime"))
+
+    def modules_disable(self, module_id: str) -> bool:
+        if self.module_manager is None:
+            return False
+        if self.security_manager is not None and not bool(self.security_manager.is_admin()):
+            raise AdminRequiredError()
+        return bool(self.module_manager.disable(str(module_id), trace_id="runtime"))
 
     def get_audit_status(self) -> Dict[str, Any]:
         if self.audit_timeline is None:

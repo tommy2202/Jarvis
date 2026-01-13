@@ -66,6 +66,7 @@ class Dispatcher:
         secure_store: Any = None,
         event_bus: Any = None,
         policy_engine: Any = None,
+        module_manager: Any = None,
     ):
         self.registry = registry
         self.policy = policy
@@ -79,6 +80,7 @@ class Dispatcher:
         self.secure_store = secure_store
         self.event_bus = event_bus
         self.policy_engine = policy_engine
+        self.module_manager = module_manager
 
     def _policy_engine(self) -> Any:
         # For backwards compatibility with existing wiring, allow the capability engine
@@ -222,6 +224,32 @@ class Dispatcher:
         return res.get("out") or {}
 
     def dispatch(self, trace_id: str, intent_id: str, module_id: str, args: Dict[str, Any], context: Dict[str, Any]) -> DispatchResult:
+        # Hard module install/enable enforcement (core intents exempt).
+        if not str(intent_id).startswith("core."):
+            mm = getattr(self, "module_manager", None)
+            if mm is not None:
+                try:
+                    if not bool(mm.is_module_enabled(str(module_id))):
+                        return self._deny(
+                            trace_id,
+                            intent_id=intent_id,
+                            module_id=module_id,
+                            denied_reason="module_not_installed_or_disabled",
+                            reply="Module is not installed/enabled.",
+                            remediation="Run /modules scan or /modules enable <id>.",
+                            details={"module_id": module_id},
+                        )
+                except Exception:
+                    # fail-safe: deny if module manager is unhealthy
+                    return self._deny(
+                        trace_id,
+                        intent_id=intent_id,
+                        module_id=module_id,
+                        denied_reason="module_gate_unavailable",
+                        reply="Module is not installed/enabled.",
+                        remediation="Run /modules scan or /modules enable <id>.",
+                    )
+
         mod = self.registry.get_by_id(module_id)
         if not mod:
             self.event_logger.log(trace_id, "dispatch.refused", {"reason": "unknown module_id", "module_id": module_id})

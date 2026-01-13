@@ -60,7 +60,7 @@ class MainWindow(ttk.Frame):
         bottom.grid(row=5, column=0, sticky="nsew", padx=8, pady=(6, 8))
 
         self.jobs = JobsPanel(bottom, on_cancel=self._on_cancel_job, on_view=self._on_view_job)
-        self.logs = LogsPanel(bottom, on_refresh=self._refresh_logs, on_export=self._export_logs)
+        self.logs = LogsPanel(bottom, on_refresh=self._refresh_logs, on_export=self._export_logs, on_modules_scan=self._on_modules_scan, on_modules_toggle=self._on_modules_toggle)
         bottom.add(self.jobs, weight=1)
         bottom.add(self.logs, weight=2)
 
@@ -174,6 +174,29 @@ class MainWindow(ttk.Frame):
             caps = getattr(self.core, "get_capabilities_snapshot", lambda: None)()
             if caps:
                 self.logs.set_capabilities_snapshot(caps)
+            mods = (self.core.get_status().get("modules") or {}) if hasattr(self.core, "get_status") else {}
+            if mods:
+                self.logs.set_modules_snapshot(mods)
+        except Exception as e:  # noqa: BLE001
+            self._ui_error(e)
+
+    def _on_modules_scan(self) -> None:
+        try:
+            fn = getattr(self.core, "modules_scan", None)
+            if callable(fn):
+                _ = fn()
+                self.convo.append(role="system", message="Modules scan started.")
+        except Exception as e:  # noqa: BLE001
+            self._ui_error(e)
+
+    def _on_modules_toggle(self, module_id: str, enable: bool) -> None:
+        try:
+            fn = getattr(self.core, "modules_enable" if enable else "modules_disable", None)
+            if callable(fn):
+                ok = bool(fn(module_id))
+                self.convo.append(role="system", message=("Module updated." if ok else "Module update failed."))
+        except JarvisError as e:
+            self.convo.append(role="system", message=e.user_message)
         except Exception as e:  # noqa: BLE001
             self._ui_error(e)
 

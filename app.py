@@ -22,6 +22,7 @@ from jarvis.core.logger import setup_logging
 from jarvis.core.module_registry import ModuleRegistry
 from jarvis.core.security import AdminSession, PermissionPolicy, SecurityManager
 from jarvis.core.setup_wizard import SetupWizard
+from jarvis.core.modules import ModuleManager
 from jarvis.core.job_manager import (
     JobManager,
     SleepArgs,
@@ -376,10 +377,34 @@ def main() -> None:
     perms_cfg = cfg_obj.permissions.model_dump()
     resp_cfg = cfg_obj.responses.model_dump()
 
+    # Module discovery + install/enable registry (no-import scanning).
+    # This runs before any module code is imported and is audit-logged via event bus.
+    module_manager = ModuleManager(
+        config_manager=config,
+        modules_root=os.path.join("jarvis", "modules"),
+        runtime_dir=str((cfg_obj.runtime_state.paths or {}).get("runtime_dir") or "runtime"),
+        event_bus=event_bus,
+        logger=logger,
+        security_manager=security,
+    )
+    try:
+        module_manager.scan(trace_id="startup")
+    except Exception as e:
+        logger.warning(f"Module scan failed (continuing): {e}")
+
     # Module registry
     registry = ModuleRegistry()
     for entry in modules_registry_cfg.get("modules") or []:
         if not isinstance(entry, dict) or not entry.get("enabled", False):
+            continue
+        # Hard gate: only load legacy modules if installed+enabled in modules.json registry.
+        # (This preserves legacy config/modules_registry.json while preventing bypass.)
+        try:
+            module_path = str(entry.get("module") or "")
+            legacy_id = module_path.split(".")[-1] if module_path else ""
+            if legacy_id and not module_manager.is_module_enabled(legacy_id):
+                continue
+        except Exception:
             continue
         registry.register(str(entry.get("module")))
 
@@ -427,6 +452,8 @@ def main() -> None:
         breaker_registry=breaker_registry,
         secure_store=secure_store,
         event_bus=event_bus,
+        policy_engine=policy_engine,
+        module_manager=module_manager,
     )
 
     jarvis = JarvisApp(
@@ -631,6 +658,7 @@ def main() -> None:
         safe_mode=safe_mode_active,
         event_bus=event_bus,
         audit_timeline=audit,
+        module_manager=module_manager,
     )
     runtime.start()
     telemetry.attach(runtime=runtime, voice_adapter=voice_adapter, tts_adapter=tts_adapter)
@@ -1039,6 +1067,37 @@ def main() -> None:
                 print(f"Exported to {path}")
                 continue
             print("Usage: /caps list | /caps show <cap_id> | /caps intent <intent_id> | /caps eval <intent_id> --source=cli|web|voice|ui --admin=true|false --safe_mode=true|false --shutting_down=true|false | /caps export <path>")
+            continue
+        if text.startswith("/modules"):
+            parts = text.split()
+            cmd = parts[1] if len(parts) >= 2 else "list"
+            if cmd == "list":
+                reg = module_manager.list_registry().get("modules") or {}
+                for mid in sorted(list(reg.keys())):
+                    r = reg.get(mid) or {}
+                    print({"module_id": mid, "installed": bool(r.get("installed")), "enabled": bool(r.get("enabled")), "requires_admin": bool(r.get("requires_admin_to_enable")), "reason": str(r.get("reason") or "")})
+                continue
+            if cmd == "scan":
+                print(module_manager.scan(trace_id="cli"))
+                continue
+            if cmd == "show" and len(parts) >= 3:
+                mid = parts[2]
+                reg = module_manager.list_registry().get("modules") or {}
+                print(reg.get(mid) or {"error": "not found"})
+                continue
+            if cmd in {"enable", "disable"} and len(parts) >= 3:
+                mid = parts[2]
+                if not security.is_admin():
+                    print("Admin required.")
+                    continue
+                ok = module_manager.enable(mid, trace_id="cli") if cmd == "enable" else module_manager.disable(mid, trace_id="cli")
+                print("OK" if ok else "Failed")
+                continue
+            if cmd == "export" and len(parts) >= 3:
+                out_path = parts[2]
+                print({"exported": module_manager.export(out_path)})
+                continue
+            print("Usage: /modules list|scan|show <id>|enable <id>|disable <id>|export <path>")
             continue
         if text.startswith("/audit"):
             from jarvis.core.audit.formatter import format_line
