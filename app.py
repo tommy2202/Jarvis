@@ -255,14 +255,13 @@ def main() -> None:
     # Privacy / GDPR core (data inventory + classification)
     from jarvis.core.privacy.store import PrivacyStore
 
-    privacy_store = PrivacyStore(db_path=os.path.join(runtime_state.paths.runtime_dir, "privacy.sqlite"), config_manager=config, audit_timeline=None, logger=logger)
+    privacy_store = PrivacyStore(db_path=os.path.join(runtime_state.paths.runtime_dir, "privacy.sqlite"), config_manager=config, event_bus=event_bus, logger=logger)
 
     # Audit Timeline (hash-chained, privacy-safe)
     from jarvis.core.audit.timeline import AuditTimelineManager
 
     audit = AuditTimelineManager(cfg=cfg_obj.audit.model_dump(), logger=logger, event_bus=event_bus, telemetry=None, ops_logger=ops, privacy_store=privacy_store)
     audit.start()
-    privacy_store.attach_audit_timeline(audit)
 
     # Re-create loggers with privacy inventory wiring for the rest of the process lifetime.
     event_logger = EventLogger("logs/events.jsonl", privacy_store=privacy_store)
@@ -1115,6 +1114,58 @@ def main() -> None:
                 print({"exported": module_manager.export(out_path)})
                 continue
             print("Usage: /modules list | /modules scan | /modules show <id> | /modules enable <id> | /modules disable <id> | /modules export <path>")
+            continue
+        if text.startswith("/privacy"):
+            parts = text.split()
+            cmd = parts[1] if len(parts) >= 2 else "status"
+            if cmd == "status":
+                prefs = privacy_store.get_preferences(user_id="default")
+                cons = {}
+                for scope in sorted((privacy_store._privacy_cfg_raw().get("default_consent_scopes") or {}).keys()):  # noqa: SLF001
+                    c = privacy_store.get_consent(user_id="default", scope=scope)
+                    cons[scope] = bool(c.granted) if c else False
+                print(
+                    {
+                        "db": os.path.join(runtime_state.paths.runtime_dir, "privacy.sqlite").replace("\\", "/"),
+                        "user_id": "default",
+                        "preferences": prefs.model_dump(),
+                        "consent": cons,
+                    }
+                )
+                continue
+            if cmd == "consent" and len(parts) >= 4 and parts[2] in {"grant", "revoke"}:
+                action = parts[2]
+                scope = parts[3]
+                is_admin = bool(security.is_admin())
+                if scope.strip().lower() in getattr(privacy_store, "SENSITIVE_SCOPES", set()) and not is_admin:
+                    print("Admin required.")
+                    continue
+                ok = privacy_store.set_consent(user_id="default", scope=scope, granted=(action == "grant"), trace_id="cli", actor_is_admin=is_admin)
+                print("OK" if ok else "Failed")
+                continue
+            if cmd == "retention" and len(parts) >= 3 and parts[2] == "list":
+                rows = privacy_store.list_retention_policies()
+                out = []
+                for p in rows:
+                    if not isinstance(p, dict):
+                        continue
+                    pid = f"{str(p.get('data_category') or '').upper()}:{str(p.get('sensitivity') or '').upper()}"
+                    out.append({"policy_id": pid, "ttl_days": p.get("ttl_days"), "keep_forever": bool(p.get("keep_forever", False))})
+                print({"policies": out})
+                continue
+            if cmd == "retention" and len(parts) >= 5 and parts[2] == "set":
+                if not security.is_admin():
+                    print("Admin required (CAP_ADMIN_ACTION).")
+                    continue
+                pid = parts[3]
+                ttl = int(parts[4])
+                try:
+                    ok = privacy_store.set_retention_ttl_days(policy_id=pid, ttl_days=ttl, trace_id="cli", actor_is_admin=True)
+                except Exception:
+                    ok = False
+                print("OK" if ok else "Failed")
+                continue
+            print("Usage: /privacy status | /privacy consent grant <scope> | /privacy consent revoke <scope> | /privacy retention list | /privacy retention set <policy_id> <ttl_days>")
             continue
         if text.startswith("/audit"):
             from jarvis.core.audit.formatter import format_line

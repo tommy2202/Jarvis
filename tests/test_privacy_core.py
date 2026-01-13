@@ -27,7 +27,7 @@ def _make_cfg(tmp_path) -> ConfigManager:
 def test_create_default_user(tmp_path):
     cm = _make_cfg(tmp_path)
     db_path = tmp_path / "runtime" / "privacy.sqlite"
-    ps = PrivacyStore(db_path=str(db_path), config_manager=cm, audit_timeline=None, logger=_L())
+    ps = PrivacyStore(db_path=str(db_path), config_manager=cm, event_bus=None, logger=_L())
     u = ps.get_or_create_default_user()
     assert u.user_id == "default"
     assert u.is_default is True
@@ -36,7 +36,7 @@ def test_create_default_user(tmp_path):
 def test_register_data_record(tmp_path):
     cm = _make_cfg(tmp_path)
     db_path = tmp_path / "runtime" / "privacy.sqlite"
-    ps = PrivacyStore(db_path=str(db_path), config_manager=cm, audit_timeline=None, logger=_L())
+    ps = PrivacyStore(db_path=str(db_path), config_manager=cm, event_bus=None, logger=_L())
 
     rec = data_record_for_file(path="logs/errors.jsonl", category=DataCategory.ERROR_LOG, sensitivity=Sensitivity.LOW, trace_id="t1")
     rid = ps.register_record(rec)
@@ -55,7 +55,7 @@ def test_retention_policy_resolves_expires_at():
 def test_no_content_logged_in_data_record(tmp_path):
     cm = _make_cfg(tmp_path)
     db_path = tmp_path / "runtime" / "privacy.sqlite"
-    ps = PrivacyStore(db_path=str(db_path), config_manager=cm, audit_timeline=None, logger=_L())
+    ps = PrivacyStore(db_path=str(db_path), config_manager=cm, event_bus=None, logger=_L())
 
     # Extra "content" field must never be accepted into DataRecord.
     with pytest.raises(Exception):

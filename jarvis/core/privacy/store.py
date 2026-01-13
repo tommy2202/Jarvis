@@ -7,12 +7,14 @@ import threading
 import uuid
 from typing import Any, Dict, Iterable, List, Optional
 
+from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
 from jarvis.core.privacy.models import (
     ConsentRecord,
     DataCategory,
     DataRecord,
     DSARRequest,
     LawfulBasis,
+    PrivacyPreferences,
     PrivacyConfigFile,
     RetentionPolicy,
     Sensitivity,
@@ -31,10 +33,12 @@ class PrivacyStore:
     - store does not contain raw user text/content; only references and metadata
     """
 
-    def __init__(self, *, db_path: str, config_manager: Any = None, audit_timeline: Any = None, logger: Any = None):
+    SENSITIVE_SCOPES = {"memory", "transcripts"}
+
+    def __init__(self, *, db_path: str, config_manager: Any = None, event_bus: Any = None, logger: Any = None):
         self.db_path = str(db_path)
         self.config = config_manager
-        self.audit = audit_timeline
+        self.event_bus = event_bus
         self.logger = logger
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
@@ -46,24 +50,14 @@ class PrivacyStore:
         except Exception:
             pass
 
-        # Register the privacy store itself as a data record (inventory meta).
+        # Ensure default preferences exist (single-user mode).
         try:
-            self.register_record(
-                data_record_for_sqlite(
-                    db_path=self.db_path,
-                    table="data_records",
-                    category=DataCategory.CONFIG,
-                    sensitivity=Sensitivity.LOW,
-                    lawful_basis=LawfulBasis.LEGITIMATE_INTERESTS,
-                    producer="privacy_store",
-                    tags={"purpose": "privacy_inventory"},
-                )
-            )
+            _ = self.get_preferences(user_id="default")
         except Exception:
             pass
 
-    def attach_audit_timeline(self, audit_timeline: Any) -> None:
-        self.audit = audit_timeline
+    def attach_event_bus(self, event_bus: Any) -> None:
+        self.event_bus = event_bus
 
     # ---- sqlite helpers ----
     def _conn(self) -> sqlite3.Connection:
@@ -129,6 +123,20 @@ class PrivacyStore:
                     """
                 )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_consents_user_scope ON consents(user_id, scope)")
+                # Ensure one row per (user_id, scope) so grant/revoke is deterministic.
+                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_consents_user_scope_unique ON consents(user_id, scope)")
+
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS preferences (
+                      user_id TEXT PRIMARY KEY,
+                      memory_enabled INTEGER,
+                      transcript_retention_days INTEGER,
+                      network_allowed_non_admin INTEGER,
+                      updated_at TEXT
+                    )
+                    """
+                )
 
                 conn.execute(
                     """
@@ -147,6 +155,23 @@ class PrivacyStore:
                 conn.commit()
             finally:
                 conn.close()
+
+    # ---- internal emit ----
+    def _emit(self, trace_id: str, event_type: str, payload: Dict[str, Any], *, severity: EventSeverity = EventSeverity.INFO) -> None:
+        if self.event_bus is None:
+            return
+        try:
+            self.event_bus.publish_nowait(
+                BaseEvent(
+                    event_type=str(event_type),
+                    trace_id=str(trace_id or "privacy"),
+                    source_subsystem=SourceSubsystem.audit,
+                    severity=severity,
+                    payload=dict(payload or {}),
+                )
+            )
+        except Exception:
+            pass
 
     # ---- config / retention ----
     def _privacy_cfg_raw(self) -> Dict[str, Any]:
@@ -218,6 +243,55 @@ class PrivacyStore:
             finally:
                 conn.close()
 
+    # ---- preferences ----
+    def get_preferences(self, *, user_id: str = "default") -> PrivacyPreferences:
+        uid = str(user_id or "default")[:64]
+        _ = self.get_or_create_user(user_id=uid, display_name="", is_default=(uid == "default"))
+        with self._lock:
+            conn = self._conn()
+            try:
+                row = conn.execute("SELECT user_id, memory_enabled, transcript_retention_days, network_allowed_non_admin FROM preferences WHERE user_id=?", (uid,)).fetchone()
+                if row:
+                    return PrivacyPreferences(
+                        user_id=row["user_id"],
+                        memory_enabled=bool(row["memory_enabled"]),
+                        transcript_retention_days=int(row["transcript_retention_days"] or 0),
+                        network_allowed_non_admin=False,  # immutable false
+                    )
+                prefs = PrivacyPreferences(user_id=uid, memory_enabled=False, transcript_retention_days=0, network_allowed_non_admin=False)
+                conn.execute(
+                    "INSERT INTO preferences(user_id, memory_enabled, transcript_retention_days, network_allowed_non_admin, updated_at) VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+                    (prefs.user_id, 1 if prefs.memory_enabled else 0, int(prefs.transcript_retention_days), 0),
+                )
+                conn.commit()
+                return prefs
+            finally:
+                conn.close()
+
+    def _update_preferences(
+        self,
+        *,
+        user_id: str,
+        memory_enabled: Optional[bool] = None,
+        transcript_retention_days: Optional[int] = None,
+    ) -> PrivacyPreferences:
+        uid = str(user_id or "default")[:64]
+        cur = self.get_preferences(user_id=uid)
+        mem = bool(cur.memory_enabled) if memory_enabled is None else bool(memory_enabled)
+        trd = int(cur.transcript_retention_days) if transcript_retention_days is None else max(0, int(transcript_retention_days))
+        with self._lock:
+            conn = self._conn()
+            try:
+                conn.execute(
+                    "INSERT INTO preferences(user_id, memory_enabled, transcript_retention_days, network_allowed_non_admin, updated_at) VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now')) "
+                    "ON CONFLICT(user_id) DO UPDATE SET memory_enabled=excluded.memory_enabled, transcript_retention_days=excluded.transcript_retention_days, network_allowed_non_admin=0, updated_at=excluded.updated_at",
+                    (uid, 1 if mem else 0, int(trd), 0),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        return PrivacyPreferences(user_id=uid, memory_enabled=mem, transcript_retention_days=trd, network_allowed_non_admin=False)
+
     # ---- data records ----
     def register_record(self, rec: DataRecord) -> str:
         """
@@ -283,26 +357,19 @@ class PrivacyStore:
             finally:
                 conn.close()
 
-        # Audit log (best effort, no content)
-        if self.audit is not None:
-            try:
-                self.audit.append(
-                    trace_id=str(rec.trace_id or "privacy"),
-                    category="privacy",
-                    action="privacy.data_record_registered",
-                    outcome="ok",
-                    details={
-                        "record_id": record_id,
-                        "user_id": rec.user_id,
-                        "data_category": rec.data_category.value,
-                        "sensitivity": rec.sensitivity.value,
-                        "lawful_basis": rec.lawful_basis.value,
-                        "storage_kind": rec.storage_kind.value,
-                        "storage_ref_hash": rec.storage_ref_hash[:12],
-                    },
-                )
-            except Exception:
-                pass
+        self._emit(
+            str(rec.trace_id or "privacy"),
+            "privacy.data_record_registered",
+            {
+                "record_id": record_id,
+                "user_id": rec.user_id,
+                "data_category": rec.data_category.value,
+                "sensitivity": rec.sensitivity.value,
+                "lawful_basis": rec.lawful_basis.value,
+                "storage_kind": rec.storage_kind.value,
+                "storage_ref_hash": rec.storage_ref_hash[:12],
+            },
+        )
 
         return record_id
 
@@ -362,9 +429,10 @@ class PrivacyStore:
                     """
                     INSERT INTO consents(consent_id, user_id, scope, granted, recorded_at, lawful_basis, evidence)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(consent_id) DO UPDATE SET
+                    ON CONFLICT(user_id, scope) DO UPDATE SET
                       granted=excluded.granted,
                       recorded_at=excluded.recorded_at,
+                      lawful_basis=excluded.lawful_basis,
                       evidence=excluded.evidence
                     """,
                     (rec.consent_id, rec.user_id, rec.scope, 1 if rec.granted else 0, rec.recorded_at, rec.lawful_basis.value, rec.evidence),
@@ -372,7 +440,111 @@ class PrivacyStore:
                 conn.commit()
             finally:
                 conn.close()
+        # Update preferences for core toggles tied to consent
+        if rec.scope.lower() == "memory":
+            _ = self._update_preferences(user_id=rec.user_id, memory_enabled=bool(rec.granted))
+        if rec.scope.lower() == "transcripts":
+            # granting transcript storage implies a non-zero retention default; revoking sets to 0
+            _ = self._update_preferences(user_id=rec.user_id, transcript_retention_days=(30 if rec.granted else 0))
+
         return rec.consent_id
+
+    def get_consent(self, *, user_id: str = "default", scope: str) -> Optional[ConsentRecord]:
+        uid = str(user_id or "default")[:64]
+        sc = str(scope or "").strip()
+        if not sc:
+            return None
+        with self._lock:
+            conn = self._conn()
+            try:
+                row = conn.execute(
+                    "SELECT consent_id, user_id, scope, granted, recorded_at, lawful_basis, evidence FROM consents WHERE user_id=? AND scope=? ORDER BY recorded_at DESC LIMIT 1",
+                    (uid, sc),
+                ).fetchone()
+            finally:
+                conn.close()
+        if not row:
+            return None
+        return ConsentRecord(
+            consent_id=row["consent_id"],
+            user_id=row["user_id"],
+            scope=row["scope"],
+            granted=bool(row["granted"]),
+            recorded_at=row["recorded_at"] or "",
+            lawful_basis=LawfulBasis(str(row["lawful_basis"] or "CONSENT")),
+            evidence=str(row["evidence"] or ""),
+        )
+
+    def set_consent(self, *, user_id: str = "default", scope: str, granted: bool, trace_id: str = "privacy", actor_is_admin: bool = False) -> bool:
+        """
+        Grant/revoke consent by scope.
+        Admin required for sensitive scopes (memory/transcripts).
+        """
+        sc = str(scope or "").strip().lower()
+        if not sc:
+            return False
+        if sc in self.SENSITIVE_SCOPES and not bool(actor_is_admin):
+            self._emit(str(trace_id), "privacy.consent_change_denied", {"user_id": str(user_id), "scope": sc, "reason": "admin_required"}, severity=EventSeverity.WARN)
+            return False
+        rec = ConsentRecord(user_id=str(user_id or "default"), scope=sc, granted=bool(granted), evidence="cli/admin" if actor_is_admin else "cli")
+        _ = self.upsert_consent(rec)
+        self._emit(
+            str(trace_id),
+            "privacy.consent_changed",
+            {"user_id": rec.user_id, "scope": rec.scope, "granted": bool(rec.granted), "lawful_basis": rec.lawful_basis.value},
+            severity=EventSeverity.INFO,
+        )
+        return True
+
+    # ---- retention config mutation (admin-only) ----
+    def list_retention_policies(self) -> List[Dict[str, Any]]:
+        raw = self._privacy_cfg_raw()
+        out = raw.get("retention_policies") or []
+        return out if isinstance(out, list) else []
+
+    def set_retention_ttl_days(self, *, policy_id: str, ttl_days: int, trace_id: str = "privacy", actor_is_admin: bool = False) -> bool:
+        """
+        Update config/privacy.json retention policy ttl_days.
+        Admin-only (CAP_ADMIN_ACTION semantics).
+        """
+        if not bool(actor_is_admin):
+            self._emit(str(trace_id), "privacy.retention_change_denied", {"policy_id": str(policy_id), "reason": "admin_required"}, severity=EventSeverity.WARN)
+            raise PermissionError("Admin required (CAP_ADMIN_ACTION).")
+        pid = str(policy_id or "").strip()
+        if not pid or ":" not in pid:
+            return False
+        cat, sens = pid.split(":", 1)
+        cat = cat.strip().upper()
+        sens = sens.strip().upper()
+        ttl = max(1, int(ttl_days))
+        if self.config is None:
+            return False
+        raw = self.config.read_non_sensitive("privacy.json") or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        raw.setdefault("schema_version", 1)
+        raw.setdefault("default_user_id", "default")
+        raw.setdefault("data_minimization", {})
+        raw.setdefault("default_consent_scopes", {})
+        pols = raw.get("retention_policies") or []
+        if not isinstance(pols, list):
+            pols = []
+        found = False
+        for p in pols:
+            if not isinstance(p, dict):
+                continue
+            if str(p.get("data_category") or "").upper() == cat and str(p.get("sensitivity") or "").upper() == sens:
+                p["ttl_days"] = ttl
+                p.pop("keep_forever", None)
+                found = True
+                break
+        if not found:
+            pols.append({"data_category": cat, "sensitivity": sens, "ttl_days": ttl})
+        raw["retention_policies"] = pols
+        # Validate + write through ConfigManager (atomic + validated)
+        self.config.save_non_sensitive("privacy.json", raw)
+        self._emit(str(trace_id), "privacy.retention_updated", {"policy_id": pid, "ttl_days": ttl, "actor": "admin"}, severity=EventSeverity.WARN)
+        return True
 
     # ---- dsar ----
     def create_dsar(self, req: DSARRequest) -> str:

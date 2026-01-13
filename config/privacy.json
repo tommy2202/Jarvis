@@ -8,7 +8,9 @@
   },
   "default_consent_scopes": {
     "telemetry": true,
-    "crash_reports": true
+    "crash_reports": true,
+    "memory": false,
+    "transcripts": false
   },
   "retention_policies": [
     {

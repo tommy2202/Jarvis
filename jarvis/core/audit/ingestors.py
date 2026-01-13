@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import time
@@ -15,6 +16,32 @@ from jarvis.core.audit.models import (
     AuditSeverity,
 )
 from jarvis.core.audit.redaction import redact_details
+
+
+def _parse_ts(v: Any) -> float:
+    """
+    Parse timestamps from JSONL logs.
+
+    Supports:
+    - epoch seconds (int/float)
+    - ISO8601 'YYYY-mm-ddTHH:MM:SSZ' (used by Jarvis loggers)
+    """
+    if v is None:
+        return float(time.time())
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v or "").strip()
+    if not s:
+        return float(time.time())
+    try:
+        return float(s)
+    except Exception:
+        pass
+    try:
+        ts = time.strptime(s, "%Y-%m-%dT%H:%M:%SZ")
+        return float(calendar.timegm(ts))
+    except Exception:
+        return float(time.time())
 
 
 def audit_from_core_event(ev: Any) -> Optional[AuditEvent]:
@@ -177,7 +204,7 @@ def audit_from_security_log(obj: Dict[str, Any]) -> Optional[AuditEvent]:
     sev = sev_map.get(severity.upper(), AuditSeverity.INFO)
     safe_details = redact_details("security", event, {"ip": ip, **details})
     return AuditEvent(
-        timestamp=float(obj.get("ts") or time.time()),
+        timestamp=_parse_ts(obj.get("ts")),
         trace_id=trace_id or None,
         actor=Actor(source=ActorSource.web, user=ActorUser.unknown),
         category=AuditCategory.security,
@@ -199,7 +226,7 @@ def audit_from_ops_log(obj: Dict[str, Any]) -> Optional[AuditEvent]:
         return None
     oc = AuditOutcome.success if outcome == "ok" or outcome == "success" else AuditOutcome.failed
     return AuditEvent(
-        timestamp=float(obj.get("ts") or time.time()),
+        timestamp=_parse_ts(obj.get("ts")),
         trace_id=trace_id or None,
         actor=Actor(source=ActorSource.system, user=ActorUser.unknown),
         category=AuditCategory.lifecycle,
@@ -221,7 +248,7 @@ def audit_from_errors_log(obj: Dict[str, Any]) -> Optional[AuditEvent]:
         return None
     sev_map = {"INFO": AuditSeverity.INFO, "WARN": AuditSeverity.WARN, "ERROR": AuditSeverity.ERROR, "CRITICAL": AuditSeverity.CRITICAL}
     return AuditEvent(
-        timestamp=float(obj.get("timestamp") or time.time()),
+        timestamp=_parse_ts(obj.get("timestamp") or obj.get("ts")),
         trace_id=trace_id or None,
         actor=Actor(source=ActorSource.system, user=ActorUser.unknown),
         category=AuditCategory.error,

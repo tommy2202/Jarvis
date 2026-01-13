@@ -116,6 +116,23 @@ class ConsentRecord(BaseModel):
     evidence: str = Field(default="", max_length=200)
 
 
+class PrivacyPreferences(BaseModel):
+    """
+    Core privacy toggles (per-user).
+
+    NOTE:
+    `network_allowed_non_admin` is intentionally immutable false in core logic;
+    policy/capabilities are the enforcement source of truth.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str = Field(min_length=1, max_length=64, default="default")
+    memory_enabled: bool = False
+    transcript_retention_days: int = Field(default=0, ge=0, le=3650)
+    network_allowed_non_admin: bool = False
+
+
 class DSARRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -216,7 +233,7 @@ class PrivacyConfigFile(BaseModel):
             "disable_persistent_transcripts": True,
         }
     )
-    default_consent_scopes: Dict[str, bool] = Field(default_factory=lambda: {"telemetry": True, "crash_reports": True})
+    default_consent_scopes: Dict[str, bool] = Field(default_factory=lambda: {"telemetry": True, "crash_reports": True, "memory": False, "transcripts": False})
     retention_policies: List[Dict[str, Any]] = Field(
         default_factory=lambda: [
             {"data_category": "AUDIT", "sensitivity": "LOW", "ttl_days": 90},

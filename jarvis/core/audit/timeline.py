@@ -137,10 +137,15 @@ class AuditTimelineManager:
         """
         Ingest security/ops/errors logs into audit store using file offsets cursor.
         """
+        # Allow tests/embedders to override source paths for determinism.
+        src_cfg = (self.cfg.get("ingest_sources") or {}) if isinstance(self.cfg, dict) else {}
+        sec_path = str((src_cfg.get("security") if isinstance(src_cfg, dict) else None) or os.path.join("logs", "security.jsonl"))
+        ops_path = str((src_cfg.get("ops") if isinstance(src_cfg, dict) else None) or os.path.join("logs", "ops.jsonl"))
+        err_path = str((src_cfg.get("errors") if isinstance(src_cfg, dict) else None) or os.path.join("logs", "errors.jsonl"))
         mapping = [
-            ("security", os.path.join("logs", "security.jsonl"), audit_from_security_log),
-            ("ops", os.path.join("logs", "ops.jsonl"), audit_from_ops_log),
-            ("errors", os.path.join("logs", "errors.jsonl"), audit_from_errors_log),
+            ("security", sec_path, audit_from_security_log),
+            ("ops", ops_path, audit_from_ops_log),
+            ("errors", err_path, audit_from_errors_log),
         ]
         for name, path, fn in mapping:
             off = int((self._cursors.get(name) or 0))

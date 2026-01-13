@@ -17,6 +17,8 @@ def _mk_mgr(tmp_path):
         "integrity": {"enabled": True, "verify_on_startup": False, "verify_last_n": 2000},
         "retention": {"days": 1, "max_events": 50000},
         "export": {"max_rows": 20000},
+        # Ensure deterministic tests (don't ingest workspace logs).
+        "ingest_sources": {"security": str(tmp_path / "security.jsonl"), "ops": str(tmp_path / "ops.jsonl"), "errors": str(tmp_path / "errors.jsonl")},
     }
     m = AuditTimelineManager(cfg=cfg, logger=None, event_bus=None, telemetry=None, ops_logger=None)
     return m
