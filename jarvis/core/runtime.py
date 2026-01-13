@@ -137,6 +137,8 @@ class JarvisRuntime:
         event_bus: Any = None,
         audit_timeline: Any = None,
         module_manager: Any = None,
+        privacy_store: Any = None,
+        dsar_engine: Any = None,
     ):
         self.cfg = cfg
         self.jarvis_app = jarvis_app
@@ -157,6 +159,8 @@ class JarvisRuntime:
         self.event_bus = event_bus
         self.audit_timeline = audit_timeline
         self.module_manager = module_manager
+        self.privacy_store = privacy_store
+        self.dsar_engine = dsar_engine
 
         self._writer = _JsonlWriter(persist_path)
         self._q: "queue.Queue[RuntimeEvent]" = queue.Queue()

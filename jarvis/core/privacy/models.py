@@ -55,6 +55,8 @@ class DsarRequestType(str, Enum):
     ACCESS = "ACCESS"
     EXPORT = "EXPORT"
     DELETE = "DELETE"
+    CORRECT = "CORRECT"
+    RESTRICT = "RESTRICT"
 
 
 class DsarStatus(str, Enum):
@@ -145,6 +147,10 @@ class DSARRequest(BaseModel):
     created_at: str = Field(default_factory=_iso_now)
     completed_at: Optional[str] = None
     notes: str = Field(default="", max_length=200)
+    # Persisted as JSON strings in sqlite. Never include raw conversation content by default.
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    result: Dict[str, Any] = Field(default_factory=dict)
+    export_path: Optional[str] = None
 
 
 class DataRecord(BaseModel):
@@ -236,6 +242,13 @@ class PrivacyConfigFile(BaseModel):
         }
     )
     default_consent_scopes: Dict[str, bool] = Field(default_factory=lambda: {"telemetry": True, "crash_reports": True, "memory": False, "transcripts": False})
+    dsar: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "export": {"allow_copy_categories": [], "include_redacted_logs": True},
+            "delete": {"categories": ["JOB_ARTIFACT"], "deletion_action": "delete"},
+            "restrict": {"default_scopes": ["memory"]},
+        }
+    )
     retention_policies: List[Dict[str, Any]] = Field(
         default_factory=lambda: [
             {"data_category": "AUDIT", "sensitivity": "LOW", "ttl_days": 90, "deletion_action": "delete", "review_required": True},

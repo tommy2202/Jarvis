@@ -256,6 +256,9 @@ def main() -> None:
     from jarvis.core.privacy.store import PrivacyStore
 
     privacy_store = PrivacyStore(db_path=os.path.join(runtime_state.paths.runtime_dir, "privacy.sqlite"), config_manager=config, event_bus=event_bus, logger=logger)
+    from jarvis.core.privacy.dsar import DsarEngine, ModuleHooksRegistry
+
+    dsar_engine = DsarEngine(store=privacy_store, root_path=".", hooks=ModuleHooksRegistry(), logger=logger)
 
     # Audit Timeline (hash-chained, privacy-safe)
     from jarvis.core.audit.timeline import AuditTimelineManager
@@ -674,6 +677,8 @@ def main() -> None:
         event_bus=event_bus,
         audit_timeline=audit,
         module_manager=module_manager,
+        privacy_store=privacy_store,
+        dsar_engine=dsar_engine,
     )
     runtime.start()
     telemetry.attach(runtime=runtime, voice_adapter=voice_adapter, tts_adapter=tts_adapter)
@@ -1132,6 +1137,39 @@ def main() -> None:
                         "consent": cons,
                     }
                 )
+                continue
+            if cmd == "dsar":
+                sub = parts[2] if len(parts) >= 3 else "help"
+                if sub == "request" and len(parts) >= 4:
+                    kind = parts[3]
+                    rid = dsar_engine.request(user_id="default", request_type=kind, payload={}, trace_id="cli")
+                    print({"request_id": rid, "type": kind})
+                    continue
+                if sub == "status" and len(parts) >= 4:
+                    rid = parts[3]
+                    req = dsar_engine.get(rid)
+                    print(req.model_dump() if req else {"error": "not found"})
+                    continue
+                if sub == "run" and len(parts) >= 4:
+                    if not security.is_admin():
+                        print("Admin required (CAP_ADMIN_ACTION).")
+                        continue
+                    rid = parts[3]
+                    try:
+                        req = dsar_engine.run(request_id=rid, actor_is_admin=True, trace_id="cli")
+                        print(req.model_dump())
+                    except Exception as e:
+                        print({"error": str(e)})
+                    continue
+                if sub == "export-open" and len(parts) >= 4:
+                    rid = parts[3]
+                    req = dsar_engine.get(rid)
+                    if not req or not req.export_path:
+                        print({"error": "no export available"})
+                        continue
+                    print({"export_path": req.export_path})
+                    continue
+                print("Usage: /privacy dsar request export|delete|restrict|correct | /privacy dsar status <id> | /privacy dsar run <id> | /privacy dsar export-open <id>")
                 continue
             if cmd == "consent" and len(parts) >= 4 and parts[2] in {"grant", "revoke"}:
                 action = parts[2]

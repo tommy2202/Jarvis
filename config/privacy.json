@@ -12,6 +12,23 @@
     "memory": false,
     "transcripts": false
   },
+  "dsar": {
+    "export": {
+      "allow_copy_categories": [],
+      "include_redacted_logs": true
+    },
+    "delete": {
+      "categories": [
+        "JOB_ARTIFACT"
+      ],
+      "deletion_action": "delete"
+    },
+    "restrict": {
+      "default_scopes": [
+        "memory"
+      ]
+    }
+  },
   "retention_policies": [
     {
       "data_category": "AUDIT",

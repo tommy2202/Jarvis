@@ -71,6 +71,21 @@ class PrivacyStore:
             pass
         return conn
 
+    def _ensure_column(self, *, conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        """
+        Best-effort schema evolution for existing sqlite files.
+        """
+        try:
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        except Exception:
+            cols = []
+        if column in cols:
+            return
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+        except Exception:
+            pass
+
     def _init_db(self) -> None:
         with self._lock:
             conn = self._conn()
@@ -169,11 +184,18 @@ class PrivacyStore:
                       status TEXT,
                       created_at TEXT,
                       completed_at TEXT,
-                      notes TEXT
+                      notes TEXT,
+                      payload_json TEXT,
+                      result_json TEXT,
+                      export_path TEXT
                     )
                     """
                 )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_dsar_user ON dsar_requests(user_id)")
+                # ensure columns exist for older dbs
+                self._ensure_column(conn=conn, table="dsar_requests", column="payload_json", ddl="payload_json TEXT")
+                self._ensure_column(conn=conn, table="dsar_requests", column="result_json", ddl="result_json TEXT")
+                self._ensure_column(conn=conn, table="dsar_requests", column="export_path", ddl="export_path TEXT")
                 conn.commit()
             finally:
                 conn.close()
@@ -272,6 +294,24 @@ class PrivacyStore:
                 return user
             finally:
                 conn.close()
+
+    def update_user_profile(self, *, user_id: str, display_name: Optional[str] = None) -> bool:
+        uid = str(user_id or "default")[:64]
+        _ = self.get_or_create_user(user_id=uid, display_name="", is_default=(uid == "default"))
+        updates: Dict[str, Any] = {}
+        if display_name is not None:
+            updates["display_name"] = str(display_name or "")[:120]
+        if not updates:
+            return False
+        with self._lock:
+            conn = self._conn()
+            try:
+                conn.execute("UPDATE users SET display_name=? WHERE user_id=?", (updates["display_name"], uid))
+                conn.commit()
+            finally:
+                conn.close()
+        self._emit("privacy", "privacy.user_profile_updated", {"user_id": uid, "fields": list(updates.keys())}, severity=EventSeverity.INFO)
+        return True
 
     # ---- preferences ----
     def get_preferences(self, *, user_id: str = "default") -> PrivacyPreferences:
@@ -814,11 +854,137 @@ class PrivacyStore:
             conn = self._conn()
             try:
                 conn.execute(
-                    "INSERT INTO dsar_requests(request_id, user_id, request_type, status, created_at, completed_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (req.request_id, req.user_id, req.request_type.value, req.status.value, req.created_at, req.completed_at, req.notes),
+                    "INSERT INTO dsar_requests(request_id, user_id, request_type, status, created_at, completed_at, notes, payload_json, result_json, export_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        req.request_id,
+                        req.user_id,
+                        req.request_type.value,
+                        req.status.value,
+                        req.created_at,
+                        req.completed_at,
+                        req.notes,
+                        json.dumps(dict(req.payload or {}), ensure_ascii=False),
+                        json.dumps(dict(req.result or {}), ensure_ascii=False),
+                        req.export_path,
+                    ),
                 )
                 conn.commit()
             finally:
                 conn.close()
         return req.request_id
+
+    def get_dsar(self, request_id: str) -> Optional[DSARRequest]:
+        rid = str(request_id or "").strip()
+        if not rid:
+            return None
+        with self._lock:
+            conn = self._conn()
+            try:
+                row = conn.execute("SELECT * FROM dsar_requests WHERE request_id=?", (rid,)).fetchone()
+            finally:
+                conn.close()
+        if not row:
+            return None
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except Exception:
+            payload = {}
+        try:
+            result = json.loads(row["result_json"] or "{}")
+        except Exception:
+            result = {}
+        from jarvis.core.privacy.models import DsarRequestType, DsarStatus
+
+        return DSARRequest(
+            request_id=row["request_id"],
+            user_id=row["user_id"],
+            request_type=DsarRequestType(str(row["request_type"])),
+            status=DsarStatus(str(row["status"])),
+            created_at=str(row["created_at"] or ""),
+            completed_at=row["completed_at"],
+            notes=str(row["notes"] or ""),
+            payload=dict(payload or {}),
+            result=dict(result or {}),
+            export_path=row["export_path"],
+        )
+
+    def update_dsar(self, req: DSARRequest) -> None:
+        if not isinstance(req, DSARRequest):
+            req = DSARRequest.model_validate(req)
+        with self._lock:
+            conn = self._conn()
+            try:
+                conn.execute(
+                    "UPDATE dsar_requests SET status=?, completed_at=?, notes=?, payload_json=?, result_json=?, export_path=? WHERE request_id=?",
+                    (
+                        req.status.value,
+                        req.completed_at,
+                        req.notes,
+                        json.dumps(dict(req.payload or {}), ensure_ascii=False),
+                        json.dumps(dict(req.result or {}), ensure_ascii=False),
+                        req.export_path,
+                        req.request_id,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    # ---- processing restrictions (Art.18) ----
+    def _init_processing_restrictions(self) -> None:
+        # called lazily by setters to avoid bloating init; table is tiny
+        with self._lock:
+            conn = self._conn()
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS processing_restrictions (
+                      user_id TEXT,
+                      scope TEXT,
+                      restricted INTEGER,
+                      updated_at TEXT,
+                      PRIMARY KEY(user_id, scope)
+                    )
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def set_scope_restricted(self, *, user_id: str = "default", scope: str, restricted: bool, trace_id: str = "privacy") -> bool:
+        self._init_processing_restrictions()
+        uid = str(user_id or "default")[:64]
+        sc = str(scope or "").strip().lower()
+        if not sc:
+            return False
+        with self._lock:
+            conn = self._conn()
+            try:
+                conn.execute(
+                    "INSERT INTO processing_restrictions(user_id, scope, restricted, updated_at) VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now')) "
+                    "ON CONFLICT(user_id, scope) DO UPDATE SET restricted=excluded.restricted, updated_at=excluded.updated_at",
+                    (uid, sc, 1 if restricted else 0),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        # reflect common scope into prefs for visibility
+        if sc == "memory" and restricted:
+            _ = self._update_preferences(user_id=uid, memory_enabled=False)
+        self._emit(str(trace_id or "privacy"), "privacy.processing_restriction_set", {"user_id": uid, "scope": sc, "restricted": bool(restricted)}, severity=EventSeverity.WARN)
+        return True
+
+    def is_scope_restricted(self, *, user_id: str = "default", scope: str) -> bool:
+        uid = str(user_id or "default")[:64]
+        sc = str(scope or "").strip().lower()
+        if not sc:
+            return False
+        self._init_processing_restrictions()
+        with self._lock:
+            conn = self._conn()
+            try:
+                row = conn.execute("SELECT restricted FROM processing_restrictions WHERE user_id=? AND scope=?", (uid, sc)).fetchone()
+            finally:
+                conn.close()
+        return bool(row and int(row[0] or 0) == 1)
 
