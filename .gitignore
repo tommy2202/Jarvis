@@ -1,0 +1,38 @@
+# =============================================================================
+# Jarvis repository hygiene: source vs runtime separation
+#
+# WHY THIS FILE EXISTS:
+# - This repo is intended to track source-of-truth code and configuration only.
+# - Runtime outputs (logs, state, caches) and secure material must never be tracked.
+# - This block is safe to keep and safe to apply repeatedly.
+# =============================================================================
+
+# --- Python runtime ---
+__pycache__/
+*.py[cod]
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# --- Build artifacts ---
+build/
+dist/
+
+# --- Runtime state / caches ---
+logs/
+runtime/
+state/
+cache/
+
+# --- Secure material (never commit) ---
+secure/
+*.enc
+*.key
+
+# --- OS / editor noise ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
