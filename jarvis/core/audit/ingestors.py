@@ -139,11 +139,17 @@ def audit_from_core_event(ev: Any) -> Optional[AuditEvent]:
     severity = sev_map.get(sev.upper(), AuditSeverity.INFO)
 
     details = redact_details(category.value, action, dict(payload) if isinstance(payload, dict) else {})
+    uid = None
+    try:
+        uid = str(payload.get("user_id") or "") if isinstance(payload, dict) else ""
+        uid = uid or None
+    except Exception:
+        uid = None
 
     return AuditEvent(
         timestamp=float(getattr(ev, "timestamp", None) or time.time()),
         trace_id=str(trace_id) if trace_id else None,
-        actor=Actor(source=actor_source, user=ActorUser.unknown),
+        actor=Actor(source=actor_source, user=ActorUser.unknown, user_id=uid),
         category=category,
         action=str(action),
         outcome=outcome,

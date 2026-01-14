@@ -57,6 +57,7 @@ class Actor(BaseModel):
     source: ActorSource = ActorSource.system
     client_id: Optional[str] = None
     user: ActorUser = ActorUser.unknown
+    user_id: Optional[str] = None
 
 
 class AuditEvent(BaseModel):

@@ -368,6 +368,12 @@ def main() -> None:
     telemetry.attach(secure_store=secure_store, security_manager=security)
     runtime_state.attach(security_manager=security, secure_store=secure_store)
 
+    # Identity manager (user attribution + active user/session)
+    from jarvis.core.identity.manager import IdentityManager
+
+    identity_manager = IdentityManager(privacy_store=privacy_store, security_manager=security, logger=logger)
+    _ = identity_manager.load_or_create_default_user()
+
     # Backup manager (zip exports + manifests)
     from jarvis.core.backup.api import BackupManager
 
@@ -476,6 +482,8 @@ def main() -> None:
         event_bus=event_bus,
         policy_engine=policy_engine,
         module_manager=module_manager,
+        privacy_store=privacy_store,
+        identity_manager=identity_manager,
     )
 
     jarvis = JarvisApp(
@@ -1227,6 +1235,27 @@ def main() -> None:
                 print("OK" if ok else "Failed")
                 continue
             print("Usage: /privacy status | /privacy consent grant <scope> | /privacy consent revoke <scope> | /privacy retention list | /privacy retention run | /privacy retention pending | /privacy retention approve <id> | /privacy retention deny <id> | /privacy retention set <policy_id> <ttl_days>")
+            continue
+        if text.startswith("/user"):
+            parts = text.split()
+            cmd = parts[1] if len(parts) >= 2 else "status"
+            if cmd in {"status", "whoami"}:
+                u = identity_manager.get_active_user()
+                sess = identity_manager.active_session()
+                print({"user": u.model_dump(), "admin": bool(security.is_admin()), "session": (sess.model_dump() if sess else None)})
+                continue
+            if cmd == "switch" and len(parts) >= 3:
+                if not security.is_admin():
+                    print("Admin required.")
+                    continue
+                uid = parts[2]
+                try:
+                    u2 = identity_manager.switch_active_user(uid)
+                    print({"switched_to": u2.model_dump()})
+                except Exception as e:
+                    print({"error": str(e)})
+                continue
+            print("Usage: /user status | /user whoami | /user switch <user_id>")
             continue
         if text.startswith("/audit"):
             from jarvis.core.audit.formatter import format_line

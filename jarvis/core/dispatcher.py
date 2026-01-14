@@ -68,6 +68,7 @@ class Dispatcher:
         policy_engine: Any = None,
         module_manager: Any = None,
         privacy_store: Any = None,
+        identity_manager: Any = None,
     ):
         self.registry = registry
         self.policy = policy
@@ -83,6 +84,7 @@ class Dispatcher:
         self.policy_engine = policy_engine
         self.module_manager = module_manager
         self.privacy_store = privacy_store
+        self.identity_manager = identity_manager
 
     def _policy_engine(self) -> Any:
         # For backwards compatibility with existing wiring, allow the capability engine
@@ -108,6 +110,7 @@ class Dispatcher:
             "module_id": module_id,
             "denied_reason": denied_reason,
             "remediation": remediation[:300],
+            "user_id": str((details or {}).get("user_id") or ""),
             **(details or {}),
         }
         self.event_logger.log(trace_id, "dispatch.denied", payload)
@@ -149,6 +152,17 @@ class Dispatcher:
         shutting_down = bool((context or {}).get("shutting_down", False))
         safe_mode = bool((context or {}).get("safe_mode", False))
         client_id = str(client.get("id") or client.get("client_id") or "")
+        # Identity: prefer explicit context user_id, otherwise use active user if available.
+        user_id = str((context or {}).get("user_id") or "")
+        if not user_id:
+            try:
+                im = getattr(self, "identity_manager", None)
+                if im is not None:
+                    user_id = str(im.get_active_user().user_id)
+            except Exception:
+                user_id = ""
+        if not user_id:
+            user_id = "default"
 
         breaker_status = {}
         try:
@@ -169,6 +183,7 @@ class Dispatcher:
             trace_id=trace_id,
             source=RequestSource(source_s),
             client_id=client_id or None,
+            user_id=user_id,
             is_admin=bool(self.security.is_admin()),
             safe_mode=safe_mode,
             shutting_down=shutting_down,
@@ -258,6 +273,7 @@ class Dispatcher:
                                 "module_state": state_s,
                                 "module_reason_code": reason_code_s,
                                 "module_remediation": remediation[:200],
+                                "user_id": str((context or {}).get("user_id") or ""),
                             },
                         )
                 except Exception:
@@ -465,7 +481,7 @@ class Dispatcher:
                         trace_id=trace_id,
                         source_subsystem=SourceSubsystem.dispatcher,
                         severity=EventSeverity.INFO,
-                        payload={"intent_id": intent_id, "module_id": module_id},
+                        payload={"intent_id": intent_id, "module_id": module_id, "user_id": getattr(ctx, "user_id", "default")},
                     )
                 )
             except Exception:
