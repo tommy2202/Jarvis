@@ -75,6 +75,32 @@ class ModuleManager:
         except Exception:
             pass
 
+    def _trust_cfg(self) -> Dict[str, Any]:
+        raw = self.config.read_non_sensitive("module_trust.json") if self.config is not None else {}
+        if not isinstance(raw, dict):
+            raw = {}
+        raw.setdefault("allow_unsigned_modules", False)
+        raw.setdefault("dev_mode_override", False)
+        return raw
+
+    def _is_trusted_record(self, rec: Dict[str, Any]) -> bool:
+        cfg = self._trust_cfg()
+        if bool(cfg.get("dev_mode_override", False)):
+            return True
+
+        prov = str(rec.get("provenance") or "local").strip().lower()
+        trusted = bool(rec.get("trusted", True))
+
+        # Back-compat: local provenance is treated as trusted by default.
+        if prov == "local":
+            return True
+
+        # Non-local provenance requires explicit trust unless explicitly allowed.
+        if bool(cfg.get("allow_unsigned_modules", False)):
+            return True
+
+        return trusted
+
     def _load_modules_file_raw(self) -> Dict[str, Any]:
         raw = self.config.read_non_sensitive("modules.json") or {}
         if not isinstance(raw, dict):
@@ -171,7 +197,39 @@ class ModuleManager:
         rec = (raw.get("modules") or {}).get(module_id) if isinstance(raw.get("modules"), dict) else None
         if not isinstance(rec, dict):
             return False
+        if not self._is_trusted_record(rec):
+            return False
         return bool(rec.get("installed")) and bool(rec.get("enabled")) and not bool(rec.get("missing_on_disk"))
+
+    def set_module_trusted(self, module_id: str, *, trusted: bool, trace_id: str = "modules") -> bool:
+        """
+        Admin-only: set trust on a module record.
+        """
+        if self.security is None or not bool(getattr(self.security, "is_admin", lambda: False)()):
+            return False
+        raw = self._load_modules_file_raw()
+        reg: Dict[str, Any] = dict(raw.get("modules") or {})
+        rec = reg.get(module_id)
+        if not isinstance(rec, dict):
+            return False
+        rec.setdefault("provenance", "local")
+        rec["trusted"] = bool(trusted)
+        if not bool(trusted):
+            # Trust revocation forces disable
+            rec["enabled"] = False
+            rec["enabled_at"] = None
+            rec["safe_auto_enabled"] = False
+            rec["reason"] = "trust revoked"
+        reg[module_id] = rec
+        raw["modules"] = reg
+        self._save_modules_file_raw(raw)
+        self._emit(
+            trace_id,
+            "module.trusted" if bool(trusted) else "module.trust_revoked",
+            {"module_id": module_id, "trusted": bool(trusted), "provenance": rec.get("provenance")},
+            severity=EventSeverity.INFO,
+        )
+        return True
 
     def list_status(self, *, trace_id: str = "modules") -> List[ModuleStatus]:
         """
@@ -498,8 +556,11 @@ class ModuleManager:
                 "installed_at": _iso_now(),
                 "enabled_at": _iso_now() if bool(e.get("enabled", False)) else None,
                 "last_seen_fingerprint": "",
+                "fingerprint_hash": "",
                 "contract_hash": "",
                 "module_path": mod_path,
+                "provenance": "manual",
+                "trusted": True,
                 "safe_auto_enabled": False,
                 "requires_admin_to_enable": True,
                 "reason": "legacy module_registry.json",
@@ -538,6 +599,9 @@ class ModuleManager:
                     safe_caps=set(SAFE_CAPS_DEFAULT),
                     disallowed_caps=set(DISALLOWED_CAPS),
                 )
+                rec.setdefault("provenance", "local")
+                rec.setdefault("trusted", True)
+                rec["fingerprint_hash"] = str(d.fingerprint or "")
                 registry[mid] = rec
 
                 # If manifest is structurally valid, sync intents/capability mappings.
@@ -575,17 +639,47 @@ class ModuleManager:
                     rec2["reason"] = "contract changed; requires review"
                     self._emit(trace_id, "module.changed_requires_review", {"module_id": mid, "fingerprint": d.fingerprint})
                 rec2["last_seen_fingerprint"] = d.fingerprint
+                rec2["fingerprint_hash"] = str(d.fingerprint or "")
                 if d.contract_hash:
                     rec2["contract_hash"] = d.contract_hash
                 rec2["missing_on_disk"] = False
+                rec2.setdefault("provenance", "local")
+                rec2.setdefault("trusted", True)
                 registry[mid] = rec2
             else:
                 # refresh seen flags
                 rec2["last_seen_fingerprint"] = d.fingerprint
+                rec2["fingerprint_hash"] = str(d.fingerprint or "")
                 if d.contract_hash:
                     rec2["contract_hash"] = d.contract_hash
                 rec2["missing_on_disk"] = False
+                rec2.setdefault("provenance", "local")
+                rec2.setdefault("trusted", True)
                 registry[mid] = rec2
+
+            # Trust enforcement (install allowed, execution denied unless trusted).
+            cfg = self._trust_cfg()
+            dev_override = bool(cfg.get("dev_mode_override", False))
+            if dev_override and not bool(rec2.get("trusted", True)):
+                self._emit(
+                    trace_id,
+                    "module.trust_dev_override_logged",
+                    {"module_id": mid, "provenance": rec2.get("provenance"), "trusted": bool(rec2.get("trusted", False))},
+                    severity=EventSeverity.WARN,
+                )
+            if (not dev_override) and (not self._is_trusted_record(rec2)):
+                if bool(rec2.get("enabled", False)):
+                    rec2["enabled"] = False
+                    rec2["enabled_at"] = None
+                    rec2["safe_auto_enabled"] = False
+                    rec2["reason"] = "untrusted module (disabled)"
+                    registry[mid] = rec2
+                self._emit(
+                    trace_id,
+                    "module.untrusted_detected",
+                    {"module_id": mid, "provenance": rec2.get("provenance"), "trusted": bool(rec2.get("trusted", False)), "fingerprint": d.fingerprint},
+                    severity=EventSeverity.WARN,
+                )
 
         raw["modules"] = registry
         self._save_modules_file_raw(raw)
@@ -625,6 +719,15 @@ class ModuleManager:
         rec = reg.get(module_id)
         if not isinstance(rec, dict) or not bool(rec.get("installed")):
             self._emit(trace_id, "module.enable_denied", {"module_id": module_id, "reason": "not installed"}, severity=EventSeverity.WARN)
+            return False
+        # Trust gate: admin must explicitly trust before enabling (unless dev override).
+        if not self._is_trusted_record(rec):
+            self._emit(
+                trace_id,
+                "module.enable_denied",
+                {"module_id": module_id, "reason": "untrusted; admin must trust module"},
+                severity=EventSeverity.WARN,
+            )
             return False
         if bool(rec.get("missing_on_disk")):
             self._emit(trace_id, "module.enable_denied", {"module_id": module_id, "reason": "missing on disk"}, severity=EventSeverity.WARN)
@@ -702,6 +805,8 @@ class ModuleManager:
         raw = self._load_modules_file_raw()
         rec = (raw.get("modules") or {}).get(module_id) if isinstance(raw.get("modules"), dict) else None
         if not isinstance(rec, dict) or not bool(rec.get("enabled")):
+            return None
+        if not self._is_trusted_record(rec):
             return None
         mdir = str(rec.get("module_path") or "")
         mpath = os.path.join(mdir, "module.json")

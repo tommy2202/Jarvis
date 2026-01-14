@@ -90,8 +90,13 @@ class InstalledModuleRecord(BaseModel):
     enabled_at: Optional[str] = None
 
     last_seen_fingerprint: str = ""
+    # Explicit fingerprint field for provenance/trust decisions (alias of last_seen_fingerprint).
+    fingerprint_hash: str = ""
     contract_hash: str = ""
     module_path: str = ""
+
+    provenance: str = "local"  # local|git|manual
+    trusted: bool = True
 
     safe_auto_enabled: bool = False
     requires_admin_to_enable: bool = False
@@ -152,4 +157,19 @@ class ModuleStatus(BaseModel):
     fingerprint_short: str = Field(default="", max_length=8)
     safe_auto_enabled: bool = False
     requires_admin_to_enable: bool = False
+
+
+class ModuleTrustConfigFile(BaseModel):
+    """
+    config/module_trust.json schema.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allow_unsigned_modules: bool = False
+    dev_mode_override: bool = False
+
+
+def default_module_trust_config_dict() -> Dict[str, Any]:
+    return ModuleTrustConfigFile().model_dump()
 

@@ -246,6 +246,7 @@ class ConfigManager:
             "resources.json",
             "audit.json",
             "privacy.json",
+            "module_trust.json",
             "policy.json",
             "backup.json",
             "events.json",
@@ -280,6 +281,7 @@ class ConfigManager:
 
     def _ensure_defaults(self, files: Dict[str, Dict[str, Any]], *, max_backups: int) -> Dict[str, Dict[str, Any]]:
         from jarvis.core.privacy.models import default_privacy_config_dict
+        from jarvis.core.modules.models import default_module_trust_config_dict
 
         defaults: Dict[str, Dict[str, Any]] = {
             "app.json": AppFileConfig().model_dump(),
@@ -292,6 +294,7 @@ class ConfigManager:
             "resources.json": ResourcesConfigFile().model_dump(),
             "audit.json": AuditConfigFile().model_dump(),
             "privacy.json": default_privacy_config_dict(),
+            "module_trust.json": default_module_trust_config_dict(),
             "policy.json": PolicyConfigFile().model_dump(),
             "backup.json": BackupConfigFile().model_dump(),
             "events.json": EventsBusConfigFile().model_dump(),
@@ -335,6 +338,14 @@ class ConfigManager:
                 _ = PrivacyConfigFile.model_validate(files.get("privacy.json") or {})
             except Exception as e:
                 raise ConfigError(f"privacy.json invalid: {e}") from e
+
+            # Module trust config is validated separately (outside AppConfigV2).
+            try:
+                from jarvis.core.modules.models import ModuleTrustConfigFile
+
+                _ = ModuleTrustConfigFile.model_validate(files.get("module_trust.json") or {})
+            except Exception as e:
+                raise ConfigError(f"module_trust.json invalid: {e}") from e
 
             cfg = AppConfigV2(
                 app=AppFileConfig.model_validate(files.get("app.json") or {}),
