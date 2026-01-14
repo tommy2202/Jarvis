@@ -247,6 +247,7 @@ class ConfigManager:
             "audit.json",
             "privacy.json",
             "module_trust.json",
+            "limits.json",
             "policy.json",
             "backup.json",
             "events.json",
@@ -282,6 +283,7 @@ class ConfigManager:
     def _ensure_defaults(self, files: Dict[str, Dict[str, Any]], *, max_backups: int) -> Dict[str, Dict[str, Any]]:
         from jarvis.core.privacy.models import default_privacy_config_dict
         from jarvis.core.modules.models import default_module_trust_config_dict
+        from jarvis.core.limits.limiter import default_limits_config_dict
 
         defaults: Dict[str, Dict[str, Any]] = {
             "app.json": AppFileConfig().model_dump(),
@@ -295,6 +297,7 @@ class ConfigManager:
             "audit.json": AuditConfigFile().model_dump(),
             "privacy.json": default_privacy_config_dict(),
             "module_trust.json": default_module_trust_config_dict(),
+            "limits.json": default_limits_config_dict(),
             "policy.json": PolicyConfigFile().model_dump(),
             "backup.json": BackupConfigFile().model_dump(),
             "events.json": EventsBusConfigFile().model_dump(),
@@ -346,6 +349,14 @@ class ConfigManager:
                 _ = ModuleTrustConfigFile.model_validate(files.get("module_trust.json") or {})
             except Exception as e:
                 raise ConfigError(f"module_trust.json invalid: {e}") from e
+
+            # Limits config is validated separately (outside AppConfigV2).
+            try:
+                from jarvis.core.limits.limiter import LimitsConfigFile
+
+                _ = LimitsConfigFile.model_validate(files.get("limits.json") or {})
+            except Exception as e:
+                raise ConfigError(f"limits.json invalid: {e}") from e
 
             cfg = AppConfigV2(
                 app=AppFileConfig.model_validate(files.get("app.json") or {}),

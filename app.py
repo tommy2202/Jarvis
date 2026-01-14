@@ -23,6 +23,7 @@ from jarvis.core.module_registry import ModuleRegistry
 from jarvis.core.security import AdminSession, PermissionPolicy, SecurityManager
 from jarvis.core.setup_wizard import SetupWizard
 from jarvis.core.modules import ModuleManager
+from jarvis.core.limits.limiter import Limiter
 from jarvis.core.job_manager import (
     JobManager,
     SleepArgs,
@@ -468,6 +469,7 @@ def main() -> None:
     stage_b = StageBLLMRouter(StageBLegacyConfig(mock_mode=True), lifecycle=llm_lifecycle)
 
     policy = PermissionPolicy(intents=dict(perms_cfg.get("intents") or {}))
+    limiter = Limiter(config_manager=config)
     dispatcher = Dispatcher(
         registry=registry,
         policy=policy,
@@ -484,6 +486,7 @@ def main() -> None:
         module_manager=module_manager,
         privacy_store=privacy_store,
         identity_manager=identity_manager,
+        limiter=limiter,
     )
 
     jarvis = JarvisApp(

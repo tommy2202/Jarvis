@@ -15,6 +15,7 @@ from jarvis.core.errors import AdminRequiredError, JarvisError
 from jarvis.core.capabilities.models import RequestContext, RequestSource
 from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
 from jarvis.core.privacy.gates import PrivacyGate, persistence_context
+from jarvis.core.limits.limiter import Limiter
 
 
 def _dispatcher_subprocess_worker(q, module_path: str, intent_id: str, args: Dict[str, Any], context: Dict[str, Any]) -> None:  # noqa: ANN001
@@ -71,6 +72,7 @@ class Dispatcher:
         module_manager: Any = None,
         privacy_store: Any = None,
         identity_manager: Any = None,
+        limiter: Limiter | None = None,
     ):
         self.registry = registry
         self.policy = policy
@@ -88,6 +90,7 @@ class Dispatcher:
         self.privacy_store = privacy_store
         self.identity_manager = identity_manager
         self._privacy_gate = PrivacyGate(privacy_store=privacy_store) if privacy_store is not None else None
+        self.limiter = limiter
 
     def _policy_engine(self) -> Any:
         # For backwards compatibility with existing wiring, allow the capability engine
@@ -390,6 +393,34 @@ class Dispatcher:
 
         # Build context (includes source/is_admin/safe_mode/shutting_down/trace_id)
         ctx = self._build_request_context(trace_id, intent_id=intent_id, mod_meta=(mod.meta or {}), context=(context or {}))
+
+        # Core limits (runaway protection) — deny before capability/policy evaluation.
+        if self.limiter is not None:
+            try:
+                diagnostics_override = bool((context or {}).get("diagnostics_override") or (context or {}).get("diagnostics", False))
+                dec0 = self.limiter.allow(
+                    source=str(getattr(ctx, "source").value if getattr(ctx, "source", None) is not None else "cli"),
+                    intent_id=str(intent_id),
+                    user_id=str(getattr(ctx, "user_id", "default")),
+                    client_id=getattr(ctx, "client_id", None),
+                    is_admin=bool(getattr(ctx, "is_admin", False)),
+                    diagnostics_override=bool(diagnostics_override),
+                )
+                if not bool(dec0.allowed):
+                    retry_s = float(getattr(dec0, "retry_after_seconds", 0.0) or 0.0)
+                    remediation = f"Wait {max(0.0, retry_s):.1f}s and try again."
+                    return self._deny(
+                        trace_id,
+                        intent_id=intent_id,
+                        module_id=module_id,
+                        denied_reason="rate_limited",
+                        reply="I’m throttling requests to prevent overload.",
+                        remediation=remediation,
+                        details={"limit_scope": getattr(dec0, "scope", ""), "retry_after_seconds": retry_s, "user_id": getattr(ctx, "user_id", "default")},
+                    )
+            except Exception:
+                # Fail-safe: do not block execution if limiter is unhealthy.
+                pass
 
         # Capability decision
         dec = self.capability_engine.evaluate(ctx)

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "default": {
+    "per_minute": 120,
+    "cooldown_seconds": 1
+  },
+  "sources": {
+    "cli": { "per_minute": 240, "cooldown_seconds": 0 },
+    "ui": { "per_minute": 240, "cooldown_seconds": 0 },
+    "voice": { "per_minute": 120, "cooldown_seconds": 1 },
+    "web": { "per_minute": 120, "cooldown_seconds": 1 },
+    "system": { "per_minute": 600, "cooldown_seconds": 0 }
+  },
+  "intents": {}
+}
+
