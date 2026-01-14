@@ -828,6 +828,14 @@ def main() -> None:
                 ok = job_manager.cancel_job(jid)
                 print("Canceled." if ok else "Unable to cancel.")
                 continue
+            if len(parts) >= 3 and parts[1] == "resume":
+                if not security.is_admin():
+                    print("Admin required.")
+                    continue
+                jid = parts[2]
+                ok = job_manager.resume_job(jid, is_admin=True, trace_id="cli")
+                print("Resumed." if ok else "Unable to resume.")
+                continue
             if len(parts) >= 3 and parts[1] == "tail":
                 jid = parts[2]
                 n = int(parts[3]) if len(parts) >= 4 else 20
@@ -847,7 +855,7 @@ def main() -> None:
                     continue
                 print("Unknown run target. Use: health_check | cleanup")
                 continue
-            print("Usage: /jobs list [STATUS] | /jobs show <id> | /jobs cancel <id> | /jobs tail <id> [n] | /jobs run health_check|cleanup")
+            print("Usage: /jobs list [STATUS] | /jobs show <id> | /jobs cancel <id> | /jobs resume <id> | /jobs tail <id> [n] | /jobs run health_check|cleanup")
             continue
         if text.startswith("/resources"):
             parts = text.split()

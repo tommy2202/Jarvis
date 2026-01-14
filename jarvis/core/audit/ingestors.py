@@ -83,7 +83,7 @@ def audit_from_core_event(ev: Any) -> Optional[AuditEvent]:
     elif et.startswith("job."):
         category = AuditCategory.job
         action = et
-        outcome = AuditOutcome.success if et in {"job.created", "job.started", "job.progress"} else (AuditOutcome.failed if et == "job.failed" else AuditOutcome.success)
+        outcome = AuditOutcome.success if et in {"job.created", "job.started", "job.progress"} else (AuditOutcome.failed if et in {"job.failed", "job.failed_due_to_restart"} else AuditOutcome.success)
         summary = f"Job {et.split('.',1)[1]}: {payload.get('kind') or payload.get('job_id')}"
     elif et.startswith("llm."):
         category = AuditCategory.llm
