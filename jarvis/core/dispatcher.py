@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import multiprocessing
 import traceback
+import contextvars
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -13,6 +14,7 @@ from jarvis.core.error_reporter import ErrorReporter
 from jarvis.core.errors import AdminRequiredError, JarvisError
 from jarvis.core.capabilities.models import RequestContext, RequestSource
 from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+from jarvis.core.privacy.gates import PrivacyGate, persistence_context
 
 
 def _dispatcher_subprocess_worker(q, module_path: str, intent_id: str, args: Dict[str, Any], context: Dict[str, Any]) -> None:  # noqa: ANN001
@@ -85,6 +87,7 @@ class Dispatcher:
         self.module_manager = module_manager
         self.privacy_store = privacy_store
         self.identity_manager = identity_manager
+        self._privacy_gate = PrivacyGate(privacy_store=privacy_store) if privacy_store is not None else None
 
     def _policy_engine(self) -> Any:
         # For backwards compatibility with existing wiring, allow the capability engine
@@ -496,55 +499,35 @@ class Dispatcher:
             if pmods:
                 context = dict(context or {})
                 context["policy"] = redact(pmods)
-            # Privacy gate (persistence only): if this execution would store personal data,
-            # require consent; otherwise force ephemeral mode (no persistence).
-            # Capability/policy enforcement remains authoritative for allow/deny.
-            try:
-                ps = getattr(self, "privacy_store", None)
-                if ps is not None:
-                    ctx2 = dict(context or {})
-                    scopes = []
-                    if isinstance(ctx2.get("privacy_scopes"), list):
-                        scopes.extend([str(x).lower() for x in ctx2.get("privacy_scopes") if str(x)])
-                    if isinstance((mod.meta or {}).get("privacy_scopes"), list):
-                        scopes.extend([str(x).lower() for x in (mod.meta or {}).get("privacy_scopes") if str(x)])
-                    scopes = sorted(set([s for s in scopes if s]))
-                    if scopes:
-                        user_id = str(ctx2.get("user_id") or "default")
-                        missing = []
-                        restricted = []
-                        for sc in scopes:
-                            try:
-                                if bool(getattr(ps, "is_scope_restricted")(user_id=user_id, scope=sc)):
-                                    restricted.append(sc)
-                                    continue
-                            except Exception:
-                                pass
-                            try:
-                                c = getattr(ps, "get_consent")(user_id=user_id, scope=sc)
-                                if not (c and bool(getattr(c, "granted", False))):
-                                    missing.append(sc)
-                            except Exception:
-                                missing.append(sc)
-                        if missing or restricted:
-                            ctx2["ephemeral"] = True
-                            ctx2["ephemeral_reason"] = {"missing_consent": missing, "restricted": restricted}
-                            context = ctx2
-                            if self.event_bus is not None:
-                                try:
-                                    self.event_bus.publish_nowait(
-                                        BaseEvent(
-                                            event_type="privacy.ephemeral_forced",
-                                            trace_id=trace_id,
-                                            source_subsystem=SourceSubsystem.dispatcher,
-                                            severity=EventSeverity.WARN,
-                                            payload={"intent_id": intent_id, "module_id": module_id, "scopes": scopes, "missing": missing, "restricted": restricted},
-                                        )
-                                    )
-                                except Exception:
-                                    pass
-            except Exception:
-                pass
+            # Privacy gate (persistence only): decide persist_allowed, otherwise force ephemeral mode.
+            persist_allowed = True
+            if self._privacy_gate is not None:
+                try:
+                    persist_allowed = bool(self._privacy_gate.evaluate(dict(context or {}), dict(mod.meta or {})))
+                except Exception:
+                    persist_allowed = False
+            if not persist_allowed:
+                context = dict(context or {})
+                context["ephemeral"] = True
+                if self.event_bus is not None:
+                    try:
+                        scopes = []
+                        if isinstance((context or {}).get("privacy_scopes"), list):
+                            scopes.extend([str(x).lower() for x in (context or {}).get("privacy_scopes") if str(x)])
+                        if isinstance((mod.meta or {}).get("privacy_scopes"), list):
+                            scopes.extend([str(x).lower() for x in (mod.meta or {}).get("privacy_scopes") if str(x)])
+                        scopes = sorted(set([s for s in scopes if s]))
+                        self.event_bus.publish_nowait(
+                            BaseEvent(
+                                event_type="privacy.ephemeral_forced",
+                                trace_id=trace_id,
+                                source_subsystem=SourceSubsystem.dispatcher,
+                                severity=EventSeverity.WARN,
+                                payload={"intent_id": intent_id, "module_id": module_id, "scopes": scopes, "user_id": getattr(ctx, "user_id", "default")},
+                            )
+                        )
+                    except Exception:
+                        pass
             self.event_logger.log(trace_id, "dispatch.execute", {"module_id": module_id, "intent_id": intent_id})
             contract = self._resolve_intent_contract(mod.meta or {}, intent_id)
             exec_mode = str(contract.get("execution_mode") or "inline").lower()
@@ -552,12 +535,21 @@ class Dispatcher:
                 from concurrent.futures import ThreadPoolExecutor
 
                 with ThreadPoolExecutor(max_workers=1) as ex:
-                    fut = ex.submit(mod.handler, intent_id=intent_id, args=args, context=context)
+                    # Ensure persistence context propagates into thread execution.
+                    cv = contextvars.copy_context()
+
+                    def _run():  # noqa: ANN001
+                        with persistence_context(persist_allowed=persist_allowed):
+                            return mod.handler(intent_id=intent_id, args=args, context=context)
+
+                    fut = ex.submit(cv.run, _run)
                     out = fut.result(timeout=30.0)
             elif exec_mode == "process":
+                # process isolation: pass ephemeral flag via context (best effort)
                 out = self._run_in_subprocess(getattr(mod, "module_path", ""), intent_id, args or {}, context or {})
             else:
-                out = mod.handler(intent_id=intent_id, args=args, context=context)
+                with persistence_context(persist_allowed=persist_allowed):
+                    out = mod.handler(intent_id=intent_id, args=args, context=context)
             return DispatchResult(ok=True, reply="", module_output=out, modifications=pmods or {})
         except Exception as e:  # noqa: BLE001
             je = self.error_reporter.report_exception(e, trace_id=trace_id, subsystem="dispatcher", context={"intent_id": intent_id, "module_id": module_id})

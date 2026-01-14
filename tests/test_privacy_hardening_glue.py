@@ -93,7 +93,7 @@ def test_transcript_storage_requires_consent(tmp_path):
     assert hits and hits[0].expires_at is not None
 
 
-def test_ephemeral_mode_when_no_consent(tmp_path):
+def test_ephemeral_mode_executes_action(tmp_path):
     cm = _make_cfg(tmp_path)
     ps = PrivacyStore(db_path=str(tmp_path / "runtime" / "privacy.sqlite"), config_manager=cm, event_bus=None, logger=_L())
 
@@ -109,7 +109,23 @@ def test_ephemeral_mode_when_no_consent(tmp_path):
     reg = ModuleRegistry()
 
     def handler(intent_id, args, context):  # noqa: ANN001
-        return {"ephemeral": bool((context or {}).get("ephemeral", False))}
+        # Attempt to persist an artifact reference; should be blocked in ephemeral mode.
+        from jarvis.core.privacy.models import DataRecord, LawfulBasis, Sensitivity, StorageKind
+
+        ps.register_record(
+            DataRecord(
+                user_id="default",
+                data_category=DataCategory.JOB_ARTIFACT,
+                sensitivity=Sensitivity.MEDIUM,
+                lawful_basis=LawfulBasis.LEGITIMATE_INTERESTS,
+                created_at="2026-01-01T00:00:00Z",
+                storage_kind=StorageKind.FILE,
+                storage_ref=str(tmp_path / "runtime" / "should_not_exist.bin"),
+                storage_ref_hash="x",
+                producer="test",
+            )
+        )
+        return {"ephemeral": bool((context or {}).get("ephemeral", False)), "ok": True}
 
     reg.register_handler(module_id="core.mod", module_path="test.core.mod", meta={}, handler=handler)
     disp = Dispatcher(
@@ -126,4 +142,62 @@ def test_ephemeral_mode_when_no_consent(tmp_path):
     r0 = disp.dispatch("t", "core.privacy.test", "core.mod", {}, {"source": "cli", "user_id": "default", "privacy_scopes": ["memory"]})
     assert r0.ok is True
     assert (r0.module_output or {}).get("ephemeral") is True
+    assert (r0.module_output or {}).get("ok") is True
+    # No artifact DataRecord should be persisted.
+    recs = ps.list_records(user_id="default", limit=200)
+    assert not any(r.data_category == DataCategory.JOB_ARTIFACT for r in recs)
+
+
+def test_consent_allows_persistence(tmp_path):
+    cm = _make_cfg(tmp_path)
+    store = _make_secure_store(tmp_path)
+    sec = SecurityManager(secure_store=store, admin_session=AdminSession(timeout_seconds=9999))
+    ps = PrivacyStore(db_path=str(tmp_path / "runtime" / "privacy.sqlite"), config_manager=cm, event_bus=None, logger=_L())
+
+    # Grant consent for memory scope so persistence is allowed.
+    ps.set_consent(user_id="default", scope="memory", granted=True, trace_id="t", actor_is_admin=True)
+
+    raw_caps = default_config_dict()
+    raw_caps.setdefault("intent_requirements", {})
+    raw_caps["intent_requirements"]["core.privacy.test2"] = []
+    cap_cfg = validate_and_normalize(raw_caps)
+    eng = CapabilityEngine(cfg=cap_cfg, audit=CapabilityAuditLogger(path=str(tmp_path / "security.jsonl")), logger=None)
+
+    reg = ModuleRegistry()
+
+    def handler2(intent_id, args, context):  # noqa: ANN001
+        from jarvis.core.privacy.models import DataRecord, LawfulBasis, Sensitivity, StorageKind
+
+        rid = ps.register_record(
+            DataRecord(
+                user_id="default",
+                data_category=DataCategory.JOB_ARTIFACT,
+                sensitivity=Sensitivity.MEDIUM,
+                lawful_basis=LawfulBasis.LEGITIMATE_INTERESTS,
+                created_at="2026-01-01T00:00:00Z",
+                storage_kind=StorageKind.FILE,
+                storage_ref=str(tmp_path / "runtime" / "ok.bin"),
+                storage_ref_hash="y",
+                producer="test",
+            )
+        )
+        return {"ephemeral": bool((context or {}).get("ephemeral", False)), "record_id": rid}
+
+    reg.register_handler(module_id="core.mod2", module_path="test.core.mod2", meta={}, handler=handler2)
+    disp = Dispatcher(
+        registry=reg,
+        policy=PermissionPolicy(intents={}),
+        security=sec,
+        event_logger=EventLogger(str(tmp_path / "e2.jsonl")),
+        logger=_L(),
+        capability_engine=eng,
+        secure_store=store,
+        privacy_store=ps,
+    )
+
+    r1 = disp.dispatch("t", "core.privacy.test2", "core.mod2", {}, {"source": "cli", "user_id": "default", "privacy_scopes": ["memory"]})
+    assert r1.ok is True
+    assert (r1.module_output or {}).get("ephemeral") is False
+    recs = ps.list_records(user_id="default", limit=200)
+    assert any(r.data_category == DataCategory.JOB_ARTIFACT for r in recs)
 
