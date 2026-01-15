@@ -29,12 +29,14 @@ class AuditTimelineManager:
         event_bus: Any = None,
         telemetry: Any = None,
         ops_logger: Any = None,
+        privacy_store: Any = None,
     ):
         self.cfg = cfg or {}
         self.logger = logger
         self.event_bus = event_bus
         self.telemetry = telemetry
         self.ops = ops_logger
+        self.privacy_store = privacy_store
 
         store = (self.cfg.get("store") or {})
         self.path_jsonl = str(store.get("path_jsonl") or os.path.join("logs", "audit", "audit_events.jsonl"))
@@ -48,6 +50,40 @@ class AuditTimelineManager:
         self._integrity_broken = False
         self._cursor_path = os.path.join(os.path.dirname(self.path_jsonl), "cursors.json")
         self._cursors = self._load_cursors()
+
+        # Privacy inventory (best-effort, no content)
+        if self.privacy_store is not None:
+            try:
+                from jarvis.core.privacy.models import DataCategory, LawfulBasis, Sensitivity
+                from jarvis.core.privacy.tagging import data_record_for_file
+
+                self.privacy_store.register_record(
+                    data_record_for_file(
+                        user_id="default",
+                        path=self.path_jsonl,
+                        category=DataCategory.AUDIT,
+                        sensitivity=Sensitivity.LOW,
+                        lawful_basis=LawfulBasis.LEGITIMATE_INTERESTS,
+                        trace_id="startup",
+                        producer="audit_timeline",
+                        tags={"format": "jsonl"},
+                    )
+                )
+                if self.use_sqlite:
+                    self.privacy_store.register_record(
+                        data_record_for_file(
+                            user_id="default",
+                            path=self.sqlite_path,
+                            category=DataCategory.AUDIT,
+                            sensitivity=Sensitivity.LOW,
+                            lawful_basis=LawfulBasis.LEGITIMATE_INTERESTS,
+                            trace_id="startup",
+                            producer="audit_timeline",
+                            tags={"format": "sqlite"},
+                        )
+                    )
+            except Exception:
+                pass
 
     # ---- wiring ----
     def start(self) -> None:
@@ -101,10 +137,15 @@ class AuditTimelineManager:
         """
         Ingest security/ops/errors logs into audit store using file offsets cursor.
         """
+        # Allow tests/embedders to override source paths for determinism.
+        src_cfg = (self.cfg.get("ingest_sources") or {}) if isinstance(self.cfg, dict) else {}
+        sec_path = str((src_cfg.get("security") if isinstance(src_cfg, dict) else None) or os.path.join("logs", "security.jsonl"))
+        ops_path = str((src_cfg.get("ops") if isinstance(src_cfg, dict) else None) or os.path.join("logs", "ops.jsonl"))
+        err_path = str((src_cfg.get("errors") if isinstance(src_cfg, dict) else None) or os.path.join("logs", "errors.jsonl"))
         mapping = [
-            ("security", os.path.join("logs", "security.jsonl"), audit_from_security_log),
-            ("ops", os.path.join("logs", "ops.jsonl"), audit_from_ops_log),
-            ("errors", os.path.join("logs", "errors.jsonl"), audit_from_errors_log),
+            ("security", sec_path, audit_from_security_log),
+            ("ops", ops_path, audit_from_ops_log),
+            ("errors", err_path, audit_from_errors_log),
         ]
         for name, path, fn in mapping:
             off = int((self._cursors.get(name) or 0))

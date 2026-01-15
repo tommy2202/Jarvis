@@ -31,12 +31,22 @@ class ErrorReporterConfig:
 
 
 class ErrorReporter:
-    def __init__(self, *, path: str = os.path.join("logs", "errors.jsonl"), cfg: Optional[ErrorReporterConfig] = None, telemetry: Any = None, runtime_state: Any = None, event_bus: Any = None):
+    def __init__(
+        self,
+        *,
+        path: str = os.path.join("logs", "errors.jsonl"),
+        cfg: Optional[ErrorReporterConfig] = None,
+        telemetry: Any = None,
+        runtime_state: Any = None,
+        event_bus: Any = None,
+        privacy_store: Any = None,
+    ):
         self.path = path
         self.cfg = cfg or ErrorReporterConfig()
         self.telemetry = telemetry
         self.runtime_state = runtime_state
         self.event_bus = event_bus
+        self.privacy_store = privacy_store
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self._debug_override: Optional[bool] = None
@@ -71,6 +81,26 @@ class ErrorReporter:
         with self._lock:
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
+        # Privacy inventory (best-effort, no content)
+        if self.privacy_store is not None:
+            try:
+                from jarvis.core.privacy.models import DataCategory, LawfulBasis, Sensitivity
+                from jarvis.core.privacy.tagging import data_record_for_file
+
+                self.privacy_store.register_record(
+                    data_record_for_file(
+                        user_id="default",
+                        path=self.path,
+                        category=DataCategory.ERROR_LOG,
+                        sensitivity=Sensitivity.LOW,
+                        lawful_basis=LawfulBasis.LEGITIMATE_INTERESTS,
+                        trace_id=str(trace_id or "errors"),
+                        producer="error_reporter",
+                        tags={"format": "jsonl", "subsystem": str(subsystem or "")[:40]},
+                    )
+                )
+            except Exception:
+                pass
         # Passive telemetry signal (never throw)
         if self.telemetry is not None:
             try:

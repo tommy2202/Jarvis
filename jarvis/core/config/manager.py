@@ -245,6 +245,9 @@ class ConfigManager:
             "telemetry.json",
             "resources.json",
             "audit.json",
+            "privacy.json",
+            "module_trust.json",
+            "limits.json",
             "policy.json",
             "backup.json",
             "events.json",
@@ -278,6 +281,10 @@ class ConfigManager:
         return out
 
     def _ensure_defaults(self, files: Dict[str, Dict[str, Any]], *, max_backups: int) -> Dict[str, Dict[str, Any]]:
+        from jarvis.core.privacy.models import default_privacy_config_dict
+        from jarvis.core.modules.models import default_module_trust_config_dict
+        from jarvis.core.limits.limiter import default_limits_config_dict
+
         defaults: Dict[str, Dict[str, Any]] = {
             "app.json": AppFileConfig().model_dump(),
             "security.json": SecurityConfig().model_dump(),
@@ -288,6 +295,9 @@ class ConfigManager:
             "telemetry.json": TelemetryConfigFile().model_dump(),
             "resources.json": ResourcesConfigFile().model_dump(),
             "audit.json": AuditConfigFile().model_dump(),
+            "privacy.json": default_privacy_config_dict(),
+            "module_trust.json": default_module_trust_config_dict(),
+            "limits.json": default_limits_config_dict(),
             "policy.json": PolicyConfigFile().model_dump(),
             "backup.json": BackupConfigFile().model_dump(),
             "events.json": EventsBusConfigFile().model_dump(),
@@ -323,6 +333,30 @@ class ConfigManager:
                 _ = validate_and_normalize(files.get("capabilities.json") or {})
             except Exception as e:
                 raise ConfigError(f"capabilities.json invalid: {e}") from e
+
+            # Privacy config is validated separately (outside AppConfigV2).
+            try:
+                from jarvis.core.privacy.models import PrivacyConfigFile
+
+                _ = PrivacyConfigFile.model_validate(files.get("privacy.json") or {})
+            except Exception as e:
+                raise ConfigError(f"privacy.json invalid: {e}") from e
+
+            # Module trust config is validated separately (outside AppConfigV2).
+            try:
+                from jarvis.core.modules.models import ModuleTrustConfigFile
+
+                _ = ModuleTrustConfigFile.model_validate(files.get("module_trust.json") or {})
+            except Exception as e:
+                raise ConfigError(f"module_trust.json invalid: {e}") from e
+
+            # Limits config is validated separately (outside AppConfigV2).
+            try:
+                from jarvis.core.limits.limiter import LimitsConfigFile
+
+                _ = LimitsConfigFile.model_validate(files.get("limits.json") or {})
+            except Exception as e:
+                raise ConfigError(f"limits.json invalid: {e}") from e
 
             cfg = AppConfigV2(
                 app=AppFileConfig.model_validate(files.get("app.json") or {}),

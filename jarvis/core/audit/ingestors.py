@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import time
@@ -15,6 +16,32 @@ from jarvis.core.audit.models import (
     AuditSeverity,
 )
 from jarvis.core.audit.redaction import redact_details
+
+
+def _parse_ts(v: Any) -> float:
+    """
+    Parse timestamps from JSONL logs.
+
+    Supports:
+    - epoch seconds (int/float)
+    - ISO8601 'YYYY-mm-ddTHH:MM:SSZ' (used by Jarvis loggers)
+    """
+    if v is None:
+        return float(time.time())
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v or "").strip()
+    if not s:
+        return float(time.time())
+    try:
+        return float(s)
+    except Exception:
+        pass
+    try:
+        ts = time.strptime(s, "%Y-%m-%dT%H:%M:%SZ")
+        return float(calendar.timegm(ts))
+    except Exception:
+        return float(time.time())
 
 
 def audit_from_core_event(ev: Any) -> Optional[AuditEvent]:
@@ -56,7 +83,7 @@ def audit_from_core_event(ev: Any) -> Optional[AuditEvent]:
     elif et.startswith("job."):
         category = AuditCategory.job
         action = et
-        outcome = AuditOutcome.success if et in {"job.created", "job.started", "job.progress"} else (AuditOutcome.failed if et == "job.failed" else AuditOutcome.success)
+        outcome = AuditOutcome.success if et in {"job.created", "job.started", "job.progress"} else (AuditOutcome.failed if et in {"job.failed", "job.failed_due_to_restart"} else AuditOutcome.success)
         summary = f"Job {et.split('.',1)[1]}: {payload.get('kind') or payload.get('job_id')}"
     elif et.startswith("llm."):
         category = AuditCategory.llm
@@ -112,11 +139,17 @@ def audit_from_core_event(ev: Any) -> Optional[AuditEvent]:
     severity = sev_map.get(sev.upper(), AuditSeverity.INFO)
 
     details = redact_details(category.value, action, dict(payload) if isinstance(payload, dict) else {})
+    uid = None
+    try:
+        uid = str(payload.get("user_id") or "") if isinstance(payload, dict) else ""
+        uid = uid or None
+    except Exception:
+        uid = None
 
     return AuditEvent(
         timestamp=float(getattr(ev, "timestamp", None) or time.time()),
         trace_id=str(trace_id) if trace_id else None,
-        actor=Actor(source=actor_source, user=ActorUser.unknown),
+        actor=Actor(source=actor_source, user=ActorUser.unknown, user_id=uid),
         category=category,
         action=str(action),
         outcome=outcome,
@@ -177,7 +210,7 @@ def audit_from_security_log(obj: Dict[str, Any]) -> Optional[AuditEvent]:
     sev = sev_map.get(severity.upper(), AuditSeverity.INFO)
     safe_details = redact_details("security", event, {"ip": ip, **details})
     return AuditEvent(
-        timestamp=float(obj.get("ts") or time.time()),
+        timestamp=_parse_ts(obj.get("ts")),
         trace_id=trace_id or None,
         actor=Actor(source=ActorSource.web, user=ActorUser.unknown),
         category=AuditCategory.security,
@@ -199,7 +232,7 @@ def audit_from_ops_log(obj: Dict[str, Any]) -> Optional[AuditEvent]:
         return None
     oc = AuditOutcome.success if outcome == "ok" or outcome == "success" else AuditOutcome.failed
     return AuditEvent(
-        timestamp=float(obj.get("ts") or time.time()),
+        timestamp=_parse_ts(obj.get("ts")),
         trace_id=trace_id or None,
         actor=Actor(source=ActorSource.system, user=ActorUser.unknown),
         category=AuditCategory.lifecycle,
@@ -221,7 +254,7 @@ def audit_from_errors_log(obj: Dict[str, Any]) -> Optional[AuditEvent]:
         return None
     sev_map = {"INFO": AuditSeverity.INFO, "WARN": AuditSeverity.WARN, "ERROR": AuditSeverity.ERROR, "CRITICAL": AuditSeverity.CRITICAL}
     return AuditEvent(
-        timestamp=float(obj.get("timestamp") or time.time()),
+        timestamp=_parse_ts(obj.get("timestamp") or obj.get("ts")),
         trace_id=trace_id or None,
         actor=Actor(source=ActorSource.system, user=ActorUser.unknown),
         category=AuditCategory.error,

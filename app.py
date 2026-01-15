@@ -23,6 +23,7 @@ from jarvis.core.module_registry import ModuleRegistry
 from jarvis.core.security import AdminSession, PermissionPolicy, SecurityManager
 from jarvis.core.setup_wizard import SetupWizard
 from jarvis.core.modules import ModuleManager
+from jarvis.core.limits.limiter import Limiter
 from jarvis.core.job_manager import (
     JobManager,
     SleepArgs,
@@ -252,16 +253,28 @@ def main() -> None:
                 pass
     runtime_state.mark_dirty_startup()
 
+    # Privacy / GDPR core (data inventory + classification)
+    from jarvis.core.privacy.store import PrivacyStore
+
+    privacy_store = PrivacyStore(db_path=os.path.join(runtime_state.paths.runtime_dir, "privacy.sqlite"), config_manager=config, event_bus=event_bus, logger=logger)
+    from jarvis.core.privacy.dsar import DsarEngine, ModuleHooksRegistry
+
+    dsar_engine = DsarEngine(store=privacy_store, root_path=".", hooks=ModuleHooksRegistry(), logger=logger)
+
     # Audit Timeline (hash-chained, privacy-safe)
     from jarvis.core.audit.timeline import AuditTimelineManager
 
-    audit = AuditTimelineManager(cfg=cfg_obj.audit.model_dump(), logger=logger, event_bus=event_bus, telemetry=None, ops_logger=ops)
+    audit = AuditTimelineManager(cfg=cfg_obj.audit.model_dump(), logger=logger, event_bus=event_bus, telemetry=None, ops_logger=ops, privacy_store=privacy_store)
     audit.start()
+
+    # Re-create loggers with privacy inventory wiring for the rest of the process lifetime.
+    event_logger = EventLogger("logs/events.jsonl", privacy_store=privacy_store)
+    ops = OpsLogger(privacy_store=privacy_store)
 
     # Capability bus (validated config/capabilities.json)
     cap_raw = config.read_non_sensitive("capabilities.json")
     cap_cfg = validate_and_normalize(cap_raw)
-    cap_audit = CapabilityAuditLogger(path=os.path.join("logs", "security.jsonl"))
+    cap_audit = CapabilityAuditLogger(path=os.path.join("logs", "security.jsonl"), privacy_store=privacy_store)
     cap_engine = CapabilityEngine(cfg=cap_cfg, audit=cap_audit, logger=logger, event_bus=event_bus)
 
     # Policy engine (config-driven constraints)
@@ -273,7 +286,7 @@ def main() -> None:
     cap_engine.policy_engine = policy_engine
 
     telemetry_cfg = TelemetryConfig.model_validate(cfg_obj.telemetry.model_dump())
-    telemetry = TelemetryManager(cfg=telemetry_cfg, logger=logger, root_path=".")
+    telemetry = TelemetryManager(cfg=telemetry_cfg, logger=logger, root_path=".", privacy_store=privacy_store)
     telemetry.attach(config_manager=config)
     runtime_state.attach(telemetry=telemetry)
     event_bus.telemetry = telemetry
@@ -293,7 +306,13 @@ def main() -> None:
 
     # Error handling + recovery subsystem
     recovery_cfg = RecoveryConfig.model_validate(cfg_obj.recovery.model_dump())
-    error_reporter = ErrorReporter(cfg=ErrorReporterConfig(include_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False))), telemetry=telemetry, runtime_state=runtime_state, event_bus=event_bus)
+    error_reporter = ErrorReporter(
+        cfg=ErrorReporterConfig(include_tracebacks=bool(recovery_cfg.debug.get("include_tracebacks", False))),
+        telemetry=telemetry,
+        runtime_state=runtime_state,
+        event_bus=event_bus,
+        privacy_store=privacy_store,
+    )
     recovery_policy = RecoveryPolicy(recovery_cfg)
     breakers_map = {}
     for name, bc in (recovery_cfg.circuit_breakers or {}).items():
@@ -342,9 +361,19 @@ def main() -> None:
         max_bytes=int(cfg_obj.security.secure_store_max_bytes),
         read_only=bool(cfg_obj.security.secure_store_read_only),
     )
+    try:
+        privacy_store.attach_secure_store(secure_store)
+    except Exception:
+        pass
     security = SecurityManager(secure_store=secure_store, admin_session=AdminSession(timeout_seconds=int(cfg_obj.security.admin_session_timeout_seconds)))
     telemetry.attach(secure_store=secure_store, security_manager=security)
     runtime_state.attach(security_manager=security, secure_store=secure_store)
+
+    # Identity manager (user attribution + active user/session)
+    from jarvis.core.identity.manager import IdentityManager
+
+    identity_manager = IdentityManager(privacy_store=privacy_store, security_manager=security, logger=logger)
+    _ = identity_manager.load_or_create_default_user()
 
     # Backup manager (zip exports + manifests)
     from jarvis.core.backup.api import BackupManager
@@ -440,6 +469,7 @@ def main() -> None:
     stage_b = StageBLLMRouter(StageBLegacyConfig(mock_mode=True), lifecycle=llm_lifecycle)
 
     policy = PermissionPolicy(intents=dict(perms_cfg.get("intents") or {}))
+    limiter = Limiter(config_manager=config)
     dispatcher = Dispatcher(
         registry=registry,
         policy=policy,
@@ -454,6 +484,9 @@ def main() -> None:
         event_bus=event_bus,
         policy_engine=policy_engine,
         module_manager=module_manager,
+        privacy_store=privacy_store,
+        identity_manager=identity_manager,
+        limiter=limiter,
     )
 
     jarvis = JarvisApp(
@@ -659,6 +692,8 @@ def main() -> None:
         event_bus=event_bus,
         audit_timeline=audit,
         module_manager=module_manager,
+        privacy_store=privacy_store,
+        dsar_engine=dsar_engine,
     )
     runtime.start()
     telemetry.attach(runtime=runtime, voice_adapter=voice_adapter, tts_adapter=tts_adapter)
@@ -793,6 +828,14 @@ def main() -> None:
                 ok = job_manager.cancel_job(jid)
                 print("Canceled." if ok else "Unable to cancel.")
                 continue
+            if len(parts) >= 3 and parts[1] == "resume":
+                if not security.is_admin():
+                    print("Admin required.")
+                    continue
+                jid = parts[2]
+                ok = job_manager.resume_job(jid, is_admin=True, trace_id="cli")
+                print("Resumed." if ok else "Unable to resume.")
+                continue
             if len(parts) >= 3 and parts[1] == "tail":
                 jid = parts[2]
                 n = int(parts[3]) if len(parts) >= 4 else 20
@@ -812,7 +855,7 @@ def main() -> None:
                     continue
                 print("Unknown run target. Use: health_check | cleanup")
                 continue
-            print("Usage: /jobs list [STATUS] | /jobs show <id> | /jobs cancel <id> | /jobs tail <id> [n] | /jobs run health_check|cleanup")
+            print("Usage: /jobs list [STATUS] | /jobs show <id> | /jobs cancel <id> | /jobs resume <id> | /jobs tail <id> [n] | /jobs run health_check|cleanup")
             continue
         if text.startswith("/resources"):
             parts = text.split()
@@ -1072,18 +1115,19 @@ def main() -> None:
             parts = text.split()
             cmd = parts[1] if len(parts) >= 2 else "list"
             if cmd == "list":
-                reg = module_manager.list_registry().get("modules") or {}
-                for mid in sorted(list(reg.keys())):
-                    r = reg.get(mid) or {}
-                    print({"module_id": mid, "installed": bool(r.get("installed")), "enabled": bool(r.get("enabled")), "requires_admin": bool(r.get("requires_admin_to_enable")), "reason": str(r.get("reason") or "")})
+                from jarvis.core.modules.cli import modules_list_lines
+
+                for line in modules_list_lines(module_manager=module_manager, trace_id="cli"):
+                    print(line)
                 continue
             if cmd == "scan":
                 print(module_manager.scan(trace_id="cli"))
                 continue
             if cmd == "show" and len(parts) >= 3:
                 mid = parts[2]
-                reg = module_manager.list_registry().get("modules") or {}
-                print(reg.get(mid) or {"error": "not found"})
+                from jarvis.core.modules.cli import modules_show_payload
+
+                print(modules_show_payload(module_manager=module_manager, module_id=mid, trace_id="cli"))
                 continue
             if cmd in {"enable", "disable"} and len(parts) >= 3:
                 mid = parts[2]
@@ -1097,7 +1141,132 @@ def main() -> None:
                 out_path = parts[2]
                 print({"exported": module_manager.export(out_path)})
                 continue
-            print("Usage: /modules list|scan|show <id>|enable <id>|disable <id>|export <path>")
+            print("Usage: /modules list | /modules scan | /modules show <id> | /modules enable <id> | /modules disable <id> | /modules export <path>")
+            continue
+        if text.startswith("/privacy"):
+            parts = text.split()
+            cmd = parts[1] if len(parts) >= 2 else "status"
+            if cmd == "status":
+                prefs = privacy_store.get_preferences(user_id="default")
+                cons = {}
+                for scope in sorted((privacy_store._privacy_cfg_raw().get("default_consent_scopes") or {}).keys()):  # noqa: SLF001
+                    c = privacy_store.get_consent(user_id="default", scope=scope)
+                    cons[scope] = bool(c.granted) if c else False
+                print(
+                    {
+                        "db": os.path.join(runtime_state.paths.runtime_dir, "privacy.sqlite").replace("\\", "/"),
+                        "user_id": "default",
+                        "preferences": prefs.model_dump(),
+                        "consent": cons,
+                    }
+                )
+                continue
+            if cmd == "dsar":
+                sub = parts[2] if len(parts) >= 3 else "help"
+                if sub == "request" and len(parts) >= 4:
+                    kind = parts[3]
+                    rid = dsar_engine.request(user_id="default", request_type=kind, payload={}, trace_id="cli")
+                    print({"request_id": rid, "type": kind})
+                    continue
+                if sub == "status" and len(parts) >= 4:
+                    rid = parts[3]
+                    req = dsar_engine.get(rid)
+                    print(req.model_dump() if req else {"error": "not found"})
+                    continue
+                if sub == "run" and len(parts) >= 4:
+                    if not security.is_admin():
+                        print("Admin required (CAP_ADMIN_ACTION).")
+                        continue
+                    rid = parts[3]
+                    try:
+                        req = dsar_engine.run(request_id=rid, actor_is_admin=True, trace_id="cli")
+                        print(req.model_dump())
+                    except Exception as e:
+                        print({"error": str(e)})
+                    continue
+                if sub == "export-open" and len(parts) >= 4:
+                    rid = parts[3]
+                    req = dsar_engine.get(rid)
+                    if not req or not req.export_path:
+                        print({"error": "no export available"})
+                        continue
+                    print({"export_path": req.export_path})
+                    continue
+                print("Usage: /privacy dsar request export|delete|restrict|correct | /privacy dsar status <id> | /privacy dsar run <id> | /privacy dsar export-open <id>")
+                continue
+            if cmd == "consent" and len(parts) >= 4 and parts[2] in {"grant", "revoke"}:
+                action = parts[2]
+                scope = parts[3]
+                is_admin = bool(security.is_admin())
+                if scope.strip().lower() in getattr(privacy_store, "SENSITIVE_SCOPES", set()) and not is_admin:
+                    print("Admin required.")
+                    continue
+                ok = privacy_store.set_consent(user_id="default", scope=scope, granted=(action == "grant"), trace_id="cli", actor_is_admin=is_admin)
+                print("OK" if ok else "Failed")
+                continue
+            if cmd == "retention" and len(parts) >= 3 and parts[2] == "list":
+                rows = privacy_store.list_retention_policies()
+                out = []
+                for p in rows:
+                    if not isinstance(p, dict):
+                        continue
+                    pid = f"{str(p.get('data_category') or '').upper()}:{str(p.get('sensitivity') or '').upper()}"
+                    out.append({"policy_id": pid, "ttl_days": p.get("ttl_days"), "keep_forever": bool(p.get("keep_forever", False))})
+                print({"policies": out})
+                continue
+            if cmd == "retention" and len(parts) >= 3 and parts[2] == "run":
+                res = privacy_store.retention_run(trace_id="cli")
+                print(res)
+                continue
+            if cmd == "retention" and len(parts) >= 3 and parts[2] == "pending":
+                rows = privacy_store.retention_pending(limit=200)
+                print({"pending": rows})
+                continue
+            if cmd == "retention" and len(parts) >= 4 and parts[2] in {"approve", "deny"}:
+                if not security.is_admin():
+                    print("Admin required (CAP_ADMIN_ACTION).")
+                    continue
+                aid = parts[3]
+                try:
+                    ok = privacy_store.retention_approve(action_id=aid, trace_id="cli", actor_is_admin=True) if parts[2] == "approve" else privacy_store.retention_deny(action_id=aid, trace_id="cli", actor_is_admin=True)
+                except Exception:
+                    ok = False
+                print("OK" if ok else "Failed")
+                continue
+            if cmd == "retention" and len(parts) >= 5 and parts[2] == "set":
+                if not security.is_admin():
+                    print("Admin required (CAP_ADMIN_ACTION).")
+                    continue
+                pid = parts[3]
+                ttl = int(parts[4])
+                try:
+                    ok = privacy_store.set_retention_ttl_days(policy_id=pid, ttl_days=ttl, trace_id="cli", actor_is_admin=True)
+                except Exception:
+                    ok = False
+                print("OK" if ok else "Failed")
+                continue
+            print("Usage: /privacy status | /privacy consent grant <scope> | /privacy consent revoke <scope> | /privacy retention list | /privacy retention run | /privacy retention pending | /privacy retention approve <id> | /privacy retention deny <id> | /privacy retention set <policy_id> <ttl_days>")
+            continue
+        if text.startswith("/user"):
+            parts = text.split()
+            cmd = parts[1] if len(parts) >= 2 else "status"
+            if cmd in {"status", "whoami"}:
+                u = identity_manager.get_active_user()
+                sess = identity_manager.active_session()
+                print({"user": u.model_dump(), "admin": bool(security.is_admin()), "session": (sess.model_dump() if sess else None)})
+                continue
+            if cmd == "switch" and len(parts) >= 3:
+                if not security.is_admin():
+                    print("Admin required.")
+                    continue
+                uid = parts[2]
+                try:
+                    u2 = identity_manager.switch_active_user(uid)
+                    print({"switched_to": u2.model_dump()})
+                except Exception as e:
+                    print({"error": str(e)})
+                continue
+            print("Usage: /user status | /user whoami | /user switch <user_id>")
             continue
         if text.startswith("/audit"):
             from jarvis.core.audit.formatter import format_line

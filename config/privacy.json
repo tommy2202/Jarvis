@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "default_user_id": "default",
+  "data_minimization": {
+    "disable_persistent_user_text": true,
+    "disable_persistent_raw_prompts": true,
+    "disable_persistent_transcripts": true
+  },
+  "default_consent_scopes": {
+    "telemetry": true,
+    "crash_reports": true,
+    "memory": false,
+    "transcripts": false
+  },
+  "dsar": {
+    "export": {
+      "allow_copy_categories": [],
+      "include_redacted_logs": true
+    },
+    "delete": {
+      "categories": [
+        "JOB_ARTIFACT"
+      ],
+      "deletion_action": "delete"
+    },
+    "restrict": {
+      "default_scopes": [
+        "memory"
+      ]
+    }
+  },
+  "retention_policies": [
+    {
+      "data_category": "AUDIT",
+      "sensitivity": "LOW",
+      "ttl_days": 90,
+      "deletion_action": "delete",
+      "review_required": true
+    },
+    {
+      "data_category": "SECURITY_LOG",
+      "sensitivity": "LOW",
+      "ttl_days": 30,
+      "deletion_action": "delete",
+      "review_required": false
+    },
+    {
+      "data_category": "ERROR_LOG",
+      "sensitivity": "LOW",
+      "ttl_days": 30,
+      "deletion_action": "delete",
+      "review_required": false
+    },
+    {
+      "data_category": "OPS_LOG",
+      "sensitivity": "LOW",
+      "ttl_days": 30,
+      "deletion_action": "delete",
+      "review_required": false
+    },
+    {
+      "data_category": "TELEMETRY",
+      "sensitivity": "LOW",
+      "ttl_days": 14,
+      "deletion_action": "delete",
+      "review_required": false
+    },
+    {
+      "data_category": "RUNTIME_STATE",
+      "sensitivity": "LOW",
+      "ttl_days": 90,
+      "deletion_action": "delete",
+      "review_required": false
+    },
+    {
+      "data_category": "CONFIG",
+      "sensitivity": "LOW",
+      "ttl_days": 365,
+      "deletion_action": "delete",
+      "review_required": true
+    },
+    {
+      "data_category": "MODULES",
+      "sensitivity": "LOW",
+      "ttl_days": 90,
+      "deletion_action": "delete",
+      "review_required": false
+    },
+    {
+      "data_category": "JOB_ARTIFACT",
+      "sensitivity": "MEDIUM",
+      "ttl_days": 30,
+      "deletion_action": "delete",
+      "review_required": true
+    },
+    {
+      "data_category": "TRANSCRIPT",
+      "sensitivity": "HIGH",
+      "ttl_days": 7,
+      "deletion_action": "delete",
+      "review_required": false
+    }
+  ]
+}
+

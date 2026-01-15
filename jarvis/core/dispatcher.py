@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import multiprocessing
 import traceback
+import contextvars
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -13,6 +14,8 @@ from jarvis.core.error_reporter import ErrorReporter
 from jarvis.core.errors import AdminRequiredError, JarvisError
 from jarvis.core.capabilities.models import RequestContext, RequestSource
 from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+from jarvis.core.privacy.gates import PrivacyGate, persistence_context
+from jarvis.core.limits.limiter import Limiter
 
 
 def _dispatcher_subprocess_worker(q, module_path: str, intent_id: str, args: Dict[str, Any], context: Dict[str, Any]) -> None:  # noqa: ANN001
@@ -67,6 +70,9 @@ class Dispatcher:
         event_bus: Any = None,
         policy_engine: Any = None,
         module_manager: Any = None,
+        privacy_store: Any = None,
+        identity_manager: Any = None,
+        limiter: Limiter | None = None,
     ):
         self.registry = registry
         self.policy = policy
@@ -81,6 +87,10 @@ class Dispatcher:
         self.event_bus = event_bus
         self.policy_engine = policy_engine
         self.module_manager = module_manager
+        self.privacy_store = privacy_store
+        self.identity_manager = identity_manager
+        self._privacy_gate = PrivacyGate(privacy_store=privacy_store) if privacy_store is not None else None
+        self.limiter = limiter
 
     def _policy_engine(self) -> Any:
         # For backwards compatibility with existing wiring, allow the capability engine
@@ -106,6 +116,7 @@ class Dispatcher:
             "module_id": module_id,
             "denied_reason": denied_reason,
             "remediation": remediation[:300],
+            "user_id": str((details or {}).get("user_id") or ""),
             **(details or {}),
         }
         self.event_logger.log(trace_id, "dispatch.denied", payload)
@@ -147,6 +158,17 @@ class Dispatcher:
         shutting_down = bool((context or {}).get("shutting_down", False))
         safe_mode = bool((context or {}).get("safe_mode", False))
         client_id = str(client.get("id") or client.get("client_id") or "")
+        # Identity: prefer explicit context user_id, otherwise use active user if available.
+        user_id = str((context or {}).get("user_id") or "")
+        if not user_id:
+            try:
+                im = getattr(self, "identity_manager", None)
+                if im is not None:
+                    user_id = str(im.get_active_user().user_id)
+            except Exception:
+                user_id = ""
+        if not user_id:
+            user_id = "default"
 
         breaker_status = {}
         try:
@@ -167,6 +189,7 @@ class Dispatcher:
             trace_id=trace_id,
             source=RequestSource(source_s),
             client_id=client_id or None,
+            user_id=user_id,
             is_admin=bool(self.security.is_admin()),
             safe_mode=safe_mode,
             shutting_down=shutting_down,
@@ -229,15 +252,35 @@ class Dispatcher:
             mm = getattr(self, "module_manager", None)
             if mm is not None:
                 try:
-                    if not bool(mm.is_module_enabled(str(module_id))):
+                    st = None
+                    try:
+                        st = getattr(mm, "get_status", None)(str(module_id), trace_id=trace_id) if callable(getattr(mm, "get_status", None)) else None
+                    except Exception:
+                        st = None
+                    enabled_ok = bool(mm.is_module_enabled(str(module_id)))
+                    if st is not None:
+                        enabled_ok = bool(getattr(st, "state", None) and getattr(st.state, "value", "") == "INSTALLED_ENABLED")
+                    if not enabled_ok:
+                        state_s = str(getattr(getattr(st, "state", None), "value", "") or "UNKNOWN")
+                        reason_code_s = str(getattr(getattr(st, "reason_code", None), "value", "") or "UNKNOWN")
+                        reason_human = str(getattr(st, "reason_human", "") or "Module is not runnable.")
+                        remediation = str(getattr(st, "remediation", "") or "Run /modules scan or /modules enable <id>.")
+                        # User-safe message includes state + reason; remediation is appended by _deny.
+                        reply = f"Module '{module_id}' is {state_s} ({reason_code_s}): {reason_human}"
                         return self._deny(
                             trace_id,
                             intent_id=intent_id,
                             module_id=module_id,
                             denied_reason="module_not_installed_or_disabled",
-                            reply="Module is not installed/enabled.",
-                            remediation="Run /modules scan or /modules enable <id>.",
-                            details={"module_id": module_id},
+                            reply=reply,
+                            remediation=remediation,
+                            details={
+                                "module_id": module_id,
+                                "module_state": state_s,
+                                "module_reason_code": reason_code_s,
+                                "module_remediation": remediation[:200],
+                                "user_id": str((context or {}).get("user_id") or ""),
+                            },
                         )
                 except Exception:
                     # fail-safe: deny if module manager is unhealthy
@@ -351,6 +394,34 @@ class Dispatcher:
         # Build context (includes source/is_admin/safe_mode/shutting_down/trace_id)
         ctx = self._build_request_context(trace_id, intent_id=intent_id, mod_meta=(mod.meta or {}), context=(context or {}))
 
+        # Core limits (runaway protection) — deny before capability/policy evaluation.
+        if self.limiter is not None:
+            try:
+                diagnostics_override = bool((context or {}).get("diagnostics_override") or (context or {}).get("diagnostics", False))
+                dec0 = self.limiter.allow(
+                    source=str(getattr(ctx, "source").value if getattr(ctx, "source", None) is not None else "cli"),
+                    intent_id=str(intent_id),
+                    user_id=str(getattr(ctx, "user_id", "default")),
+                    client_id=getattr(ctx, "client_id", None),
+                    is_admin=bool(getattr(ctx, "is_admin", False)),
+                    diagnostics_override=bool(diagnostics_override),
+                )
+                if not bool(dec0.allowed):
+                    retry_s = float(getattr(dec0, "retry_after_seconds", 0.0) or 0.0)
+                    remediation = f"Wait {max(0.0, retry_s):.1f}s and try again."
+                    return self._deny(
+                        trace_id,
+                        intent_id=intent_id,
+                        module_id=module_id,
+                        denied_reason="rate_limited",
+                        reply="I’m throttling requests to prevent overload.",
+                        remediation=remediation,
+                        details={"limit_scope": getattr(dec0, "scope", ""), "retry_after_seconds": retry_s, "user_id": getattr(ctx, "user_id", "default")},
+                    )
+            except Exception:
+                # Fail-safe: do not block execution if limiter is unhealthy.
+                pass
+
         # Capability decision
         dec = self.capability_engine.evaluate(ctx)
         self.event_logger.log(
@@ -444,7 +515,7 @@ class Dispatcher:
                         trace_id=trace_id,
                         source_subsystem=SourceSubsystem.dispatcher,
                         severity=EventSeverity.INFO,
-                        payload={"intent_id": intent_id, "module_id": module_id},
+                        payload={"intent_id": intent_id, "module_id": module_id, "user_id": getattr(ctx, "user_id", "default")},
                     )
                 )
             except Exception:
@@ -459,6 +530,35 @@ class Dispatcher:
             if pmods:
                 context = dict(context or {})
                 context["policy"] = redact(pmods)
+            # Privacy gate (persistence only): decide persist_allowed, otherwise force ephemeral mode.
+            persist_allowed = True
+            if self._privacy_gate is not None:
+                try:
+                    persist_allowed = bool(self._privacy_gate.evaluate(dict(context or {}), dict(mod.meta or {})))
+                except Exception:
+                    persist_allowed = False
+            if not persist_allowed:
+                context = dict(context or {})
+                context["ephemeral"] = True
+                if self.event_bus is not None:
+                    try:
+                        scopes = []
+                        if isinstance((context or {}).get("privacy_scopes"), list):
+                            scopes.extend([str(x).lower() for x in (context or {}).get("privacy_scopes") if str(x)])
+                        if isinstance((mod.meta or {}).get("privacy_scopes"), list):
+                            scopes.extend([str(x).lower() for x in (mod.meta or {}).get("privacy_scopes") if str(x)])
+                        scopes = sorted(set([s for s in scopes if s]))
+                        self.event_bus.publish_nowait(
+                            BaseEvent(
+                                event_type="privacy.ephemeral_forced",
+                                trace_id=trace_id,
+                                source_subsystem=SourceSubsystem.dispatcher,
+                                severity=EventSeverity.WARN,
+                                payload={"intent_id": intent_id, "module_id": module_id, "scopes": scopes, "user_id": getattr(ctx, "user_id", "default")},
+                            )
+                        )
+                    except Exception:
+                        pass
             self.event_logger.log(trace_id, "dispatch.execute", {"module_id": module_id, "intent_id": intent_id})
             contract = self._resolve_intent_contract(mod.meta or {}, intent_id)
             exec_mode = str(contract.get("execution_mode") or "inline").lower()
@@ -466,12 +566,21 @@ class Dispatcher:
                 from concurrent.futures import ThreadPoolExecutor
 
                 with ThreadPoolExecutor(max_workers=1) as ex:
-                    fut = ex.submit(mod.handler, intent_id=intent_id, args=args, context=context)
+                    # Ensure persistence context propagates into thread execution.
+                    cv = contextvars.copy_context()
+
+                    def _run():  # noqa: ANN001
+                        with persistence_context(persist_allowed=persist_allowed):
+                            return mod.handler(intent_id=intent_id, args=args, context=context)
+
+                    fut = ex.submit(cv.run, _run)
                     out = fut.result(timeout=30.0)
             elif exec_mode == "process":
+                # process isolation: pass ephemeral flag via context (best effort)
                 out = self._run_in_subprocess(getattr(mod, "module_path", ""), intent_id, args or {}, context or {})
             else:
-                out = mod.handler(intent_id=intent_id, args=args, context=context)
+                with persistence_context(persist_allowed=persist_allowed):
+                    out = mod.handler(intent_id=intent_id, args=args, context=context)
             return DispatchResult(ok=True, reply="", module_output=out, modifications=pmods or {})
         except Exception as e:  # noqa: BLE001
             je = self.error_reporter.report_exception(e, trace_id=trace_id, subsystem="dispatcher", context={"intent_id": intent_id, "module_id": module_id})

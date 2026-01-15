@@ -13,6 +13,7 @@ class WorkerContext:
     job_id: str
     trace_id: str
     emit: Callable[[str, Dict[str, Any]], None]
+    checkpoint_data: Dict[str, Any]
 
     def progress(self, pct: int, message: str = "") -> None:
         pct = max(0, min(100, int(pct)))
@@ -20,6 +21,15 @@ class WorkerContext:
 
     def log(self, message: str, **fields: Any) -> None:
         self.emit("log", {"message": str(message), **fields})
+
+    def checkpoint(self, data: Dict[str, Any]) -> None:
+        """
+        Persist a restart-safe checkpoint.
+        Must be JSON-serializable and should not include secrets.
+        """
+        if not isinstance(data, dict):
+            return
+        self.emit("checkpoint", dict(data))
 
 
 def _load_handler(handler_ref: str) -> Callable[[Dict[str, Any], WorkerContext], Dict[str, Any]]:
@@ -52,7 +62,10 @@ def worker_main(job_id: str, trace_id: str, spec: Dict[str, Any], handler_ref: s
 
     try:
         handler = _load_handler(handler_ref)
-        ctx = WorkerContext(job_id=job_id, trace_id=trace_id, emit=emit)
+        ckpt = spec.get("checkpoint") or {}
+        if not isinstance(ckpt, dict):
+            ckpt = {}
+        ctx = WorkerContext(job_id=job_id, trace_id=trace_id, emit=emit, checkpoint_data=dict(ckpt))
         args = spec.get("args") or {}
         result = handler(args=args, ctx=ctx)
         if result is not None and not isinstance(result, dict):

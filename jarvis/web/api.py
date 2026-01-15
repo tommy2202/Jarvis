@@ -328,6 +328,33 @@ def create_app(
             raise HTTPException(status_code=403, detail="Admin required.")
         return {"ok": bool(ok)}
 
+    # ---- Privacy / DSAR API (authenticated) ----
+    @app.post("/v1/privacy/dsar")
+    async def privacy_dsar_create(request: Request):
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="Runtime unavailable.")
+        eng = getattr(runtime, "dsar_engine", None)
+        if eng is None:
+            raise HTTPException(status_code=503, detail="DSAR unavailable.")
+        body = await request.json()
+        req_type = str(body.get("type") or body.get("request_type") or "export")
+        payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
+        trace_id = getattr(getattr(request, "state", None), "trace_id", "web")
+        rid = eng.request(user_id="default", request_type=req_type, payload=payload, trace_id=str(trace_id))
+        return {"request_id": rid, "type": req_type}
+
+    @app.get("/v1/privacy/dsar/{request_id}")
+    async def privacy_dsar_get(request_id: str, request: Request):
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="Runtime unavailable.")
+        eng = getattr(runtime, "dsar_engine", None)
+        if eng is None:
+            raise HTTPException(status_code=503, detail="DSAR unavailable.")
+        req = eng.get(str(request_id))
+        if req is None:
+            raise HTTPException(status_code=404, detail="Not found.")
+        return req.model_dump()
+
     @app.get("/v1/audit")
     async def audit_list(
         request: Request,

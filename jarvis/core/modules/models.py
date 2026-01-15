@@ -90,8 +90,13 @@ class InstalledModuleRecord(BaseModel):
     enabled_at: Optional[str] = None
 
     last_seen_fingerprint: str = ""
+    # Explicit fingerprint field for provenance/trust decisions (alias of last_seen_fingerprint).
+    fingerprint_hash: str = ""
     contract_hash: str = ""
     module_path: str = ""
+
+    provenance: str = "local"  # local|git|manual
+    trusted: bool = True
 
     safe_auto_enabled: bool = False
     requires_admin_to_enable: bool = False
@@ -112,4 +117,59 @@ class ModulesRegistryFile(BaseModel):
     schema_version: int = Field(default=1, ge=1, le=10)
     intents: List[Dict[str, Any]] = Field(default_factory=list)
     modules: Dict[str, InstalledModuleRecord] = Field(default_factory=dict)
+
+
+class ModuleState(str, Enum):
+    DISCOVERED = "DISCOVERED"
+    PENDING_INSTALL = "PENDING_INSTALL"
+    INSTALLED_DISABLED = "INSTALLED_DISABLED"
+    INSTALLED_ENABLED = "INSTALLED_ENABLED"
+    BLOCKED = "BLOCKED"
+    MISSING_ON_DISK = "MISSING_ON_DISK"
+    CHANGED_REVIEW_REQUIRED = "CHANGED_REVIEW_REQUIRED"
+    ERROR = "ERROR"
+
+
+class ModuleReasonCode(str, Enum):
+    NO_MANIFEST = "NO_MANIFEST"
+    MANIFEST_INVALID = "MANIFEST_INVALID"
+    CAPABILITIES_MAPPING_MISSING = "CAPABILITIES_MAPPING_MISSING"
+    REQUIRES_ADMIN_TO_ENABLE = "REQUIRES_ADMIN_TO_ENABLE"
+    CHANGED_CONTRACT_REVIEW_REQUIRED = "CHANGED_CONTRACT_REVIEW_REQUIRED"
+    DISABLED_BY_POLICY = "DISABLED_BY_POLICY"
+    MISSING_ON_DISK = "MISSING_ON_DISK"
+    UNKNOWN = "UNKNOWN"
+
+
+class ModuleStatus(BaseModel):
+    """
+    Canonical module status model. Safe to display in CLI/UI/web and to include in audit logs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    module_id: str = Field(min_length=1)
+    state: ModuleState
+    reason_code: ModuleReasonCode = ModuleReasonCode.UNKNOWN
+    reason_human: str = Field(default="", max_length=200)
+    remediation: str = Field(default="", max_length=200)
+    last_seen_at: str = Field(default="", min_length=1)
+    fingerprint_short: str = Field(default="", max_length=8)
+    safe_auto_enabled: bool = False
+    requires_admin_to_enable: bool = False
+
+
+class ModuleTrustConfigFile(BaseModel):
+    """
+    config/module_trust.json schema.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allow_unsigned_modules: bool = False
+    dev_mode_override: bool = False
+
+
+def default_module_trust_config_dict() -> Dict[str, Any]:
+    return ModuleTrustConfigFile().model_dump()
 

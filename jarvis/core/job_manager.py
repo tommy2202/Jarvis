@@ -20,6 +20,7 @@ from jarvis.core.job_worker import worker_main
 class JobStatus(str, Enum):
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
+    PAUSED = "PAUSED"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELED = "CANCELED"
@@ -47,6 +48,7 @@ class JobState(BaseModel):
     status: JobStatus
     kind: str
     args: Dict[str, Any] = Field(default_factory=dict)
+    checkpoint: Dict[str, Any] = Field(default_factory=dict)
     progress: int = 0
     message: str = ""
     result: Optional[Dict[str, Any]] = None
@@ -158,6 +160,31 @@ class JobManager:
         self._load_persisted()
         self._supervisor.start()
 
+    def _publish_job_event(self, *, trace_id: str, event_type: str, payload: Dict[str, Any], severity: str = "INFO") -> None:
+        if self.event_bus is None:
+            return
+        try:
+            from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+
+            sev = EventSeverity.INFO
+            if str(severity).upper() == "WARN":
+                sev = EventSeverity.WARN
+            if str(severity).upper() == "ERROR":
+                sev = EventSeverity.ERROR
+            if str(severity).upper() == "CRITICAL":
+                sev = EventSeverity.CRITICAL
+            self.event_bus.publish_nowait(
+                BaseEvent(
+                    event_type=str(event_type),
+                    trace_id=str(trace_id),
+                    source_subsystem=SourceSubsystem.jobs,
+                    severity=sev,
+                    payload=redact(payload),
+                )
+            )
+        except Exception:
+            pass
+
     # ---------- Registry ----------
     def register_job(self, kind: str, handler: Callable[..., Any], schema_model: Optional[Type[BaseModel]] = None) -> None:
         if not kind or not isinstance(kind, str):
@@ -230,6 +257,7 @@ class JobManager:
             status=JobStatus.QUEUED,
             kind=kind,
             args=spec.args,
+            checkpoint={},
             progress=0,
             message="queued",
             result=None,
@@ -312,6 +340,37 @@ class JobManager:
             self._exec_args.pop(job_id, None)
             self.event_logger.log(st.trace_id, "jobs.canceled", {"job_id": job_id, "kind": st.kind, "running": True})
             return True
+
+    def resume_job(self, job_id: str, *, is_admin: bool, trace_id: str = "jobs") -> bool:
+        """
+        Admin-only: best-effort resume of a previously failed/paused job.
+        Uses persisted (redacted) args + checkpoint by default on restart.
+        """
+        if not bool(is_admin):
+            return False
+        now = time.time()
+        with self._lock:
+            st = self._jobs.get(job_id)
+            if not st:
+                return False
+            if st.status in {JobStatus.SUCCEEDED, JobStatus.CANCELED, JobStatus.TIMED_OUT, JobStatus.RUNNING}:
+                return False
+            # QUEUED is already resumable; just ensure it's queued.
+            st.status = JobStatus.QUEUED
+            st.message = "queued"
+            st.updated_at = now
+            st.finished_at = None
+            st.started_at = None
+            st.error = None
+            # If we lost unredacted args (after restart), fall back to persisted (redacted) args.
+            if job_id not in self._exec_args:
+                self._exec_args[job_id] = dict(st.args or {})
+            self._append_event_locked(job_id, JobEvent(job_id=job_id, event_type="resumed", payload={}).model_dump())
+            self._queue.put((int(st.priority), float(now), job_id))
+            self._persist_index_locked()
+        self.event_logger.log(str(trace_id), "job.recovered", {"job_id": job_id, "kind": st.kind})
+        self._publish_job_event(trace_id=str(st.trace_id), event_type="job.recovered", payload={"job_id": job_id, "kind": st.kind, "resumed": True}, severity="INFO")
+        return True
 
     def get_job(self, job_id: str) -> JobState:
         with self._lock:
@@ -457,24 +516,52 @@ class JobManager:
                 js = JobState.model_validate(st)
             except Exception:
                 continue
-            # Mark RUNNING from last run as FAILED
+            # Recover unfinished jobs safely:
+            # - RUNNING from last run => FAILED (restart safety)
+            # - QUEUED from last run => requeue
             if js.status == JobStatus.RUNNING:
                 js.status = JobStatus.FAILED
-                js.message = "abrupt_shutdown"
+                js.message = "failed_due_to_restart"
                 js.updated_at = now
                 js.finished_at = now
-                js.error = JobError(type="abrupt_shutdown", message="Job was running during previous shutdown.")
+                js.error = JobError(type="failed_due_to_restart", message="Job was running during previous shutdown/restart.")
                 try:
-                    self._append_event_locked(js.id, JobEvent(job_id=js.id, event_type="error", payload={"type": "abrupt_shutdown", "message": js.error.message}).model_dump())
+                    self._append_event_locked(js.id, JobEvent(job_id=js.id, event_type="error", payload={"type": js.error.type, "message": js.error.message}).model_dump())
                     self._append_event_locked(js.id, JobEvent(job_id=js.id, event_type="finished", payload={"status": "FAILED"}).model_dump())
                 except Exception:
                     pass
+                self.event_logger.log(js.trace_id, "job.failed_due_to_restart", {"job_id": js.id, "kind": js.kind})
+                self._publish_job_event(trace_id=js.trace_id, event_type="job.failed_due_to_restart", payload={"job_id": js.id, "kind": js.kind}, severity="ERROR")
+            elif js.status == JobStatus.QUEUED:
+                try:
+                    self._queue.put((int(js.priority), float(js.created_at), str(js.id)))
+                except Exception:
+                    pass
+                self.event_logger.log(js.trace_id, "job.recovered", {"job_id": js.id, "kind": js.kind, "queued": True})
+                self._publish_job_event(trace_id=js.trace_id, event_type="job.recovered", payload={"job_id": js.id, "kind": js.kind, "queued": True}, severity="INFO")
             self._jobs[job_id] = js
         # persist in case we changed any RUNNING jobs
         self._persist_index_locked()
 
     def _persist_index_locked(self) -> None:
-        data = {"jobs": {jid: st.model_dump() for jid, st in self._jobs.items()}}
+        def _stable_state(s: JobState) -> str:
+            if s.status == JobStatus.QUEUED:
+                return "queued"
+            if s.status == JobStatus.RUNNING:
+                return "running"
+            if s.status == JobStatus.PAUSED:
+                return "paused"
+            if s.status == JobStatus.SUCCEEDED:
+                return "completed"
+            return "failed"
+
+        jobs_out: Dict[str, Any] = {}
+        for jid, st in self._jobs.items():
+            d = st.model_dump()
+            d["job_id"] = st.id
+            d["state"] = _stable_state(st)
+            jobs_out[jid] = d
+        data = {"jobs": jobs_out}
         _atomic_write(self.index_path, data)
 
     def _append_event_locked(self, job_id: str, event: Dict[str, Any]) -> None:
@@ -564,7 +651,7 @@ class JobManager:
 
             proc = self._ctx.Process(
                 target=worker_main,
-                args=(job_id, st.trace_id, {"args": exec_args, "debug_tracebacks": self.debug_tracebacks}, handler.handler_ref, q),
+                args=(job_id, st.trace_id, {"args": exec_args, "checkpoint": dict(st.checkpoint or {}), "debug_tracebacks": self.debug_tracebacks}, handler.handler_ref, q),
                 daemon=True,
             )
 
@@ -718,7 +805,7 @@ class JobManager:
             if st.status in {JobStatus.CANCELED, JobStatus.TIMED_OUT}:
                 return
             # Only accept worker events while RUNNING.
-            if st.status != JobStatus.RUNNING and et in {"progress", "log", "error", "finished", "started"}:
+            if st.status != JobStatus.RUNNING and et in {"progress", "log", "error", "finished", "started", "checkpoint"}:
                 return
 
             if et == "progress":
@@ -749,6 +836,15 @@ class JobManager:
                 # Persist logs as events; redact payload
                 pl = redact(payload)
                 self._append_event_locked(job_id, JobEvent(timestamp=ts, job_id=job_id, event_type="log", payload=pl).model_dump())
+                self._persist_index_locked()
+                return
+
+            if et == "checkpoint":
+                pl = redact(payload)
+                if isinstance(pl, dict):
+                    st.checkpoint = dict(pl)
+                st.updated_at = time.time()
+                self._append_event_locked(job_id, JobEvent(timestamp=ts, job_id=job_id, event_type="checkpoint", payload=redact(st.checkpoint)).model_dump())
                 self._persist_index_locked()
                 return
 
@@ -899,4 +995,14 @@ def job_system_sleep_llm(args: Dict[str, Any], ctx) -> Dict[str, Any]:  # noqa: 
     # Worker can't touch main-process LLM; main hook performs actual unload.
     ctx.log("sleep_llm requested")
     return {"requested": True}
+
+
+def job_system_checkpoint_demo(args: Dict[str, Any], ctx) -> Dict[str, Any]:  # noqa: ANN001
+    """
+    Minimal job handler used to validate checkpoint persistence/recovery.
+    """
+    step = int((args or {}).get("step", 1))
+    ctx.checkpoint({"step": step})
+    ctx.progress(100, "checkpointed")
+    return {"checkpointed": True, "step": step}
 
