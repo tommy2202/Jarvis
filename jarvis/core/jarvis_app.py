@@ -4,13 +4,14 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from jarvis.core.core_intents import AmbiguousMatch, CoreIntentRegistry, MatchResult
 from jarvis.core.dispatcher import Dispatcher
 from jarvis.core.events import EventLogger
 from jarvis.core.intent_router import IntentResult, StageAIntentRouter
 from jarvis.core.llm_router import StageBLLMRouter
+from jarvis.core.ux.primitives import acknowledge, completed, failed
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class MessageResponse:
     requires_followup: bool
     followup_question: Optional[str]
     modifications: Dict[str, Any] = None  # policy modifications (safe restrictions)
+    ux_events: Optional[List[Dict[str, Any]]] = None
 
 
 class JarvisApp:
@@ -97,6 +99,52 @@ class JarvisApp:
             if lab and (t == lab or t.replace(" ", "") == lab.replace(" ", "")):
                 return idx
         return None
+
+    @staticmethod
+    def _ux_action_label(intent_id: str, module_id: str = "") -> str:
+        action = str(intent_id or "").strip()
+        if not action:
+            action = str(module_id or "request").strip()
+        return action.replace(".", " ")
+
+    def _finalize_ux_events(
+        self,
+        *,
+        intent_id: str,
+        module_id: str,
+        ok: bool,
+        summary: str,
+        reason: str,
+        remediation: str,
+        base_events: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        events = list(base_events or [])
+        action = self._ux_action_label(intent_id, module_id)
+        if not events:
+            events.append(acknowledge(action))
+        for ev in events:
+            if "action" not in ev:
+                ev["action"] = action
+            if intent_id and "intent_id" not in ev:
+                ev["intent_id"] = intent_id
+            if module_id and "module_id" not in ev:
+                ev["module_id"] = module_id
+        if ok:
+            payload = completed(summary or "Completed.")
+            payload.update({"action": action, "intent_id": intent_id, "module_id": module_id})
+            if events and str(events[-1].get("type")) == "completed":
+                events[-1].update(payload)
+            else:
+                events.append(payload)
+            return events
+        remediation = remediation or "Review logs for details."
+        payload = failed(reason or "Failed.", remediation)
+        payload.update({"action": action, "intent_id": intent_id, "module_id": module_id})
+        if events and str(events[-1].get("type")) == "failed":
+            events[-1].update(payload)
+        else:
+            events.append(payload)
+        return events
 
     def _handle_core_intent(self, intent_id: str, *, safe_mode: bool, shutting_down: bool) -> str:
         # Core facts: deterministic, local, read-only.
@@ -193,6 +241,15 @@ class JarvisApp:
                 dispatch_context["confirmed"] = True
                 dr = self.dispatcher.dispatch(trace_id, intent_id, module_id, args, dispatch_context)
                 if not dr.ok:
+                    ux_events = self._finalize_ux_events(
+                        intent_id=intent_id,
+                        module_id=module_id,
+                        ok=False,
+                        summary="",
+                        reason=dr.reply,
+                        remediation=str(dr.remediation or ""),
+                        base_events=dr.ux_events,
+                    )
                     return MessageResponse(
                         trace_id=trace_id,
                         reply=dr.reply,
@@ -202,8 +259,18 @@ class JarvisApp:
                         requires_followup=False,
                         followup_question=None,
                         modifications=dict(dr.modifications or {}),
+                        ux_events=ux_events,
                     )
                 confirmation = self._render_confirmation(intent_id, args)
+                ux_events = self._finalize_ux_events(
+                    intent_id=intent_id,
+                    module_id=module_id,
+                    ok=True,
+                    summary=confirmation,
+                    reason="",
+                    remediation="",
+                    base_events=dr.ux_events,
+                )
                 return MessageResponse(
                     trace_id=trace_id,
                     reply=confirmation,
@@ -213,6 +280,7 @@ class JarvisApp:
                     requires_followup=False,
                     followup_question=None,
                     modifications=dict(dr.modifications or {}),
+                    ux_events=ux_events,
                 )
 
             # Clarification flow (core fact ambiguity)
@@ -404,6 +472,15 @@ class JarvisApp:
                     pass
 
             if not dr.ok:
+                ux_events = self._finalize_ux_events(
+                    intent_id=chosen_intent_id,
+                    module_id=module_id,
+                    ok=False,
+                    summary="",
+                    reason=str(dr.reply or "Request failed."),
+                    remediation=str(dr.remediation or ""),
+                    base_events=dr.ux_events,
+                )
                 if dr.denied_reason == "confirmation_required" and dr.pending_confirmation:
                     # store pending; require user confirm/cancel
                     expires = float(dr.pending_confirmation.get("expires_seconds") or 15)
@@ -419,6 +496,7 @@ class JarvisApp:
                         requires_followup=True,
                         followup_question="Reply 'confirm' to proceed or 'cancel' to abort.",
                         modifications=dict(dr.modifications or {}),
+                        ux_events=ux_events,
                     )
                 return MessageResponse(
                     trace_id=trace_id,
@@ -429,6 +507,7 @@ class JarvisApp:
                     requires_followup=False,
                     followup_question=None,
                     modifications=dict(dr.modifications or {}),
+                    ux_events=ux_events,
                 )
 
             # Always confirm what we're doing (even if execution already simulated).
@@ -436,6 +515,15 @@ class JarvisApp:
             if requires_followup and followup_question:
                 reply = f"{confirmation} {followup_question}"
 
+            ux_events = self._finalize_ux_events(
+                intent_id=chosen_intent_id,
+                module_id=module_id,
+                ok=True,
+                summary=reply,
+                reason="",
+                remediation="",
+                base_events=dr.ux_events,
+            )
             return MessageResponse(
                 trace_id=trace_id,
                 reply=reply,
@@ -445,5 +533,6 @@ class JarvisApp:
                 requires_followup=requires_followup,
                 followup_question=followup_question,
                 modifications=dict(dr.modifications or {}),
+                ux_events=ux_events,
             )
 

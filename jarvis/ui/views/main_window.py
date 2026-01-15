@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from jarvis.core.errors import JarvisError
+from jarvis.core.ux.primitives import render_events
 from jarvis.ui.ui_events import UiController
 from jarvis.ui.ui_models import CoreClient, UiConfig
 from jarvis.ui.views.conversation import ConversationPanel
@@ -325,7 +326,11 @@ class MainWindow(ttk.Frame):
             res = self.core.get_result(trace_id)
             if not res:
                 continue
-            reply = str(res.get("reply") or "")
-            self.convo.append(role="jarvis", message=reply)
+            messages = render_events(res.get("ux_events"))
+            if not messages:
+                messages = [str(res.get("reply") or "")]
+            for msg in messages:
+                if msg:
+                    self.convo.append(role="jarvis", message=msg)
             self._pending.pop(trace_id, None)
 

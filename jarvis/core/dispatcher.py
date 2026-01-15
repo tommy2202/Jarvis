@@ -4,7 +4,7 @@ import multiprocessing
 import traceback
 import contextvars
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from jarvis.core.events import EventLogger
 from jarvis.core.events import redact
@@ -16,6 +16,7 @@ from jarvis.core.capabilities.models import RequestContext, RequestSource
 from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
 from jarvis.core.privacy.gates import PrivacyGate, persistence_context
 from jarvis.core.limits.limiter import Limiter
+from jarvis.core.ux.primitives import acknowledge, completed, failed
 
 
 def _dispatcher_subprocess_worker(q, module_path: str, intent_id: str, args: Dict[str, Any], context: Dict[str, Any]) -> None:  # noqa: ANN001
@@ -44,6 +45,8 @@ class DispatchResult:
     require_confirmation: bool = False
     modifications: Optional[Dict[str, Any]] = None
     pending_confirmation: Optional[Dict[str, Any]] = None
+    remediation: Optional[str] = None
+    ux_events: Optional[List[Dict[str, Any]]] = None
 
 
 class Dispatcher:
@@ -92,6 +95,83 @@ class Dispatcher:
         self._privacy_gate = PrivacyGate(privacy_store=privacy_store) if privacy_store is not None else None
         self.limiter = limiter
 
+    @staticmethod
+    def _ux_action_label(intent_id: str, module_id: str) -> str:
+        action = str(intent_id or "").strip()
+        if not action:
+            action = str(module_id or "request").strip()
+        return action.replace(".", " ")
+
+    def _emit_ux_event(self, trace_id: str, event_type: str, payload: Dict[str, Any], *, severity: EventSeverity) -> None:
+        if self.event_bus is None:
+            return
+        try:
+            self.event_bus.publish_nowait(
+                BaseEvent(
+                    event_type=event_type,
+                    trace_id=trace_id,
+                    source_subsystem=SourceSubsystem.dispatcher,
+                    severity=severity,
+                    payload=payload,
+                )
+            )
+        except Exception:
+            pass
+
+    def _start_ux_events(
+        self,
+        trace_id: str,
+        *,
+        intent_id: str,
+        module_id: str,
+        context: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        action = self._ux_action_label(intent_id, module_id)
+        payload = acknowledge(action)
+        payload.update({"intent_id": intent_id, "module_id": module_id})
+        src = str((context or {}).get("source") or "")
+        if src:
+            payload["source"] = src
+        ux_events = [payload]
+        self._emit_ux_event(trace_id, "ux.acknowledge", payload, severity=EventSeverity.INFO)
+        return ux_events, action
+
+    def _append_ux_completed(
+        self,
+        ux_events: List[Dict[str, Any]],
+        *,
+        trace_id: str,
+        intent_id: str,
+        module_id: str,
+        action: str,
+        summary: str,
+    ) -> None:
+        payload = completed(summary)
+        payload.update({"intent_id": intent_id, "module_id": module_id, "action": action})
+        ux_events.append(payload)
+        self._emit_ux_event(trace_id, "ux.completed", payload, severity=EventSeverity.INFO)
+
+    def _append_ux_failed(
+        self,
+        ux_events: List[Dict[str, Any]],
+        *,
+        trace_id: str,
+        intent_id: str,
+        module_id: str,
+        action: str,
+        reason: str,
+        remediation: str,
+        denied_reason: Optional[str] = None,
+        severity: EventSeverity = EventSeverity.WARN,
+    ) -> None:
+        remediation = remediation or "Review logs for details."
+        payload = failed(reason, remediation)
+        payload.update({"intent_id": intent_id, "module_id": module_id, "action": action})
+        if denied_reason:
+            payload["denied_reason"] = denied_reason
+        ux_events.append(payload)
+        self._emit_ux_event(trace_id, "ux.failed", payload, severity=severity)
+
     def _policy_engine(self) -> Any:
         # For backwards compatibility with existing wiring, allow the capability engine
         # to hold a reference to the policy engine, but the dispatcher is the sole
@@ -110,6 +190,8 @@ class Dispatcher:
         reply: str,
         remediation: str = "",
         details: Optional[Dict[str, Any]] = None,
+        ux_events: Optional[List[Dict[str, Any]]] = None,
+        ux_action: str = "",
     ) -> DispatchResult:
         payload = {
             "intent_id": intent_id,
@@ -134,7 +216,8 @@ class Dispatcher:
             except Exception:
                 pass
         # Safe user message (+ short remediation if provided)
-        msg = str(reply or "I can’t do that right now.")
+        reason_text = str(reply or "I can’t do that right now.")
+        msg = reason_text
         if remediation:
             msg = f"{msg} ({remediation})"
         self.error_reporter.write_error(
@@ -143,7 +226,24 @@ class Dispatcher:
             subsystem="dispatcher",
             internal_exc=None,
         )
-        return DispatchResult(ok=False, reply=msg[:300], denied_reason=denied_reason)
+        if ux_events is not None:
+            self._append_ux_failed(
+                ux_events,
+                trace_id=trace_id,
+                intent_id=intent_id,
+                module_id=module_id,
+                action=ux_action or self._ux_action_label(intent_id, module_id),
+                reason=reason_text,
+                remediation=remediation,
+                denied_reason=denied_reason,
+            )
+        return DispatchResult(
+            ok=False,
+            reply=msg[:300],
+            denied_reason=denied_reason,
+            remediation=remediation,
+            ux_events=ux_events,
+        )
 
     def _build_request_context(self, trace_id: str, *, intent_id: str, mod_meta: Dict[str, Any], context: Dict[str, Any]) -> RequestContext:
         perms = self.policy.for_intent(intent_id) if self.policy is not None else {}
@@ -247,6 +347,7 @@ class Dispatcher:
         return res.get("out") or {}
 
     def dispatch(self, trace_id: str, intent_id: str, module_id: str, args: Dict[str, Any], context: Dict[str, Any]) -> DispatchResult:
+        ux_events, ux_action = self._start_ux_events(trace_id, intent_id=intent_id, module_id=module_id, context=(context or {}))
         # Hard module install/enable enforcement (core intents exempt).
         if not str(intent_id).startswith("core."):
             mm = getattr(self, "module_manager", None)
@@ -281,6 +382,8 @@ class Dispatcher:
                                 "module_remediation": remediation[:200],
                                 "user_id": str((context or {}).get("user_id") or ""),
                             },
+                            ux_events=ux_events,
+                            ux_action=ux_action,
                         )
                 except Exception:
                     # fail-safe: deny if module manager is unhealthy
@@ -291,6 +394,8 @@ class Dispatcher:
                         denied_reason="module_gate_unavailable",
                         reply="Module is not installed/enabled.",
                         remediation="Run /modules scan or /modules enable <id>.",
+                        ux_events=ux_events,
+                        ux_action=ux_action,
                     )
 
         mod = self.registry.get_by_id(module_id)
@@ -301,7 +406,25 @@ class Dispatcher:
                     self.telemetry.increment_counter("errors_total", 1, tags={"subsystem": "dispatcher", "severity": "WARN"})
                 except Exception:
                     pass
-            return DispatchResult(ok=False, reply="I can’t execute that module.", denied_reason="unknown module")
+            reason = "I can’t execute that module."
+            remediation = "Check that the module is installed and enabled."
+            self._append_ux_failed(
+                ux_events,
+                trace_id=trace_id,
+                intent_id=intent_id,
+                module_id=module_id,
+                action=ux_action,
+                reason=reason,
+                remediation=remediation,
+                denied_reason="unknown_module",
+            )
+            return DispatchResult(
+                ok=False,
+                reply=reason,
+                denied_reason="unknown_module",
+                remediation=remediation,
+                ux_events=ux_events,
+            )
 
         # Dispatcher is the single authoritative execution gate:
         # - deny-by-default for unmapped intents
@@ -315,6 +438,8 @@ class Dispatcher:
                 denied_reason="capability_engine_missing",
                 reply="I can’t execute actions because enforcement is not configured.",
                 remediation="Initialize the capability engine (config/capabilities.json) before executing intents.",
+                ux_events=ux_events,
+                ux_action=ux_action,
             )
 
         # Hard: intent must be registered in capabilities intent_requirements
@@ -331,6 +456,8 @@ class Dispatcher:
                 denied_reason="intent_unmapped",
                 reply="I can’t execute that intent.",
                 remediation="Intent is not registered in capabilities policy. Add it to config/capabilities.json intent_requirements.",
+                ux_events=ux_events,
+                ux_action=ux_action,
             )
 
         # Module contract enforcement (non-core)
@@ -353,6 +480,8 @@ class Dispatcher:
                     reply="Module contract incomplete.",
                     remediation="Run /modules wizard or update module manifest.",
                     details={"missing_fields": missing, "module_path": getattr(mod, "module_path", "")},
+                    ux_events=ux_events,
+                    ux_action=ux_action,
                 )
 
             declared = contract.get("required_capabilities")
@@ -365,6 +494,8 @@ class Dispatcher:
                     reply="Module contract invalid.",
                     remediation="Run /modules wizard or update module manifest.",
                     details={"field": "required_capabilities"},
+                    ux_events=ux_events,
+                    ux_action=ux_action,
                 )
 
             required_caps = list((intent_map or {}).get(intent_id) or [])
@@ -377,6 +508,8 @@ class Dispatcher:
                     reply="Module contract does not match capabilities policy.",
                     remediation="Update module manifest required_capabilities to match config/capabilities.json intent_requirements.",
                     details={"declared": list(declared), "required": list(required_caps)},
+                    ux_events=ux_events,
+                    ux_action=ux_action,
                 )
 
             exec_mode = str(contract.get("execution_mode") or "").lower()
@@ -389,6 +522,8 @@ class Dispatcher:
                     reply="Module execution mode is unsupported.",
                     remediation="Set execution_mode to one of: inline, thread, process.",
                     details={"execution_mode": contract.get("execution_mode")},
+                    ux_events=ux_events,
+                    ux_action=ux_action,
                 )
 
         # Build context (includes source/is_admin/safe_mode/shutting_down/trace_id)
@@ -417,6 +552,8 @@ class Dispatcher:
                         reply="I’m throttling requests to prevent overload.",
                         remediation=remediation,
                         details={"limit_scope": getattr(dec0, "scope", ""), "retry_after_seconds": retry_s, "user_id": getattr(ctx, "user_id", "default")},
+                        ux_events=ux_events,
+                        ux_action=ux_action,
                     )
             except Exception:
                 # Fail-safe: do not block execution if limiter is unhealthy.
@@ -444,6 +581,8 @@ class Dispatcher:
                 reply=msg,
                 remediation=remediation,
                 details={"denied_caps": list(dec.denied_capabilities or []), "reasons": list(dec.reasons or [])},
+                ux_events=ux_events,
+                ux_action=ux_action,
             )
 
         # Policy decision (restriction-only layer)
@@ -480,9 +619,21 @@ class Dispatcher:
                 if not bool(pdec.allowed):
                     # Confirmation flow: do not execute until confirmed
                     if bool(getattr(pdec, "require_confirmation", False)):
+                        reply = str(pdec.remediation or "Confirmation required. Reply 'confirm' to proceed or 'cancel' to abort.")[:300]
+                        remediation = "Reply 'confirm' to proceed or 'cancel' to abort."
+                        self._append_ux_failed(
+                            ux_events,
+                            trace_id=trace_id,
+                            intent_id=intent_id,
+                            module_id=module_id,
+                            action=ux_action,
+                            reason=reply,
+                            remediation=remediation,
+                            denied_reason="confirmation_required",
+                        )
                         return DispatchResult(
                             ok=False,
-                            reply=str(pdec.remediation or "Confirmation required. Reply 'confirm' to proceed or 'cancel' to abort.")[:300],
+                            reply=reply,
                             denied_reason="confirmation_required",
                             require_confirmation=True,
                             modifications=dict(getattr(pdec, "modifications", {}) or {}),
@@ -493,6 +644,8 @@ class Dispatcher:
                                 "context": redact(context or {}),
                                 "expires_seconds": 15,
                             },
+                            remediation=remediation,
+                            ux_events=ux_events,
                         )
                     return self._deny(
                         trace_id,
@@ -502,6 +655,8 @@ class Dispatcher:
                         reply="I can’t do that right now.",
                         remediation=str(pdec.remediation or pdec.final_reason or "Denied by policy.")[:200],
                         details={"policy_reason": str(pdec.final_reason or ""), "matched_rule_ids": [m.id for m in (pdec.matched_rules or [])]},
+                        ux_events=ux_events,
+                        ux_action=ux_action,
                     )
                 pmods = dict(getattr(pdec, "modifications", {}) or {})
             except Exception:
@@ -581,10 +736,41 @@ class Dispatcher:
             else:
                 with persistence_context(persist_allowed=persist_allowed):
                     out = mod.handler(intent_id=intent_id, args=args, context=context)
-            return DispatchResult(ok=True, reply="", module_output=out, modifications=pmods or {})
+            summary = ""
+            if isinstance(out, dict):
+                summary = str(out.get("summary") or out.get("message") or "")
+            if not summary:
+                summary = f"Completed {ux_action}."
+            self._append_ux_completed(
+                ux_events,
+                trace_id=trace_id,
+                intent_id=intent_id,
+                module_id=module_id,
+                action=ux_action,
+                summary=summary,
+            )
+            return DispatchResult(ok=True, reply="", module_output=out, modifications=pmods or {}, ux_events=ux_events)
         except Exception as e:  # noqa: BLE001
             je = self.error_reporter.report_exception(e, trace_id=trace_id, subsystem="dispatcher", context={"intent_id": intent_id, "module_id": module_id})
             self.logger.error(f"[{trace_id}] Module error: {je.code}")
             self.event_logger.log(trace_id, "dispatch.error", {"intent_id": intent_id, "module_id": module_id, "error_code": je.code})
-            return DispatchResult(ok=False, reply=je.user_message, denied_reason=je.code)
+            remediation = "Review logs for details."
+            self._append_ux_failed(
+                ux_events,
+                trace_id=trace_id,
+                intent_id=intent_id,
+                module_id=module_id,
+                action=ux_action,
+                reason=je.user_message,
+                remediation=remediation,
+                denied_reason=je.code,
+                severity=EventSeverity.ERROR,
+            )
+            return DispatchResult(
+                ok=False,
+                reply=je.user_message,
+                denied_reason=je.code,
+                remediation=remediation,
+                ux_events=ux_events,
+            )
 

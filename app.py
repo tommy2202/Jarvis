@@ -51,6 +51,7 @@ from jarvis.core.capabilities.audit import CapabilityAuditLogger
 from jarvis.core.capabilities.engine import CapabilityEngine
 from jarvis.core.events.bus import EventBus, EventBusConfig, OverflowPolicy
 from jarvis.core.events.subscribers import CoreEventJsonlSubscriber
+from jarvis.core.ux.primitives import render_events
 from jarvis.web.api import create_app
 from jarvis.web.auth import build_api_key_auth  # legacy
 from jarvis.web.security.auth import ApiKeyStore
@@ -1623,7 +1624,15 @@ def main() -> None:
         else:
             trace_id = runtime.submit_text("cli", text, client_meta={"id": "stdin"})
             res = runtime.wait_for_result(trace_id, timeout_seconds=20.0)
-            print(res["reply"] if res else "…")
+            if res:
+                messages = render_events(res.get("ux_events"))
+                if not messages:
+                    messages = [str(res.get("reply") or "")]
+                for msg in messages:
+                    if msg:
+                        print(msg)
+            else:
+                print("...")
         time.sleep(0.01)
 
     try:

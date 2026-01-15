@@ -21,6 +21,7 @@ from jarvis.core.recovery import RecoveryPolicy, RecoveryConfig
 from jarvis.core.circuit_breaker import BreakerRegistry
 from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
 from jarvis.core.privacy.redaction import privacy_redact
+from jarvis.core.ux.primitives import acknowledge, completed
 
 
 class StateTransitionError(RuntimeError):
@@ -91,6 +92,7 @@ class InteractionResult:
     reply: str
     intent: Dict[str, Any]
     created_at: float
+    ux_events: list[Dict[str, Any]] | None = None
 
 
 class _JsonlWriter:
@@ -430,7 +432,7 @@ class JarvisRuntime:
             r = self._results.get(trace_id)
             if not r:
                 return None
-            return {"trace_id": r.trace_id, "reply": r.reply, "intent": r.intent}
+            return {"trace_id": r.trace_id, "reply": r.reply, "intent": r.intent, "ux_events": r.ux_events}
 
     def wait_for_result(self, trace_id: str, timeout_seconds: float = 20.0) -> Optional[Dict[str, Any]]:
         deadline = time.time() + float(timeout_seconds)
@@ -945,6 +947,7 @@ class JarvisRuntime:
                 resp.reply,
                 intent={"id": resp.intent_id, "source": resp.intent_source, "confidence": resp.confidence},
                 modifications=getattr(resp, "modifications", {}) or {},
+                ux_events=getattr(resp, "ux_events", None),
             )
             return
 
@@ -960,10 +963,30 @@ class JarvisRuntime:
             return
         self._q.put(nxt)
 
-    def _finalize_reply(self, trace_id: str, reply: str, intent: Dict[str, Any], *, modifications: Dict[str, Any] | None = None) -> None:
+    def _finalize_reply(
+        self,
+        trace_id: str,
+        reply: str,
+        intent: Dict[str, Any],
+        *,
+        modifications: Dict[str, Any] | None = None,
+        ux_events: list[Dict[str, Any]] | None = None,
+    ) -> None:
         reply = str(reply or "")
+        if ux_events is None:
+            action = str((intent or {}).get("id") or "request").replace(".", " ")
+            ux_events = [acknowledge(action), completed(reply or "Completed.")]
+            for ev in ux_events:
+                ev.setdefault("intent_id", str((intent or {}).get("id") or ""))
+                ev.setdefault("action", action)
         with self._results_lock:
-            self._results[trace_id] = InteractionResult(trace_id=trace_id, reply=reply, intent=redact(intent), created_at=time.time())
+            self._results[trace_id] = InteractionResult(
+                trace_id=trace_id,
+                reply=reply,
+                intent=redact(intent),
+                created_at=time.time(),
+                ux_events=ux_events,
+            )
         self._writer.write({"ts": time.time(), "trace_id": trace_id, "event": "response.ready", "reply_len": len(reply), "intent": redact(intent)})
         self.event_logger.log(trace_id, "core.reply", {"reply_len": len(reply), "intent": intent})
 
