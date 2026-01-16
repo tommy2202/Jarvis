@@ -48,6 +48,7 @@ from jarvis.core.runtime_state.manager import RuntimeStateManager, RuntimeStateM
 from jarvis.core.runtime_state.io import dirty_exists
 from jarvis.core.flags import FeatureFlagManager
 from jarvis.core.lockdown import LockdownManager
+from jarvis.core.migrations import VersionRegistry
 from jarvis.core.capabilities.loader import validate_and_normalize
 from jarvis.core.capabilities.audit import CapabilityAuditLogger
 from jarvis.core.capabilities.engine import CapabilityEngine
@@ -210,9 +211,10 @@ def main() -> None:
 
     logger = setup_logging("logs")
     event_logger = EventLogger("logs/events.jsonl")
+    version_registry = VersionRegistry(logger=logger)
     ops = OpsLogger()
 
-    config = get_config(logger=logger)
+    config = get_config(logger=logger, version_registry=version_registry, event_logger=event_logger)
     cfg_obj = config.get()
 
     # Internal Event Bus (initialized early; in-process only)
@@ -261,7 +263,14 @@ def main() -> None:
     # Privacy / GDPR core (data inventory + classification)
     from jarvis.core.privacy.store import PrivacyStore
 
-    privacy_store = PrivacyStore(db_path=os.path.join(runtime_state.paths.runtime_dir, "privacy.sqlite"), config_manager=config, event_bus=event_bus, logger=logger)
+    privacy_store = PrivacyStore(
+        db_path=os.path.join(runtime_state.paths.runtime_dir, "privacy.sqlite"),
+        config_manager=config,
+        event_bus=event_bus,
+        logger=logger,
+        version_registry=version_registry,
+        event_logger=event_logger,
+    )
     from jarvis.core.privacy.dsar import DsarEngine, ModuleHooksRegistry
 
     dsar_engine = DsarEngine(store=privacy_store, root_path=".", hooks=ModuleHooksRegistry(), logger=logger)

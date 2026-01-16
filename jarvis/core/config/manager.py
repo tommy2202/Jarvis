@@ -15,7 +15,6 @@ from jarvis.core.config.io import (
     recover_from_corrupt,
     snapshot_last_known_good,
 )
-from jarvis.core.config.migrations.runner import latest_version, run_migrations
 from jarvis.core.config.models import (
     AppConfigV2,
     AppFileConfig,
@@ -61,10 +60,20 @@ class DiffResult:
 
 
 class ConfigManager:
-    def __init__(self, *, fs: Optional[ConfigFsPaths] = None, logger=None, read_only: bool = False):
+    def __init__(
+        self,
+        *,
+        fs: Optional[ConfigFsPaths] = None,
+        logger=None,
+        read_only: bool = False,
+        version_registry: Any = None,
+        event_logger: Any = None,
+    ):
         self.fs = fs or ConfigFsPaths(".")
         self.logger = logger
         self.read_only = read_only
+        self._version_registry = version_registry
+        self._event_logger = event_logger
         self._cfg: Optional[AppConfigV2] = None
         self._raw_last: Dict[str, Dict[str, Any]] = {}
         self._secure_store: Optional[SecureStore] = None
@@ -85,19 +94,36 @@ class ConfigManager:
         app_raw = files.get("app.json") or {}
         cur_ver = int(app_raw.get("config_version") or 0)
         max_backups = int((app_raw.get("backups") or {}).get("max_backups_per_file", 10))
-        migrated, new_ver, mig_logs = run_migrations(
+        from jarvis.core.migrations.runner import run_config_migrations, run_module_registry_migrations
+
+        migrated, new_ver, mig_logs = run_config_migrations(
             fs=self.fs,
             files=files,
             current_version=cur_ver,
             backups_dir=self.fs.backups_dir,
             max_backups=max_backups,
             write_back=not self.read_only,
+            registry=self._version_registry,
+            event_logger=self._event_logger,
+            trace_id="config",
         )
         if mig_logs and self.logger:
             self.logger.info("Config migrations: " + "; ".join(mig_logs))
 
         # ensure defaults exist (create missing)
         ensured = self._ensure_defaults(migrated, max_backups=max_backups)
+        ensured, _mod_ver, mod_logs = run_module_registry_migrations(
+            fs=self.fs,
+            files=ensured,
+            backups_dir=self.fs.backups_dir,
+            max_backups=max_backups,
+            write_back=not self.read_only,
+            registry=self._version_registry,
+            event_logger=self._event_logger,
+            trace_id="modules",
+        )
+        if mod_logs and self.logger:
+            self.logger.info("Module registry migrations: " + "; ".join(mod_logs))
 
         # validate
         cfg = self._validate_all(ensured)
@@ -407,10 +433,10 @@ class ConfigManager:
 _singleton: Optional[ConfigManager] = None
 
 
-def get_config(*, logger=None, read_only: bool = False) -> ConfigManager:
+def get_config(*, logger=None, read_only: bool = False, version_registry: Any = None, event_logger: Any = None) -> ConfigManager:
     global _singleton  # noqa: PLW0603
     if _singleton is None:
-        _singleton = ConfigManager(logger=logger, read_only=read_only)
+        _singleton = ConfigManager(logger=logger, read_only=read_only, version_registry=version_registry, event_logger=event_logger)
         _singleton.load_all()
     return _singleton
 
