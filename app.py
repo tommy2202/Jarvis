@@ -47,6 +47,7 @@ from jarvis.core.shutdown_orchestrator import ShutdownConfig, ShutdownOrchestrat
 from jarvis.core.runtime_state.manager import RuntimeStateManager, RuntimeStateManagerConfig
 from jarvis.core.runtime_state.io import dirty_exists
 from jarvis.core.flags import FeatureFlagManager
+from jarvis.core.lockdown import LockdownManager
 from jarvis.core.capabilities.loader import validate_and_normalize
 from jarvis.core.capabilities.audit import CapabilityAuditLogger
 from jarvis.core.capabilities.engine import CapabilityEngine
@@ -138,6 +139,7 @@ def _start_web_thread(
     job_manager: JobManager | None,
     runtime: JarvisRuntime | None,
     telemetry: TelemetryManager | None,
+    lockdown_manager: Any | None,
 ) -> Optional[WebServerHandle]:
     web_cfg = config_manager.get().web.model_dump()
     if not web_cfg.get("enabled", False):
@@ -190,6 +192,7 @@ def _start_web_thread(
         enable_web_ui=enable_web_ui,
         allow_remote_admin_unlock=False,
         remote_control_enabled=secure_store.is_unlocked(),
+        lockdown_manager=lockdown_manager,
     )
     h = WebServerHandle(app=fastapi_app, host=bind_host, port=port, logger=logger, telemetry=telemetry, allow_remote=allow_remote, draining_event=draining_event)
     h.start()
@@ -375,6 +378,7 @@ def main() -> None:
     from jarvis.core.security_events import SecurityAuditLogger
 
     feature_flags = FeatureFlagManager(security_manager=security, audit_logger=SecurityAuditLogger(), event_bus=event_bus, logger=logger)
+    lockdown_manager = LockdownManager(security_manager=security, audit_logger=SecurityAuditLogger(), event_bus=event_bus, logger=logger)
 
     # Identity manager (user attribution + active user/session)
     from jarvis.core.identity.manager import IdentityManager
@@ -495,6 +499,7 @@ def main() -> None:
         identity_manager=identity_manager,
         limiter=limiter,
         feature_flags=feature_flags,
+        lockdown_manager=lockdown_manager,
     )
 
     jarvis = JarvisApp(
@@ -508,6 +513,7 @@ def main() -> None:
         threshold=threshold,
         telemetry=telemetry,
         core_fact_fuzzy_cfg=dict(getattr(cfg_obj.ui, "core_fact_fuzzy", {}) or {}),
+        lockdown_manager=lockdown_manager,
     )
     telemetry.attach(jarvis_app=jarvis, dispatcher=dispatcher)
 
@@ -702,12 +708,13 @@ def main() -> None:
         module_manager=module_manager,
         privacy_store=privacy_store,
         dsar_engine=dsar_engine,
+        lockdown_manager=lockdown_manager,
     )
     runtime.start()
     telemetry.attach(runtime=runtime, voice_adapter=voice_adapter, tts_adapter=tts_adapter)
     runtime_state.attach(runtime=runtime)
 
-    web_handle = _start_web_thread(jarvis, security, secure_store, config, event_logger, logger, job_manager, runtime, telemetry)
+    web_handle = _start_web_thread(jarvis, security, secure_store, config, event_logger, logger, job_manager, runtime, telemetry, lockdown_manager)
 
     # Runtime control (shutdown/restart orchestration)
     shutdown_block = cfg_obj.runtime.shutdown or {}
@@ -769,6 +776,20 @@ def main() -> None:
             st = runtime.get_status()
             st["shutdown_status"] = controller.get_shutdown_status()
             print(st)
+            continue
+        if text.startswith("/lockdown"):
+            parts = text.split()
+            if len(parts) == 1 or parts[1] == "status":
+                print(runtime.get_status().get("lockdown") or {})
+                continue
+            if parts[1] in {"exit", "off", "disable"}:
+                if not security.is_admin():
+                    print("Admin required.")
+                    continue
+                ok = runtime.exit_lockdown(trace_id="cli")
+                print("Lockdown exited." if ok else "Lockdown not active.")
+                continue
+            print("Usage: /lockdown status|exit")
             continue
         if text == "/wake":
             runtime.wake()
@@ -1618,7 +1639,7 @@ def main() -> None:
             except (EOFError, KeyboardInterrupt):
                 print()
                 continue
-            ok = security.verify_and_unlock_admin(pw)
+            ok = runtime.admin_unlock(pw)
             print("Admin unlocked." if ok else "Invalid passphrase.")
             continue
         if text.startswith("/admin lock"):

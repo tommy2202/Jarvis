@@ -143,6 +143,7 @@ class JarvisRuntime:
         module_manager: Any = None,
         privacy_store: Any = None,
         dsar_engine: Any = None,
+        lockdown_manager: Any = None,
     ):
         self.cfg = cfg
         self.jarvis_app = jarvis_app
@@ -165,6 +166,7 @@ class JarvisRuntime:
         self.module_manager = module_manager
         self.privacy_store = privacy_store
         self.dsar_engine = dsar_engine
+        self.lockdown_manager = lockdown_manager
 
         self._writer = _JsonlWriter(persist_path)
         self._q: "queue.Queue[RuntimeEvent]" = queue.Queue()
@@ -286,6 +288,12 @@ class JarvisRuntime:
         secure = self.get_secure_store_status()
         llm = self.get_llm_status()
         voice = self.get_voice_status()
+        lockdown = None
+        if self.lockdown_manager is not None:
+            try:
+                lockdown = self.lockdown_manager.status()
+            except Exception:
+                lockdown = {"active": False, "error": "status_failed"}
         rs = None
         if self.runtime_state is not None:
             try:
@@ -305,6 +313,7 @@ class JarvisRuntime:
             "secure_store": secure,
             "llm": llm,
             "voice": voice,
+            "lockdown": lockdown,
             "audit": self.get_audit_status(),
             "modules": self.get_modules_status(),
             "runtime_state": rs,
@@ -470,9 +479,24 @@ class JarvisRuntime:
         ok = bool(self.security_manager.verify_and_unlock_admin(passphrase))
         if ok:
             self._log_sm("admin.unlocked", {})
+            if self.lockdown_manager is not None:
+                try:
+                    self.lockdown_manager.record_admin_success()
+                except Exception:
+                    pass
         else:
             self._log_sm("admin.unlock_failed", {})
+            if self.lockdown_manager is not None:
+                try:
+                    self.lockdown_manager.record_admin_failure(trace_id=None, source="local")
+                except Exception:
+                    pass
         return ok
+
+    def exit_lockdown(self, *, trace_id: Optional[str] = None) -> bool:
+        if self.lockdown_manager is None:
+            return False
+        return bool(self.lockdown_manager.exit_lockdown(trace_id=trace_id, actor="admin", reason="manual"))
 
     def admin_lock(self) -> None:
         if self.security_manager is None:

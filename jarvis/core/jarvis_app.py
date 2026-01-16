@@ -42,6 +42,7 @@ class JarvisApp:
         telemetry: Any = None,
         core_registry: CoreIntentRegistry | None = None,
         core_fact_fuzzy_cfg: Dict[str, Any] | None = None,
+        lockdown_manager: Any = None,
     ):
         self.stage_a = stage_a
         self.stage_b = stage_b
@@ -53,6 +54,7 @@ class JarvisApp:
         self.threshold = threshold
         self.telemetry = telemetry
         self.core_registry = core_registry or CoreIntentRegistry(fuzzy_cfg=core_fact_fuzzy_cfg or {})
+        self.lockdown_manager = lockdown_manager
         self._lock = threading.Lock()
         self._pending_confirmations: Dict[str, Dict[str, Any]] = {}
         self._pending_clarifications: Dict[str, Dict[str, Any]] = {}
@@ -217,6 +219,8 @@ class JarvisApp:
             trace_id = resolve_trace_id(trace_id)
             token = set_trace_id(trace_id)
             try:
+                lockdown_active = bool(self.lockdown_manager is not None and self.lockdown_manager.is_active())
+                safe_mode_active = bool(safe_mode) or lockdown_active
                 self.event_logger.log(trace_id, "request.received", {"message": message, "client": client or {}})
 
                 request_source = str(source or "cli")
@@ -321,7 +325,7 @@ class JarvisApp:
                         )
                     self._pending_clarifications.pop(key, None)
                     chosen = str(choices[idx])
-                    reply = self._handle_core_intent(chosen, safe_mode=bool(safe_mode), shutting_down=bool(shutting_down))
+                    reply = self._handle_core_intent(chosen, safe_mode=bool(safe_mode_active), shutting_down=bool(shutting_down))
                     return MessageResponse(
                         trace_id=trace_id,
                         reply=reply,
@@ -336,7 +340,7 @@ class JarvisApp:
                 # Core intents (exact phrase match, then core-fact fuzzy safeguard)
                 exact = self.core_registry.exact_match(message)
                 if exact is not None:
-                    reply = self._handle_core_intent(exact.intent_id, safe_mode=bool(safe_mode), shutting_down=bool(shutting_down))
+                    reply = self._handle_core_intent(exact.intent_id, safe_mode=bool(safe_mode_active), shutting_down=bool(shutting_down))
                     self.event_logger.log(trace_id, "core_intent.exact_matched", {"intent_id": exact.intent_id, "matched_phrase": exact.matched_phrase})
                     return MessageResponse(
                         trace_id=trace_id,
@@ -357,7 +361,7 @@ class JarvisApp:
                         "core_fact_fuzzy.matched",
                         {"intent_id": fuzzy.intent_id, "score": float(fuzzy.score), "matched_phrase": str(fuzzy.matched_phrase)},
                     )
-                    reply = self._handle_core_intent(fuzzy.intent_id, safe_mode=bool(safe_mode), shutting_down=bool(shutting_down))
+                    reply = self._handle_core_intent(fuzzy.intent_id, safe_mode=bool(safe_mode_active), shutting_down=bool(shutting_down))
                     return MessageResponse(
                         trace_id=trace_id,
                         reply=reply,
@@ -415,6 +419,16 @@ class JarvisApp:
                 )
 
                 if needs_b:
+                    if lockdown_active:
+                        return MessageResponse(
+                            trace_id=trace_id,
+                            reply="Lockdown mode active. I can only answer core requests.",
+                            intent_id="unknown",
+                            intent_source="system",
+                            confidence=0.0,
+                            requires_followup=False,
+                            followup_question=None,
+                        )
                     allowed = {k: {"required_args": (v.get("required_args") or [])} for k, v in self.intent_config_by_id.items()}
                     b = self.stage_b.route(message, allowed_intents={**allowed, "unknown": {}})
                     self.event_logger.log(trace_id, "router.stage_b", {"ok": bool(b), "raw_validated": bool(b)})
@@ -473,7 +487,7 @@ class JarvisApp:
                             break
 
                 # Enforced execution decision happens in dispatcher.
-                dispatch_context = {"client": client or {}, "source": source, "safe_mode": bool(safe_mode), "shutting_down": bool(shutting_down)}
+                dispatch_context = {"client": client or {}, "source": source, "safe_mode": bool(safe_mode_active), "shutting_down": bool(shutting_down)}
                 if self.telemetry is not None:
                     try:
                         self.telemetry.record_latency("routing_latency_ms", (time.time() - t_route0) * 1000.0, tags={"source": router_source})

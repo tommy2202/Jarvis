@@ -78,6 +78,7 @@ class Dispatcher:
         identity_manager: Any = None,
         limiter: Limiter | None = None,
         feature_flags: Any = None,
+        lockdown_manager: Any = None,
     ):
         self.registry = registry
         self.policy = policy
@@ -97,6 +98,7 @@ class Dispatcher:
         self._privacy_gate = PrivacyGate(privacy_store=privacy_store) if privacy_store is not None else None
         self.limiter = limiter
         self.feature_flags = feature_flags
+        self.lockdown_manager = lockdown_manager
 
     @staticmethod
     def _ux_action_label(intent_id: str, module_id: str) -> str:
@@ -215,6 +217,17 @@ class Dispatcher:
                         severity=EventSeverity.WARN,
                         payload=payload,
                     )
+                )
+            except Exception:
+                pass
+        if self.lockdown_manager is not None:
+            try:
+                self.lockdown_manager.record_deny(
+                    trace_id=trace_id,
+                    intent_id=intent_id,
+                    module_id=module_id,
+                    denied_reason=denied_reason,
+                    source="dispatcher",
                 )
             except Exception:
                 pass
@@ -365,7 +378,8 @@ class Dispatcher:
     def dispatch(self, trace_id: str, intent_id: str, module_id: str, args: Dict[str, Any], context: Dict[str, Any]) -> DispatchResult:
         token = set_trace_id(trace_id)
         try:
-            ux_events, ux_action = self._start_ux_events(trace_id, intent_id=intent_id, module_id=module_id, context=(context or {}))
+            context = dict(context or {})
+            ux_events, ux_action = self._start_ux_events(trace_id, intent_id=intent_id, module_id=module_id, context=context)
             # Hard module install/enable enforcement (core intents exempt).
             if not str(intent_id).startswith("core."):
                 mm = getattr(self, "module_manager", None)
@@ -398,7 +412,7 @@ class Dispatcher:
                                     "module_state": state_s,
                                     "module_reason_code": reason_code_s,
                                     "module_remediation": remediation[:200],
-                                    "user_id": str((context or {}).get("user_id") or ""),
+                                    "user_id": str(context.get("user_id") or ""),
                                 },
                                 ux_events=ux_events,
                                 ux_action=ux_action,
@@ -448,6 +462,19 @@ class Dispatcher:
             # - deny-by-default for unmapped intents
             # - enforce module contract metadata (non-core)
             # - evaluate capability engine first, then policy engine may only further restrict
+            if self.lockdown_manager is not None and self.lockdown_manager.is_active():
+                context["safe_mode"] = True
+                return self._deny(
+                    trace_id,
+                    intent_id=intent_id,
+                    module_id=module_id,
+                    denied_reason="lockdown_active",
+                    reply="Lockdown mode active. Module execution is restricted.",
+                    remediation="Admin can exit lockdown explicitly.",
+                    details={"lockdown": True, "module_id": module_id},
+                    ux_events=ux_events,
+                    ux_action=ux_action,
+                )
             if self.capability_engine is None:
                 return self._deny(
                     trace_id,
