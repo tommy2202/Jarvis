@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from jarvis.core.events import EventLogger, redact
 from jarvis.core.job_worker import worker_main
+from jarvis.core.trace import resolve_trace_id
 
 
 class JobStatus(str, Enum):
@@ -228,6 +229,7 @@ class JobManager:
         *,
         priority: int = 50,
         max_runtime_seconds: Optional[int] = None,
+        trace_id: Optional[str] = None,
     ) -> str:
         if not self._accepting:
             raise ValueError("Job manager is shutting down.")
@@ -247,7 +249,7 @@ class JobManager:
             except ValidationError as e:
                 raise ValueError(f"Invalid args for {kind}: {e}") from e
 
-        trace_id = uuid.uuid4().hex
+        trace_id = resolve_trace_id(trace_id)
         job_id = uuid.uuid4().hex
         spec = JobSpec(kind=kind, args=redact(args), requested_by=redact(requested_by), max_runtime_seconds=max_runtime_seconds, priority=int(priority))
 

@@ -7,6 +7,8 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Callable, Dict
 
+from jarvis.core.trace import reset_trace_id, set_trace_id
+
 
 @dataclass
 class WorkerContext:
@@ -55,32 +57,36 @@ def worker_main(job_id: str, trace_id: str, spec: Dict[str, Any], handler_ref: s
       {"event_type": "...", "payload": {...}, "ts": <epoch>}
     """
 
-    def emit(event_type: str, payload: Dict[str, Any]) -> None:
-        q.put({"event_type": event_type, "payload": payload, "ts": time.time()})
-
-    emit("started", {"pid": os.getpid()})
-
+    token = set_trace_id(trace_id)
     try:
-        handler = _load_handler(handler_ref)
-        ckpt = spec.get("checkpoint") or {}
-        if not isinstance(ckpt, dict):
-            ckpt = {}
-        ctx = WorkerContext(job_id=job_id, trace_id=trace_id, emit=emit, checkpoint_data=dict(ckpt))
-        args = spec.get("args") or {}
-        result = handler(args=args, ctx=ctx)
-        if result is not None and not isinstance(result, dict):
-            raise TypeError("Job handler must return a dict (or None).")
-        emit("finished", {"status": "SUCCEEDED", "result": result or {}})
-    except Exception as e:  # noqa: BLE001
-        include_tb = bool(spec.get("debug_tracebacks", False))
-        tb = traceback.format_exc(limit=50) if include_tb else None
-        emit(
-            "error",
-            {
-                "type": e.__class__.__name__,
-                "message": str(e),
-                "traceback": tb,
-            },
-        )
-        emit("finished", {"status": "FAILED", "result": {}})
+        def emit(event_type: str, payload: Dict[str, Any]) -> None:
+            q.put({"event_type": event_type, "payload": payload, "ts": time.time()})
+
+        emit("started", {"pid": os.getpid()})
+
+        try:
+            handler = _load_handler(handler_ref)
+            ckpt = spec.get("checkpoint") or {}
+            if not isinstance(ckpt, dict):
+                ckpt = {}
+            ctx = WorkerContext(job_id=job_id, trace_id=trace_id, emit=emit, checkpoint_data=dict(ckpt))
+            args = spec.get("args") or {}
+            result = handler(args=args, ctx=ctx)
+            if result is not None and not isinstance(result, dict):
+                raise TypeError("Job handler must return a dict (or None).")
+            emit("finished", {"status": "SUCCEEDED", "result": result or {}})
+        except Exception as e:  # noqa: BLE001
+            include_tb = bool(spec.get("debug_tracebacks", False))
+            tb = traceback.format_exc(limit=50) if include_tb else None
+            emit(
+                "error",
+                {
+                    "type": e.__class__.__name__,
+                    "message": str(e),
+                    "traceback": tb,
+                },
+            )
+            emit("finished", {"status": "FAILED", "result": {}})
+    finally:
+        reset_trace_id(token)
 

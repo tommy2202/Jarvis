@@ -21,6 +21,7 @@ from jarvis.core.recovery import RecoveryPolicy, RecoveryConfig
 from jarvis.core.circuit_breaker import BreakerRegistry
 from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
 from jarvis.core.privacy.redaction import privacy_redact
+from jarvis.core.trace import resolve_trace_id
 from jarvis.core.ux.primitives import acknowledge, completed
 
 
@@ -240,8 +241,8 @@ class JarvisRuntime:
             except Exception:
                 pass
 
-    def submit_text(self, source: str, text: str, client_meta: Optional[Dict[str, Any]] = None) -> str:
-        trace_id = uuid.uuid4().hex
+    def submit_text(self, source: str, text: str, client_meta: Optional[Dict[str, Any]] = None, trace_id: Optional[str] = None) -> str:
+        trace_id = resolve_trace_id(trace_id)
         if not self._accepting_inputs:
             # immediate safe reply
             with self._results_lock:
@@ -770,7 +771,7 @@ class JarvisRuntime:
         # If job manager exists, schedule as a job for observability; otherwise do it directly.
         if self.job_manager is not None and "system.sleep_llm" in getattr(self.job_manager, "allowed_kinds", lambda: [])():
             try:
-                self.job_manager.submit_job("system.sleep_llm", {}, {"source": "system", "client_id": "runtime"}, priority=5, max_runtime_seconds=30)
+                self.job_manager.submit_job("system.sleep_llm", {}, {"source": "system", "client_id": "runtime"}, priority=5, max_runtime_seconds=30, trace_id=trace_id)
                 self._llm_loaded = False
                 self._log_sm("llm.unload_scheduled", {})
                 return
@@ -934,7 +935,14 @@ class JarvisRuntime:
             client = ev.payload.get("client") or {}
             # run pipeline synchronously in this thread (fast) to keep determinism
             try:
-                resp = self.jarvis_app.process_message(text, client=client, source=str(ev.source), safe_mode=self.safe_mode, shutting_down=bool(self._shutdown_in_progress))
+                resp = self.jarvis_app.process_message(
+                    text,
+                    client=client,
+                    source=str(ev.source),
+                    safe_mode=self.safe_mode,
+                    shutting_down=bool(self._shutdown_in_progress),
+                    trace_id=ev.trace_id,
+                )
             except TypeError:
                 # Backward-compatible for test fakes / older JarvisApp signatures
                 resp = self.jarvis_app.process_message(text, client=client)
@@ -979,6 +987,11 @@ class JarvisRuntime:
             for ev in ux_events:
                 ev.setdefault("intent_id", str((intent or {}).get("id") or ""))
                 ev.setdefault("action", action)
+                ev.setdefault("trace_id", trace_id)
+        else:
+            for ev in ux_events:
+                if isinstance(ev, dict):
+                    ev.setdefault("trace_id", trace_id)
         with self._results_lock:
             self._results[trace_id] = InteractionResult(
                 trace_id=trace_id,

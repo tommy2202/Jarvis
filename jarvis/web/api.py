@@ -141,7 +141,12 @@ def create_app(
         if not remote_control_enabled:
             raise HTTPException(status_code=503, detail="Remote control disabled (USB key required).")
         if runtime is not None:
-            trace_id = runtime.submit_text("web", req.message, client_meta=(req.client.model_dump() if req.client else {}))
+            trace_id = runtime.submit_text(
+                "web",
+                req.message,
+                client_meta=(req.client.model_dump() if req.client else {}),
+                trace_id=getattr(getattr(request, "state", None), "trace_id", None),
+            )
             out = runtime.wait_for_result(trace_id, timeout_seconds=20.0)
             if not out:
                 raise HTTPException(status_code=504, detail="Timed out waiting for result.")
@@ -154,7 +159,14 @@ def create_app(
                 followup_question=None,
             )
         try:
-            resp = jarvis_app.process_message(req.message, client=(req.client.model_dump() if req.client else {}), source="web", safe_mode=False, shutting_down=False)
+            resp = jarvis_app.process_message(
+                req.message,
+                client=(req.client.model_dump() if req.client else {}),
+                source="web",
+                safe_mode=False,
+                shutting_down=False,
+                trace_id=getattr(getattr(request, "state", None), "trace_id", None),
+            )
         except TypeError:
             resp = jarvis_app.process_message(req.message, client=(req.client.model_dump() if req.client else {}))
         return MessageResponse(
