@@ -49,6 +49,7 @@ def create_app(
     enable_web_ui: bool = True,
     allow_remote_admin_unlock: bool = False,
     remote_control_enabled: bool = True,
+    lockdown_manager=None,
 ) -> FastAPI:
     app = FastAPI(title="Jarvis Remote", version="0.1.0")
     reporter = ErrorReporter()
@@ -141,7 +142,12 @@ def create_app(
         if not remote_control_enabled:
             raise HTTPException(status_code=503, detail="Remote control disabled (USB key required).")
         if runtime is not None:
-            trace_id = runtime.submit_text("web", req.message, client_meta=(req.client.model_dump() if req.client else {}))
+            trace_id = runtime.submit_text(
+                "web",
+                req.message,
+                client_meta=(req.client.model_dump() if req.client else {}),
+                trace_id=getattr(getattr(request, "state", None), "trace_id", None),
+            )
             out = runtime.wait_for_result(trace_id, timeout_seconds=20.0)
             if not out:
                 raise HTTPException(status_code=504, detail="Timed out waiting for result.")
@@ -154,7 +160,14 @@ def create_app(
                 followup_question=None,
             )
         try:
-            resp = jarvis_app.process_message(req.message, client=(req.client.model_dump() if req.client else {}), source="web", safe_mode=False, shutting_down=False)
+            resp = jarvis_app.process_message(
+                req.message,
+                client=(req.client.model_dump() if req.client else {}),
+                source="web",
+                safe_mode=False,
+                shutting_down=False,
+                trace_id=getattr(getattr(request, "state", None), "trace_id", None),
+            )
         except TypeError:
             resp = jarvis_app.process_message(req.message, client=(req.client.model_dump() if req.client else {}))
         return MessageResponse(
@@ -422,6 +435,15 @@ def create_app(
             raise PermissionDeniedError("Admin unlock not allowed from this IP.")
         # Never log passphrase; EventLogger redacts anyway, but we avoid logging body entirely.
         ok = security_manager.verify_and_unlock_admin(req.passphrase)
+        if lockdown_manager is not None:
+            try:
+                trace_id = getattr(getattr(request, "state", None), "trace_id", None)
+                if ok:
+                    lockdown_manager.record_admin_success()
+                else:
+                    lockdown_manager.record_admin_failure(trace_id=trace_id, source="web", details={"client_ip": client_ip})
+            except Exception:
+                pass
         msg = "Admin unlocked." if ok else "Invalid passphrase or USB key missing."
         return AdminUnlockResponse(ok=ok, message=msg)
 

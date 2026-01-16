@@ -21,6 +21,8 @@ from jarvis.core.recovery import RecoveryPolicy, RecoveryConfig
 from jarvis.core.circuit_breaker import BreakerRegistry
 from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
 from jarvis.core.privacy.redaction import privacy_redact
+from jarvis.core.trace import resolve_trace_id
+from jarvis.core.ux.primitives import acknowledge, completed
 
 
 class StateTransitionError(RuntimeError):
@@ -91,6 +93,7 @@ class InteractionResult:
     reply: str
     intent: Dict[str, Any]
     created_at: float
+    ux_events: list[Dict[str, Any]] | None = None
 
 
 class _JsonlWriter:
@@ -140,6 +143,7 @@ class JarvisRuntime:
         module_manager: Any = None,
         privacy_store: Any = None,
         dsar_engine: Any = None,
+        lockdown_manager: Any = None,
     ):
         self.cfg = cfg
         self.jarvis_app = jarvis_app
@@ -162,6 +166,7 @@ class JarvisRuntime:
         self.module_manager = module_manager
         self.privacy_store = privacy_store
         self.dsar_engine = dsar_engine
+        self.lockdown_manager = lockdown_manager
 
         self._writer = _JsonlWriter(persist_path)
         self._q: "queue.Queue[RuntimeEvent]" = queue.Queue()
@@ -238,8 +243,8 @@ class JarvisRuntime:
             except Exception:
                 pass
 
-    def submit_text(self, source: str, text: str, client_meta: Optional[Dict[str, Any]] = None) -> str:
-        trace_id = uuid.uuid4().hex
+    def submit_text(self, source: str, text: str, client_meta: Optional[Dict[str, Any]] = None, trace_id: Optional[str] = None) -> str:
+        trace_id = resolve_trace_id(trace_id)
         if not self._accepting_inputs:
             # immediate safe reply
             with self._results_lock:
@@ -283,6 +288,12 @@ class JarvisRuntime:
         secure = self.get_secure_store_status()
         llm = self.get_llm_status()
         voice = self.get_voice_status()
+        lockdown = None
+        if self.lockdown_manager is not None:
+            try:
+                lockdown = self.lockdown_manager.status()
+            except Exception:
+                lockdown = {"active": False, "error": "status_failed"}
         rs = None
         if self.runtime_state is not None:
             try:
@@ -302,6 +313,7 @@ class JarvisRuntime:
             "secure_store": secure,
             "llm": llm,
             "voice": voice,
+            "lockdown": lockdown,
             "audit": self.get_audit_status(),
             "modules": self.get_modules_status(),
             "runtime_state": rs,
@@ -430,7 +442,7 @@ class JarvisRuntime:
             r = self._results.get(trace_id)
             if not r:
                 return None
-            return {"trace_id": r.trace_id, "reply": r.reply, "intent": r.intent}
+            return {"trace_id": r.trace_id, "reply": r.reply, "intent": r.intent, "ux_events": r.ux_events}
 
     def wait_for_result(self, trace_id: str, timeout_seconds: float = 20.0) -> Optional[Dict[str, Any]]:
         deadline = time.time() + float(timeout_seconds)
@@ -467,9 +479,24 @@ class JarvisRuntime:
         ok = bool(self.security_manager.verify_and_unlock_admin(passphrase))
         if ok:
             self._log_sm("admin.unlocked", {})
+            if self.lockdown_manager is not None:
+                try:
+                    self.lockdown_manager.record_admin_success()
+                except Exception:
+                    pass
         else:
             self._log_sm("admin.unlock_failed", {})
+            if self.lockdown_manager is not None:
+                try:
+                    self.lockdown_manager.record_admin_failure(trace_id=None, source="local")
+                except Exception:
+                    pass
         return ok
+
+    def exit_lockdown(self, *, trace_id: Optional[str] = None) -> bool:
+        if self.lockdown_manager is None:
+            return False
+        return bool(self.lockdown_manager.exit_lockdown(trace_id=trace_id, actor="admin", reason="manual"))
 
     def admin_lock(self) -> None:
         if self.security_manager is None:
@@ -768,7 +795,7 @@ class JarvisRuntime:
         # If job manager exists, schedule as a job for observability; otherwise do it directly.
         if self.job_manager is not None and "system.sleep_llm" in getattr(self.job_manager, "allowed_kinds", lambda: [])():
             try:
-                self.job_manager.submit_job("system.sleep_llm", {}, {"source": "system", "client_id": "runtime"}, priority=5, max_runtime_seconds=30)
+                self.job_manager.submit_job("system.sleep_llm", {}, {"source": "system", "client_id": "runtime"}, priority=5, max_runtime_seconds=30, trace_id=trace_id)
                 self._llm_loaded = False
                 self._log_sm("llm.unload_scheduled", {})
                 return
@@ -932,7 +959,14 @@ class JarvisRuntime:
             client = ev.payload.get("client") or {}
             # run pipeline synchronously in this thread (fast) to keep determinism
             try:
-                resp = self.jarvis_app.process_message(text, client=client, source=str(ev.source), safe_mode=self.safe_mode, shutting_down=bool(self._shutdown_in_progress))
+                resp = self.jarvis_app.process_message(
+                    text,
+                    client=client,
+                    source=str(ev.source),
+                    safe_mode=self.safe_mode,
+                    shutting_down=bool(self._shutdown_in_progress),
+                    trace_id=ev.trace_id,
+                )
             except TypeError:
                 # Backward-compatible for test fakes / older JarvisApp signatures
                 resp = self.jarvis_app.process_message(text, client=client)
@@ -945,6 +979,7 @@ class JarvisRuntime:
                 resp.reply,
                 intent={"id": resp.intent_id, "source": resp.intent_source, "confidence": resp.confidence},
                 modifications=getattr(resp, "modifications", {}) or {},
+                ux_events=getattr(resp, "ux_events", None),
             )
             return
 
@@ -960,10 +995,35 @@ class JarvisRuntime:
             return
         self._q.put(nxt)
 
-    def _finalize_reply(self, trace_id: str, reply: str, intent: Dict[str, Any], *, modifications: Dict[str, Any] | None = None) -> None:
+    def _finalize_reply(
+        self,
+        trace_id: str,
+        reply: str,
+        intent: Dict[str, Any],
+        *,
+        modifications: Dict[str, Any] | None = None,
+        ux_events: list[Dict[str, Any]] | None = None,
+    ) -> None:
         reply = str(reply or "")
+        if ux_events is None:
+            action = str((intent or {}).get("id") or "request").replace(".", " ")
+            ux_events = [acknowledge(action), completed(reply or "Completed.")]
+            for ev in ux_events:
+                ev.setdefault("intent_id", str((intent or {}).get("id") or ""))
+                ev.setdefault("action", action)
+                ev.setdefault("trace_id", trace_id)
+        else:
+            for ev in ux_events:
+                if isinstance(ev, dict):
+                    ev.setdefault("trace_id", trace_id)
         with self._results_lock:
-            self._results[trace_id] = InteractionResult(trace_id=trace_id, reply=reply, intent=redact(intent), created_at=time.time())
+            self._results[trace_id] = InteractionResult(
+                trace_id=trace_id,
+                reply=reply,
+                intent=redact(intent),
+                created_at=time.time(),
+                ux_events=ux_events,
+            )
         self._writer.write({"ts": time.time(), "trace_id": trace_id, "event": "response.ready", "reply_len": len(reply), "intent": redact(intent)})
         self.event_logger.log(trace_id, "core.reply", {"reply_len": len(reply), "intent": intent})
 

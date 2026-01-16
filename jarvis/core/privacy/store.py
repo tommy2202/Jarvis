@@ -37,15 +37,38 @@ class PrivacyStore:
 
     SENSITIVE_SCOPES = {"memory", "transcripts"}
 
-    def __init__(self, *, db_path: str, config_manager: Any = None, event_bus: Any = None, logger: Any = None):
+    def __init__(
+        self,
+        *,
+        db_path: str,
+        config_manager: Any = None,
+        event_bus: Any = None,
+        logger: Any = None,
+        version_registry: Any = None,
+        event_logger: Any = None,
+    ):
         self.db_path = str(db_path)
         self.config = config_manager
         self.event_bus = event_bus
         self.logger = logger
+        self.version_registry = version_registry
+        self.event_logger = event_logger
         self.secure_store: Any = None
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         self._init_db()
+        try:
+            from jarvis.core.migrations.runner import run_privacy_store_migrations
+
+            run_privacy_store_migrations(
+                db_path=self.db_path,
+                registry=self.version_registry,
+                event_logger=self.event_logger,
+                trace_id="privacy",
+            )
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Privacy migrations failed: {e}")
 
         # Always ensure a default user exists for single-user mode.
         try:
