@@ -479,35 +479,35 @@ class Dispatcher:
                 )
 
             # Module contract enforcement (non-core)
-        contract = self._resolve_intent_contract(mod.meta or {}, intent_id)
-        required_flags = self._normalize_feature_flags(contract)
-        if required_flags:
-            if self.feature_flags is None:
-                return self._deny(
-                    trace_id,
-                    intent_id=intent_id,
-                    module_id=module_id,
-                    denied_reason="feature_flags_unavailable",
-                    reply="Feature flags are not configured.",
-                    remediation="Initialize feature flags before executing this intent.",
-                    details={"required_flags": list(required_flags)},
-                    ux_events=ux_events,
-                    ux_action=ux_action,
-                )
-            disabled = [f for f in required_flags if not bool(getattr(self.feature_flags, "is_enabled", lambda _f: False)(f))]
-            if disabled:
-                flag = disabled[0]
-                return self._deny(
-                    trace_id,
-                    intent_id=intent_id,
-                    module_id=module_id,
-                    denied_reason="feature_flag_disabled",
-                    reply=f"Feature flag disabled: {flag}.",
-                    remediation=f"Enable flag '{flag}' to proceed.",
-                    details={"disabled_flags": disabled, "required_flags": list(required_flags)},
-                    ux_events=ux_events,
-                    ux_action=ux_action,
-                )
+            contract = self._resolve_intent_contract(mod.meta or {}, intent_id)
+            required_flags = self._normalize_feature_flags(contract)
+            if required_flags:
+                if self.feature_flags is None:
+                    return self._deny(
+                        trace_id,
+                        intent_id=intent_id,
+                        module_id=module_id,
+                        denied_reason="feature_flags_unavailable",
+                        reply="Feature flags are not configured.",
+                        remediation="Initialize feature flags before executing this intent.",
+                        details={"required_flags": list(required_flags)},
+                        ux_events=ux_events,
+                        ux_action=ux_action,
+                    )
+                disabled = [f for f in required_flags if not bool(getattr(self.feature_flags, "is_enabled", lambda _f: False)(f))]
+                if disabled:
+                    flag = disabled[0]
+                    return self._deny(
+                        trace_id,
+                        intent_id=intent_id,
+                        module_id=module_id,
+                        denied_reason="feature_flag_disabled",
+                        reply=f"Feature flag disabled: {flag}.",
+                        remediation=f"Enable flag '{flag}' to proceed.",
+                        details={"disabled_flags": disabled, "required_flags": list(required_flags)},
+                        ux_events=ux_events,
+                        ux_action=ux_action,
+                    )
             is_core = bool(contract.get("core")) or str(intent_id).startswith("core.")
             if not is_core:
                 missing = []
