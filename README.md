@@ -428,6 +428,8 @@ Security events are written to:
 
 ## Adding a module (setup wizard workflow)
 
+Module discovery never imports modules; it reads manifest files or static `MODULE_META` literals.
+
 1) Drop a new module file in `jarvis/modules/` with:
 - `MODULE_META = {"id": "...", ...}`
 - `handle(intent_id, args, context) -> dict`
