@@ -77,6 +77,7 @@ class Dispatcher:
         privacy_store: Any = None,
         identity_manager: Any = None,
         limiter: Limiter | None = None,
+        feature_flags: Any = None,
     ):
         self.registry = registry
         self.policy = policy
@@ -95,6 +96,7 @@ class Dispatcher:
         self.identity_manager = identity_manager
         self._privacy_gate = PrivacyGate(privacy_store=privacy_store) if privacy_store is not None else None
         self.limiter = limiter
+        self.feature_flags = feature_flags
 
     @staticmethod
     def _ux_action_label(intent_id: str, module_id: str) -> str:
@@ -317,7 +319,20 @@ class Dispatcher:
             "resource_class": per_intent.get("resource_class", mod_meta.get("resource_class")),
             "required_capabilities": per_intent.get("required_capabilities", mod_meta.get("required_capabilities")),
             "core": bool(per_intent.get("core", mod_meta.get("core", False))),
+            "feature_flag": per_intent.get("feature_flag", mod_meta.get("feature_flag")),
+            "feature_flags": per_intent.get("feature_flags", mod_meta.get("feature_flags")),
         }
+
+    @staticmethod
+    def _normalize_feature_flags(contract: Dict[str, Any]) -> List[str]:
+        flags = contract.get("feature_flags")
+        if flags is None:
+            flags = contract.get("feature_flag")
+        if isinstance(flags, str):
+            return [flags]
+        if isinstance(flags, list):
+            return [str(x) for x in flags if isinstance(x, str) and x]
+        return []
 
     @staticmethod
     def _run_in_subprocess(module_path: str, intent_id: str, args: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
@@ -464,7 +479,35 @@ class Dispatcher:
                 )
 
             # Module contract enforcement (non-core)
-            contract = self._resolve_intent_contract(mod.meta or {}, intent_id)
+        contract = self._resolve_intent_contract(mod.meta or {}, intent_id)
+        required_flags = self._normalize_feature_flags(contract)
+        if required_flags:
+            if self.feature_flags is None:
+                return self._deny(
+                    trace_id,
+                    intent_id=intent_id,
+                    module_id=module_id,
+                    denied_reason="feature_flags_unavailable",
+                    reply="Feature flags are not configured.",
+                    remediation="Initialize feature flags before executing this intent.",
+                    details={"required_flags": list(required_flags)},
+                    ux_events=ux_events,
+                    ux_action=ux_action,
+                )
+            disabled = [f for f in required_flags if not bool(getattr(self.feature_flags, "is_enabled", lambda _f: False)(f))]
+            if disabled:
+                flag = disabled[0]
+                return self._deny(
+                    trace_id,
+                    intent_id=intent_id,
+                    module_id=module_id,
+                    denied_reason="feature_flag_disabled",
+                    reply=f"Feature flag disabled: {flag}.",
+                    remediation=f"Enable flag '{flag}' to proceed.",
+                    details={"disabled_flags": disabled, "required_flags": list(required_flags)},
+                    ux_events=ux_events,
+                    ux_action=ux_action,
+                )
             is_core = bool(contract.get("core")) or str(intent_id).startswith("core.")
             if not is_core:
                 missing = []

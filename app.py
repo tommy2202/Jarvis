@@ -46,6 +46,7 @@ from jarvis.core.runtime_control import RuntimeController
 from jarvis.core.shutdown_orchestrator import ShutdownConfig, ShutdownOrchestrator
 from jarvis.core.runtime_state.manager import RuntimeStateManager, RuntimeStateManagerConfig
 from jarvis.core.runtime_state.io import dirty_exists
+from jarvis.core.flags import FeatureFlagManager
 from jarvis.core.capabilities.loader import validate_and_normalize
 from jarvis.core.capabilities.audit import CapabilityAuditLogger
 from jarvis.core.capabilities.engine import CapabilityEngine
@@ -370,6 +371,11 @@ def main() -> None:
     telemetry.attach(secure_store=secure_store, security_manager=security)
     runtime_state.attach(security_manager=security, secure_store=secure_store)
 
+    # Feature flags (admin-only, auditable)
+    from jarvis.core.security_events import SecurityAuditLogger
+
+    feature_flags = FeatureFlagManager(security_manager=security, audit_logger=SecurityAuditLogger(), event_bus=event_bus, logger=logger)
+
     # Identity manager (user attribution + active user/session)
     from jarvis.core.identity.manager import IdentityManager
 
@@ -488,6 +494,7 @@ def main() -> None:
         privacy_store=privacy_store,
         identity_manager=identity_manager,
         limiter=limiter,
+        feature_flags=feature_flags,
     )
 
     jarvis = JarvisApp(

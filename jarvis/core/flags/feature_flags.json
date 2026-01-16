@@ -1,0 +1,12 @@
+{
+  "flags": {
+    "example.new_behavior": {
+      "description": "Example feature flag (disabled by default).",
+      "enabled": false,
+      "updated_at": "1970-01-01T00:00:00Z",
+      "updated_by": "system"
+    }
+  },
+  "updated_at": "1970-01-01T00:00:00Z",
+  "updated_by": "system"
+}
