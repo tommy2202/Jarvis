@@ -174,7 +174,7 @@ def test_module_contract_incomplete_denied(tmp_path):
     reg._modules_by_id["m"] = LoadedModule(  # noqa: SLF001
         module_path="test.m",
         module_id="m",
-        meta={"resource_class": "default", "required_capabilities": []},  # missing execution_mode
+        meta={"execution_mode": "inline", "required_capabilities": []},  # missing resource_class
         _unsafe_handler=handler,
     )
 

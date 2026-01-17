@@ -55,7 +55,12 @@ def test_rate_limit_exceeded_denied(tmp_path):
         called["n"] += 1
         return {"ok": True}
 
-    reg.register_handler(module_id="core", module_path="core.test", meta={"core": True}, handler=handler)
+    reg.register_handler(
+        module_id="core",
+        module_path="core.test",
+        meta={"core": True, "resource_class": "light", "execution_mode": "inline", "required_capabilities": []},
+        handler=handler,
+    )
     store = SecureStore(usb_key_path=str(tmp_path / "usb_missing.bin"), store_path=str(tmp_path / "store.enc"))
     sec = SecurityManager(secure_store=store, admin_session=AdminSession(timeout_seconds=9999))
     disp = Dispatcher(
@@ -97,7 +102,12 @@ def test_rate_limit_recovers(tmp_path):
         called["n"] += 1
         return {"ok": True}
 
-    reg.register_handler(module_id="core", module_path="core.test", meta={"core": True}, handler=handler)
+    reg.register_handler(
+        module_id="core",
+        module_path="core.test",
+        meta={"core": True, "resource_class": "light", "execution_mode": "inline", "required_capabilities": []},
+        handler=handler,
+    )
     store = SecureStore(usb_key_path=str(tmp_path / "usb_missing.bin"), store_path=str(tmp_path / "store.enc"))
     sec = SecurityManager(secure_store=store, admin_session=AdminSession(timeout_seconds=9999))
     disp = Dispatcher(
@@ -142,7 +152,12 @@ def test_admin_override(tmp_path):
         called["n"] += 1
         return {"ok": True}
 
-    reg.register_handler(module_id="core", module_path="core.test", meta={"core": True}, handler=handler)
+    reg.register_handler(
+        module_id="core",
+        module_path="core.test",
+        meta={"core": True, "resource_class": "light", "execution_mode": "inline", "required_capabilities": []},
+        handler=handler,
+    )
     store = SecureStore(usb_key_path=str(tmp_path / "usb_missing.bin"), store_path=str(tmp_path / "store.enc"))
     sec = SecurityManager(secure_store=store, admin_session=AdminSession(timeout_seconds=9999))
     sec.admin_session.unlock()
