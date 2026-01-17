@@ -39,6 +39,30 @@ def modules_list_lines(*, module_manager: Any, trace_id: str = "cli") -> List[st
     return lines
 
 
+def modules_status_lines(*, module_manager: Any, trace_id: str = "cli") -> List[str]:
+    """
+    Render /modules status output lines (more verbose than list).
+    Columns: module_id | state | enabled | reason_code | reason | remediation
+    """
+    statuses: List[ModuleStatus] = list(getattr(module_manager, "list_status")(trace_id=trace_id) or [])
+    reg = {}
+    try:
+        raw = module_manager.list_registry()
+        reg = (raw.get("modules") or {}) if isinstance(raw, dict) else {}
+    except Exception:
+        reg = {}
+    if not isinstance(reg, dict):
+        reg = {}
+
+    lines = ["module_id | state | enabled | reason_code | reason | remediation"]
+    for st in statuses:
+        rec = reg.get(st.module_id) if isinstance(reg, dict) else None
+        enabled = bool(rec.get("enabled")) if isinstance(rec, dict) else False
+        reason = str(st.reason_human or "")
+        lines.append(f"{st.module_id} | {st.state.value} | {str(enabled).lower()} | {st.reason_code.value} | {reason} | {st.remediation}")
+    return lines
+
+
 def modules_show_payload(*, module_manager: Any, module_id: str, trace_id: str = "cli") -> Dict[str, Any]:
     """
     Build /modules show output payload: ModuleStatus + manifest summary (no secrets).

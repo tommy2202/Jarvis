@@ -51,6 +51,7 @@ class DispatchResult:
     pending_confirmation: Optional[Dict[str, Any]] = None
     remediation: Optional[str] = None
     ux_events: Optional[List[Dict[str, Any]]] = None
+    decision_breakdown: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +247,7 @@ class Dispatcher:
         *,
         intent_id: str,
         module_id: str,
+        denied_by: str,
         denied_reason: str,
         reply: str,
         remediation: str = "",
@@ -253,12 +255,19 @@ class Dispatcher:
         ux_events: Optional[List[Dict[str, Any]]] = None,
         ux_action: str = "",
     ) -> DispatchResult:
+        breakdown = {
+            "denied_by": str(denied_by or "capabilities"),
+            "reason_code": str(denied_reason or ""),
+            "remediation": str(remediation or "")[:300],
+            "trace_id": trace_id,
+        }
         payload = {
             "intent_id": intent_id,
             "module_id": module_id,
             "denied_reason": denied_reason,
             "remediation": remediation[:300],
             "user_id": str((details or {}).get("user_id") or ""),
+            "decision_breakdown": breakdown,
             **(details or {}),
         }
         self.event_logger.log(trace_id, "dispatch.denied", payload)
@@ -314,6 +323,7 @@ class Dispatcher:
             denied_reason=denied_reason,
             remediation=remediation,
             ux_events=ux_events,
+            decision_breakdown=breakdown,
         )
 
     def _build_request_context(self, trace_id: str, *, intent_id: str, mod_meta: Dict[str, Any], context: Dict[str, Any]) -> RequestContext:
@@ -718,6 +728,17 @@ class Dispatcher:
             return "inline"
         return ""
 
+    @staticmethod
+    def _capability_denied_by(ctx: RequestContext, dec) -> str:  # noqa: ANN001
+        reasons = [str(r or "").lower() for r in (getattr(dec, "reasons", None) or [])]
+        if bool(getattr(ctx, "shutting_down", False)) and any("shutting down" in r for r in reasons):
+            return "shutdown"
+        if bool(getattr(ctx, "safe_mode", False)) and any("safe mode" in r for r in reasons):
+            return "safe_mode"
+        if any("resource governor" in r for r in reasons):
+            return "limits"
+        return "capabilities"
+
     def execute_loaded_module(
         self,
         loaded: LoadedModule,
@@ -797,6 +818,7 @@ class Dispatcher:
                                 trace_id,
                                 intent_id=intent_id,
                                 module_id=module_id,
+                                denied_by="module_state",
                                 denied_reason="module_not_installed_or_disabled",
                                 reply=reply,
                                 remediation=remediation,
@@ -816,6 +838,7 @@ class Dispatcher:
                             trace_id,
                             intent_id=intent_id,
                             module_id=module_id,
+                            denied_by="module_state",
                             denied_reason="module_gate_unavailable",
                             reply="Module is not installed/enabled.",
                             remediation="Run /modules scan or /modules enable <id>.",
@@ -833,6 +856,7 @@ class Dispatcher:
                         pass
                 reason = "I can’t execute that module."
                 remediation = "Check that the module is installed and enabled."
+                breakdown = {"denied_by": "module_state", "reason_code": "unknown_module", "remediation": remediation, "trace_id": trace_id}
                 self._append_ux_failed(
                     ux_events,
                     trace_id=trace_id,
@@ -849,6 +873,7 @@ class Dispatcher:
                     denied_reason="unknown_module",
                     remediation=remediation,
                     ux_events=ux_events,
+                    decision_breakdown=breakdown,
                 )
 
             # Dispatcher is the single authoritative execution gate:
@@ -861,6 +886,7 @@ class Dispatcher:
                     trace_id,
                     intent_id=intent_id,
                     module_id=module_id,
+                    denied_by="lockdown",
                     denied_reason="lockdown_active",
                     reply="Lockdown mode active. Module execution is restricted.",
                     remediation="Admin can exit lockdown explicitly.",
@@ -873,6 +899,7 @@ class Dispatcher:
                     trace_id,
                     intent_id=intent_id,
                     module_id=module_id,
+                    denied_by="capabilities",
                     denied_reason="capability_engine_missing",
                     reply="I can’t execute actions because enforcement is not configured.",
                     remediation="Initialize the capability engine (config/capabilities.json) before executing intents.",
@@ -891,6 +918,7 @@ class Dispatcher:
                     trace_id,
                     intent_id=intent_id,
                     module_id=module_id,
+                    denied_by="capabilities",
                     denied_reason="intent_unmapped",
                     reply="I can’t execute that intent.",
                     remediation="Intent is not registered in capabilities policy. Add it to config/capabilities.json intent_requirements.",
@@ -908,6 +936,7 @@ class Dispatcher:
                         trace_id,
                         intent_id=intent_id,
                         module_id=module_id,
+                        denied_by="policy",
                         denied_reason="feature_flags_unavailable",
                         reply="Feature flags are not configured.",
                         remediation="Initialize feature flags before executing this intent.",
@@ -922,6 +951,7 @@ class Dispatcher:
                         trace_id,
                         intent_id=intent_id,
                         module_id=module_id,
+                        denied_by="policy",
                         denied_reason="feature_flag_disabled",
                         reply=f"Feature flag disabled: {flag}.",
                         remediation=f"Enable flag '{flag}' to proceed.",
@@ -941,6 +971,7 @@ class Dispatcher:
                         trace_id,
                         intent_id=intent_id,
                         module_id=module_id,
+                        denied_by="module_state",
                         denied_reason="module_contract_incomplete",
                         reply="Module contract incomplete.",
                         remediation="Run /modules wizard or update module manifest.",
@@ -955,6 +986,7 @@ class Dispatcher:
                         trace_id,
                         intent_id=intent_id,
                         module_id=module_id,
+                        denied_by="module_state",
                         denied_reason="module_contract_invalid",
                         reply="Module contract invalid.",
                         remediation="Run /modules wizard or update module manifest.",
@@ -968,6 +1000,7 @@ class Dispatcher:
                         trace_id,
                         intent_id=intent_id,
                         module_id=module_id,
+                        denied_by="module_state",
                         denied_reason="module_contract_mismatch",
                         reply="Module contract does not match capabilities policy.",
                         remediation="Update module manifest required_capabilities to match config/capabilities.json intent_requirements.",
@@ -983,6 +1016,7 @@ class Dispatcher:
                     trace_id,
                     intent_id=intent_id,
                     module_id=module_id,
+                    denied_by="module_state",
                     denied_reason="execution_mode_invalid",
                     reply="Module execution mode is unsupported.",
                     remediation="Set execution_mode to one of: inline, thread, process.",
@@ -1019,6 +1053,7 @@ class Dispatcher:
                             trace_id,
                             intent_id=intent_id,
                             module_id=module_id,
+                            denied_by="limits",
                             denied_reason="rate_limited",
                             reply="I’m throttling requests to prevent overload.",
                             remediation=remediation,
@@ -1044,10 +1079,12 @@ class Dispatcher:
                     msg = AdminRequiredError().user_message
                     if not remediation:
                         remediation = "Unlock admin to proceed."
+                denied_by = self._capability_denied_by(ctx, dec)
                 return self._deny(
                     trace_id,
                     intent_id=intent_id,
                     module_id=module_id,
+                    denied_by=denied_by,
                     denied_reason="capability_denied",
                     reply=msg,
                     remediation=remediation,
@@ -1092,6 +1129,12 @@ class Dispatcher:
                         if bool(getattr(pdec, "require_confirmation", False)):
                             reply = str(pdec.remediation or "Confirmation required. Reply 'confirm' to proceed or 'cancel' to abort.")[:300]
                             remediation = "Reply 'confirm' to proceed or 'cancel' to abort."
+                            breakdown = {
+                                "denied_by": "policy",
+                                "reason_code": "confirmation_required",
+                                "remediation": remediation,
+                                "trace_id": trace_id,
+                            }
                             self._append_ux_failed(
                                 ux_events,
                                 trace_id=trace_id,
@@ -1117,11 +1160,13 @@ class Dispatcher:
                                 },
                                 remediation=remediation,
                                 ux_events=ux_events,
+                                decision_breakdown=breakdown,
                             )
                         return self._deny(
                             trace_id,
                             intent_id=intent_id,
                             module_id=module_id,
+                            denied_by="policy",
                             denied_reason="policy_denied",
                             reply="I can’t do that right now.",
                             remediation=str(pdec.remediation or pdec.final_reason or "Denied by policy.")[:200],
@@ -1155,6 +1200,7 @@ class Dispatcher:
                                 trace_id,
                                 intent_id=intent_id,
                                 module_id=module_id,
+                                denied_by="limits",
                                 denied_reason="resource_governor_denied",
                                 reply="I can’t run that right now.",
                                 remediation=remediation,

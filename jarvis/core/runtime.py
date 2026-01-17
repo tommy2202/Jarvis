@@ -606,6 +606,14 @@ class JarvisRuntime:
     def get_recent_system_logs(self, n: int = 200) -> list[str]:
         return _tail_text(os.path.join("logs", "jarvis.log"), n=int(n))
 
+    def get_recent_denials(self, n: int = 50) -> list[Dict[str, Any]]:
+        path = str(getattr(self.event_logger, "path", os.path.join("logs", "events.jsonl")))
+        return _tail_denials(path, n=int(n))
+
+    def get_denial(self, trace_id: str) -> Optional[Dict[str, Any]]:
+        path = str(getattr(self.event_logger, "path", os.path.join("logs", "events.jsonl")))
+        return _find_denial(path, trace_id=str(trace_id))
+
     # ---------- Internal queueing ----------
     def _emit(self, typ: EventType, *, source: str, payload: Dict[str, Any], trace_id: Optional[str] = None) -> None:
         tid = trace_id or uuid.uuid4().hex
@@ -1129,6 +1137,63 @@ def _tail_jsonl(path: str, *, n: int) -> list[Dict[str, Any]]:
         return out
     except Exception:
         return []
+
+
+def _format_denial_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    details = entry.get("details") or {}
+    if not isinstance(details, dict):
+        details = {}
+    breakdown = details.get("decision_breakdown") or {}
+    if not isinstance(breakdown, dict):
+        breakdown = {}
+    return {
+        "trace_id": str(entry.get("trace_id") or ""),
+        "event": str(entry.get("event") or ""),
+        "ts": str(entry.get("ts") or ""),
+        "denied_by": str(breakdown.get("denied_by") or "unknown"),
+        "reason_code": str(breakdown.get("reason_code") or details.get("denied_reason") or ""),
+        "remediation": str(breakdown.get("remediation") or details.get("remediation") or ""),
+        "intent_id": str(details.get("intent_id") or ""),
+        "module_id": str(details.get("module_id") or ""),
+        "severity": "WARN",
+    }
+
+
+def _tail_denials(path: str, *, n: int) -> list[Dict[str, Any]]:
+    entries = _tail_jsonl(path, n=max(1, int(n)) * 5)
+    out: list[Dict[str, Any]] = []
+    for obj in reversed(entries):
+        if not isinstance(obj, dict):
+            continue
+        ev = str(obj.get("event") or "")
+        if ev not in {"dispatch.denied", "job.submit.denied", "dispatch.result"}:
+            continue
+        details = obj.get("details") or {}
+        if ev == "dispatch.result" and not isinstance(details, dict):
+            continue
+        if ev == "dispatch.result" and bool(details.get("ok", True)) is True:
+            continue
+        out.append(_format_denial_entry(obj))
+        if len(out) >= max(1, int(n)):
+            break
+    return list(reversed(out))
+
+
+def _find_denial(path: str, trace_id: str) -> Optional[Dict[str, Any]]:
+    entries = _tail_jsonl(path, n=2000)
+    for obj in reversed(entries):
+        if not isinstance(obj, dict):
+            continue
+        if str(obj.get("trace_id") or "") != str(trace_id or ""):
+            continue
+        ev = str(obj.get("event") or "")
+        if ev not in {"dispatch.denied", "job.submit.denied", "dispatch.result"}:
+            continue
+        details = obj.get("details") or {}
+        if ev == "dispatch.result" and isinstance(details, dict) and bool(details.get("ok", True)) is True:
+            continue
+        return _format_denial_entry(obj)
+    return None
 
 
 def _tail_text(path: str, *, n: int) -> list[str]:

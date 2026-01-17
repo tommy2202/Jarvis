@@ -793,6 +793,14 @@ def main() -> None:
             st["shutdown_status"] = controller.get_shutdown_status()
             print(st)
             continue
+        if text.startswith("/why"):
+            parts = text.split()
+            if len(parts) < 2:
+                print("Usage: /why <trace_id>")
+                continue
+            info = getattr(runtime, "get_denial", lambda _tid: None)(parts[1])
+            print(info or {"error": "denial not found"})
+            continue
         if text.startswith("/lockdown"):
             parts = text.split()
             if len(parts) == 1 or parts[1] == "status":
@@ -1130,7 +1138,40 @@ def main() -> None:
             if len(parts) >= 3 and parts[1] == "intent":
                 iid = parts[2]
                 reqs = cap_engine.get_intent_requirements().get(iid)
-                print({"intent_id": iid, "required_caps": reqs})
+                from jarvis.core.capabilities.models import RequestContext, RequestSource
+
+                safe_mode = bool(getattr(runtime, "safe_mode", False))
+                shutting_down = bool(controller.get_shutdown_status().get("in_progress"))
+                ctx = RequestContext(
+                    trace_id="caps",
+                    source=RequestSource.cli,
+                    is_admin=bool(security.is_admin()),
+                    safe_mode=safe_mode,
+                    shutting_down=shutting_down,
+                    subsystem_health={"breakers": breaker_registry.status()},
+                    intent_id=iid,
+                    secure_store_mode=(secure_store.status().mode.value if secure_store else None),
+                )
+                dec = cap_engine.evaluate(ctx)
+                denied_by = "capabilities"
+                reasons = [str(r or "").lower() for r in (dec.reasons or [])]
+                if not bool(dec.allowed):
+                    if shutting_down and any("shutting down" in r for r in reasons):
+                        denied_by = "shutdown"
+                    elif safe_mode and any("safe mode" in r for r in reasons):
+                        denied_by = "safe_mode"
+                    elif any("resource governor" in r for r in reasons):
+                        denied_by = "limits"
+                print(
+                    {
+                        "intent_id": iid,
+                        "required_caps": reqs,
+                        "allowed": bool(dec.allowed),
+                        "denied_by": denied_by if not bool(dec.allowed) else "",
+                        "reasons": list(dec.reasons or []),
+                        "remediation": str(dec.remediation or ""),
+                    }
+                )
                 continue
             if len(parts) >= 3 and parts[1] == "eval":
                 iid = parts[2]
@@ -1183,6 +1224,12 @@ def main() -> None:
                 for line in modules_list_lines(module_manager=module_manager, trace_id="cli"):
                     print(line)
                 continue
+            if cmd == "status":
+                from jarvis.core.modules.cli import modules_status_lines
+
+                for line in modules_status_lines(module_manager=module_manager, trace_id="cli"):
+                    print(line)
+                continue
             if cmd == "scan":
                 print(module_manager.scan(trace_id="cli", trigger="manual"))
                 continue
@@ -1204,7 +1251,7 @@ def main() -> None:
                 out_path = parts[2]
                 print({"exported": module_manager.export(out_path)})
                 continue
-            print("Usage: /modules list | /modules scan | /modules show <id> | /modules enable <id> | /modules disable <id> | /modules export <path>")
+            print("Usage: /modules list | /modules status | /modules scan | /modules show <id> | /modules enable <id> | /modules disable <id> | /modules export <path>")
             continue
         if text.startswith("/privacy"):
             parts = text.split()

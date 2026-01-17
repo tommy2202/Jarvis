@@ -495,7 +495,11 @@ class JarvisApp:
                         pass
                 t_disp0 = time.time()
                 dr = self.dispatcher.dispatch(trace_id, chosen_intent_id, module_id, chosen_args, dispatch_context)
-                self.event_logger.log(trace_id, "dispatch.result", {"ok": dr.ok, "denied_reason": dr.denied_reason})
+                self.event_logger.log(
+                    trace_id,
+                    "dispatch.result",
+                    {"ok": dr.ok, "denied_reason": dr.denied_reason, "decision_breakdown": dict(dr.decision_breakdown or {})},
+                )
                 if self.telemetry is not None:
                     try:
                         self.telemetry.record_latency("dispatch_latency_ms", (time.time() - t_disp0) * 1000.0, tags={"ok": dr.ok})
