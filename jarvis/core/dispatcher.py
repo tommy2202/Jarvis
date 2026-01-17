@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from jarvis.core.events import EventLogger
 from jarvis.core.events import redact
-from jarvis.core.module_registry import ModuleRegistry
+from jarvis.core.module_registry import LoadedModule, ModuleRegistry
 from jarvis.core.security import PermissionPolicy, SecurityManager
 from jarvis.core.error_reporter import ErrorReporter
 from jarvis.core.errors import AdminRequiredError, JarvisError
@@ -704,6 +704,28 @@ class Dispatcher:
             return [str(x) for x in flags if isinstance(x, str) and x]
         return []
 
+    def execute_loaded_module(
+        self,
+        loaded: LoadedModule,
+        *,
+        intent_id: str,
+        args: Dict[str, Any],
+        context: Dict[str, Any],
+        persist_allowed: bool,
+    ) -> Dict[str, Any]:
+        """
+        Safe execution facade for module handlers.
+        Use this instead of accessing LoadedModule.handler directly.
+        """
+        handler = getattr(loaded, "_unsafe_handler", None)
+        if not callable(handler):
+            raise RuntimeError("Loaded module missing handler.")
+        # Lightweight runtime lint: mark dispatcher-owned execution path.
+        ctx = dict(context or {})
+        ctx["_dispatcher_execute"] = True
+        with persistence_context(persist_allowed=persist_allowed):
+            return loaded._call_unsafe(intent_id=intent_id, args=args, context=ctx)
+
     @staticmethod
     def _run_in_subprocess(module_path: str, intent_id: str, args: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1155,17 +1177,17 @@ class Dispatcher:
                         cv = contextvars.copy_context()
 
                         def _run():  # noqa: ANN001
-                            with persistence_context(persist_allowed=persist_allowed):
-                                return mod.handler(intent_id=intent_id, args=args, context=context)
+                            return self.execute_loaded_module(mod, intent_id=intent_id, args=args, context=context, persist_allowed=persist_allowed)
 
                         fut = ex.submit(cv.run, _run)
                         out = fut.result(timeout=30.0)
                 elif exec_mode == "process":
                     # process isolation: pass ephemeral flag via context (best effort)
-                    out = self._run_in_subprocess(getattr(mod, "module_path", ""), intent_id, args or {}, context or {})
+                    ctx = dict(context or {})
+                    ctx["_dispatcher_execute"] = True
+                    out = self._run_in_subprocess(getattr(mod, "module_path", ""), intent_id, args or {}, ctx)
                 else:
-                    with persistence_context(persist_allowed=persist_allowed):
-                        out = mod.handler(intent_id=intent_id, args=args, context=context)
+                    out = self.execute_loaded_module(mod, intent_id=intent_id, args=args, context=context, persist_allowed=persist_allowed)
                 summary = ""
                 if isinstance(out, dict):
                     summary = str(out.get("summary") or out.get("message") or "")

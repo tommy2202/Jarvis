@@ -34,7 +34,7 @@ def test_dispatcher_blocks_execution_when_capability_denied(tmp_path, monkeypatc
         module_path="test",
         module_id="music",
         meta={"resource_class": "default", "execution_mode": "inline", "required_capabilities": ["CAP_ADMIN_ACTION"]},
-        handler=handler,
+        _unsafe_handler=handler,
     )
 
     policy = PermissionPolicy(intents={"music.play": {"requires_admin": False, "resource_intensive": False, "network_access": False}})
@@ -73,7 +73,7 @@ def test_dispatcher_allows_when_capability_allows(tmp_path, monkeypatch):
         module_path="test",
         module_id="music",
         meta={"resource_class": "default", "execution_mode": "inline", "required_capabilities": ["CAP_AUDIO_OUTPUT"]},
-        handler=handler,
+        _unsafe_handler=handler,
     )
 
     policy = PermissionPolicy(intents={"music.play": {"requires_admin": False, "resource_intensive": False, "network_access": False}})

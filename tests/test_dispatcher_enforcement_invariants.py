@@ -44,7 +44,7 @@ def _dispatcher(tmp_path, *, cap_cfg) -> tuple[Dispatcher, dict]:
         module_path="test.mod",
         module_id="mod",
         meta={"resource_class": "default", "execution_mode": "inline", "required_capabilities": []},
-        handler=handler,
+        _unsafe_handler=handler,
     )
 
     eng = CapabilityEngine(cfg=cap_cfg, audit=CapabilityAuditLogger(path=str(tmp_path / "security.jsonl")), logger=None)
@@ -175,7 +175,7 @@ def test_module_contract_incomplete_denied(tmp_path):
         module_path="test.m",
         module_id="m",
         meta={"resource_class": "default", "required_capabilities": []},  # missing execution_mode
-        handler=handler,
+        _unsafe_handler=handler,
     )
 
     disp = Dispatcher(

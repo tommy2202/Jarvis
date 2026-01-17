@@ -36,7 +36,7 @@ def test_dispatcher_never_crashes_on_module_exception(tmp_path):
         module_path="jarvis.modules.fake",
         module_id="x",
         meta={"resource_class": "default", "execution_mode": "inline", "required_capabilities": []},
-        handler=bad_handle,
+        _unsafe_handler=bad_handle,
     )
 
     raw = default_config_dict()

@@ -35,7 +35,7 @@ def test_require_confirmation_blocks_until_confirm(tmp_path):
     reg._modules_by_id["mod"] = LoadedModule(  # type: ignore[attr-defined]
         module_path="test.mod",
         module_id="mod",
-        handler=handler,
+        _unsafe_handler=handler,
         meta={"id": "mod", "resource_intensive": False, "resource_class": "default", "execution_mode": "inline", "required_capabilities": []},
     )
 
