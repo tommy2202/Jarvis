@@ -19,11 +19,11 @@ def decide(
     force_start: bool,
     safe_mode_flag: bool,
 ) -> StartupDecision:
-    # failed in phases 0-4 => BLOCKED
+    # any FAILED check => BLOCKED (fail-closed)
     blocked = False
     degraded_count = 0
     for ph in phases:
-        if ph.phase_id <= 4 and ph.status == CheckStatus.FAILED:
+        if ph.status == CheckStatus.FAILED:
             blocked = True
         if ph.status == CheckStatus.DEGRADED:
             degraded_count += 1

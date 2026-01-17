@@ -18,7 +18,10 @@ from jarvis.core.startup.phases import (
     phase4_core_readiness,
     phase5_optional_probing,
     phase6_policy_safety,
+    phase7_enforcement_chain,
 )
+from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
+from jarvis.core.startup.models import CheckStatus
 
 
 @dataclass
@@ -47,6 +50,11 @@ class StartupSelfCheckRunner:
         cfg_obj,
         capabilities_cfg_raw: Dict[str, Any],
         core_ready: Dict[str, bool],
+        dispatcher=None,
+        capability_engine=None,
+        policy_engine=None,
+        privacy_store=None,
+        modules_root: str = "",
     ) -> StartupCheckResult:
         self.ops.log(trace_id="startup", event="startup.self_check.begin", outcome="start", details={"force_start": flags.force_start, "safe_mode": flags.safe_mode})
         if self.telemetry is not None:
@@ -76,6 +84,17 @@ class StartupSelfCheckRunner:
             secure_mode = "UNKNOWN"
         ph6 = phase6_policy_safety(cfg_obj=cfg_obj, secure_store_mode=secure_mode, capabilities_cfg=capabilities_cfg_raw)
         phases.append(ph6)
+
+        ph7 = phase7_enforcement_chain(
+            dispatcher=dispatcher,
+            capability_engine=capability_engine,
+            policy_engine=policy_engine,
+            privacy_store=privacy_store,
+            secure_store=secure_store,
+            cfg_obj=cfg_obj,
+            modules_root=modules_root,
+        )
+        phases.append(ph7)
 
         d = decide(phases=phases, force_start=flags.force_start, safe_mode_flag=flags.safe_mode)
 
@@ -118,6 +137,26 @@ class StartupSelfCheckRunner:
             pass
 
         self.ops.log(trace_id="startup", event="startup.self_check.complete", outcome=result.overall_status.value, details={"safe_mode": result.started_in_safe_mode})
+        any_failed = any(c.status == CheckStatus.FAILED for ph in phases for c in (ph.checks or []))
+        if any_failed:
+            if self.logger is not None:
+                try:
+                    self.logger.critical("Startup checks failed (fail-closed).")
+                except Exception:
+                    pass
+            if self.event_bus is not None:
+                try:
+                    self.event_bus.publish_nowait(
+                        BaseEvent(
+                            event_type="startup.failed",
+                            trace_id="startup",
+                            source_subsystem=SourceSubsystem.telemetry,
+                            severity=EventSeverity.CRITICAL,
+                            payload={"blocking_reasons": list(blocking)[:50]},
+                        )
+                    )
+                except Exception:
+                    pass
         if self.telemetry is not None:
             try:
                 self.telemetry.set_gauge("startup_safe_mode", 1 if result.started_in_safe_mode else 0)

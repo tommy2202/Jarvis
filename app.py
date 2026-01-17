@@ -617,6 +617,11 @@ def main() -> None:
         cfg_obj=cfg_obj,
         capabilities_cfg_raw=cap_raw,
         core_ready=core_ready,
+        dispatcher=dispatcher,
+        capability_engine=cap_engine,
+        policy_engine=policy_engine,
+        privacy_store=privacy_store,
+        modules_root=os.path.join("jarvis", "modules"),
     )
     try:
         runtime_state.record_startup_self_check(
