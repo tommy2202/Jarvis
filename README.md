@@ -686,6 +686,15 @@ pytest -q
 pytest --maxfail=1
 ```
 
+Windows clean venv (pytest):
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e .[dev]
+pytest -q
+```
+
 Coverage:
 
 ```bash
