@@ -352,7 +352,7 @@ class JarvisRuntime:
     def modules_scan(self) -> Dict[str, Any]:
         if self.module_manager is None:
             return {"ok": False, "error": "unavailable"}
-        return self.module_manager.scan(trace_id="runtime")
+        return self.module_manager.scan(trace_id="runtime", trigger="manual")
 
     def modules_enable(self, module_id: str) -> bool:
         if self.module_manager is None:

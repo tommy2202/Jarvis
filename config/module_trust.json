@@ -1,5 +1,7 @@
 {
   "allow_unsigned_modules": false,
-  "dev_mode_override": false
+  "dev_mode_override": false,
+  "dev_mode": false,
+  "scan_mode": "startup_only"
 }
 

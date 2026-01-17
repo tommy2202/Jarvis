@@ -105,6 +105,8 @@ class InstalledModuleRecord(BaseModel):
     missing_on_disk: bool = False
     pending_user_input: bool = False
     changed_requires_review: bool = False
+    # Debounce: fingerprint that triggered changed_requires_review.
+    changed_requires_review_fingerprint: str = ""
 
 
 class ModulesRegistryFile(BaseModel):
@@ -168,6 +170,8 @@ class ModuleTrustConfigFile(BaseModel):
 
     allow_unsigned_modules: bool = False
     dev_mode_override: bool = False
+    dev_mode: bool = False
+    scan_mode: str = "startup_only"
 
 
 def default_module_trust_config_dict() -> Dict[str, Any]:

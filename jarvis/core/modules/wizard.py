@@ -175,5 +175,6 @@ def registry_record_from_manifest(
         "missing_on_disk": False,
         "pending_user_input": bool(pending_user_input),
         "changed_requires_review": False,
+        "changed_requires_review_fingerprint": "",
     }
 

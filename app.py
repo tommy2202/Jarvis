@@ -437,7 +437,7 @@ def main() -> None:
         security_manager=security,
     )
     try:
-        module_manager.scan(trace_id="startup")
+        module_manager.scan(trace_id="startup", trigger="startup")
     except Exception as e:
         logger.warning(f"Module scan failed (continuing): {e}")
 
@@ -1184,7 +1184,7 @@ def main() -> None:
                     print(line)
                 continue
             if cmd == "scan":
-                print(module_manager.scan(trace_id="cli"))
+                print(module_manager.scan(trace_id="cli", trigger="manual"))
                 continue
             if cmd == "show" and len(parts) >= 3:
                 mid = parts[2]
