@@ -62,21 +62,9 @@ def test_trace_id_propagation(tmp_path):
         logger=DummyLogger(),
         event_bus=bus,
     )
-    jobs.register_job("system.health_check", job_system_health_check)
-
-    def handler(intent_id, args, context):  # noqa: ANN001
-        _ = intent_id, args, context
-        jobs.submit_job("system.health_check", {}, {"source": "test"})
-        return {"summary": "job queued"}
+    jobs.register_job("system.health_check", job_system_health_check, required_capabilities=["CAP_RUN_SUBPROCESS"])
 
     reg = ModuleRegistry()
-    reg.register_handler(
-        module_id="demo",
-        module_path="test.demo",
-        meta={"resource_class": "default", "execution_mode": "inline", "required_capabilities": []},
-        handler=handler,
-    )
-
     dispatcher = Dispatcher(
         registry=reg,
         policy=policy,
@@ -87,6 +75,26 @@ def test_trace_id_propagation(tmp_path):
         secure_store=store,
         event_bus=bus,
         policy_engine=policy_engine,
+        job_manager=jobs,
+    )
+
+    def handler(intent_id, args, context):  # noqa: ANN001
+        _ = intent_id, args
+        ctx = dict(context or {})
+        job_ctx = {
+            "source": str(ctx.get("source") or "cli"),
+            "client": dict(ctx.get("client") or {}),
+            "safe_mode": bool(ctx.get("safe_mode", False)),
+            "shutting_down": bool(ctx.get("shutting_down", False)),
+        }
+        res = dispatcher.submit_job(str(ctx.get("trace_id") or "t"), "system.health_check", {}, job_ctx)
+        return {"summary": "job queued" if res.ok else "job denied"}
+
+    reg.register_handler(
+        module_id="demo",
+        module_path="test.demo",
+        meta={"resource_class": "default", "execution_mode": "inline", "required_capabilities": []},
+        handler=handler,
     )
 
     stage_a = StageAIntentRouter([StageAIntent(id="demo.run", module_id="demo", keywords=["run"], required_args=[])], threshold=0.1)
@@ -104,6 +112,7 @@ def test_trace_id_propagation(tmp_path):
 
     trace_id = "trace-123"
     try:
+        sec.admin_session.unlock()
         resp = jarvis.process_message("run demo", client={"name": "test"}, source="cli", trace_id=trace_id)
         time.sleep(0.2)
 

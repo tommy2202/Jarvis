@@ -36,10 +36,15 @@ def _make_manager(tmp_path, *, max_concurrent=1):
         event_logger=ev,
         logger=DummyLogger(),
     )
-    jm.register_job("system.sleep", job_system_sleep, schema_model=SleepArgs)
-    jm.register_job("system.health_check", job_system_health_check)
-    jm.register_job("system.write_test_file", job_system_write_test_file, schema_model=WriteTestFileArgs)
-    jm.register_job("system.sleep_llm", job_system_sleep_llm)
+    jm.register_job("system.sleep", job_system_sleep, schema_model=SleepArgs, required_capabilities=["CAP_RUN_SUBPROCESS"])
+    jm.register_job("system.health_check", job_system_health_check, required_capabilities=["CAP_RUN_SUBPROCESS"])
+    jm.register_job(
+        "system.write_test_file",
+        job_system_write_test_file,
+        schema_model=WriteTestFileArgs,
+        required_capabilities=["CAP_RUN_SUBPROCESS", "CAP_WRITE_FILES"],
+    )
+    jm.register_job("system.sleep_llm", job_system_sleep_llm, required_capabilities=["CAP_RUN_SUBPROCESS"])
     return jm
 
 
@@ -56,7 +61,7 @@ def _wait_status(jm: JobManager, job_id: str, terminal: set[str], timeout: float
 def test_submit_job_transitions_to_succeeded(tmp_path):
     jm = _make_manager(tmp_path)
     try:
-        job_id = jm.submit_job("system.sleep", {"seconds": 0.2}, {"source": "test"})
+        job_id = jm.submit_job("system.sleep", {"seconds": 0.2}, {"source": "test"}, internal_call=True)
         st = _wait_status(jm, job_id, {"SUCCEEDED", "FAILED", "TIMED_OUT", "CANCELED"}, timeout=5.0)
         assert st.status.value == "SUCCEEDED"
         assert st.progress == 100
@@ -69,8 +74,8 @@ def test_submit_job_transitions_to_succeeded(tmp_path):
 def test_cancel_queued_job(tmp_path):
     jm = _make_manager(tmp_path, max_concurrent=1)
     try:
-        job1 = jm.submit_job("system.sleep", {"seconds": 1.0}, {"source": "test"}, priority=10)
-        job2 = jm.submit_job("system.sleep", {"seconds": 1.0}, {"source": "test"}, priority=20)
+        job1 = jm.submit_job("system.sleep", {"seconds": 1.0}, {"source": "test"}, priority=10, internal_call=True)
+        job2 = jm.submit_job("system.sleep", {"seconds": 1.0}, {"source": "test"}, priority=20, internal_call=True)
         ok = jm.cancel_job(job2)
         assert ok is True
         st2 = jm.get_job(job2)
@@ -83,7 +88,7 @@ def test_cancel_queued_job(tmp_path):
 def test_timeout_job_marks_timed_out(tmp_path):
     jm = _make_manager(tmp_path)
     try:
-        job_id = jm.submit_job("system.sleep", {"seconds": 2.0}, {"source": "test"}, max_runtime_seconds=1)
+        job_id = jm.submit_job("system.sleep", {"seconds": 2.0}, {"source": "test"}, max_runtime_seconds=1, internal_call=True)
         st = _wait_status(jm, job_id, {"TIMED_OUT", "FAILED", "SUCCEEDED"}, timeout=5.0)
         assert st.status.value == "TIMED_OUT"
     finally:
@@ -93,7 +98,7 @@ def test_timeout_job_marks_timed_out(tmp_path):
 def test_persistence_job_visible_after_restart(tmp_path):
     jm1 = _make_manager(tmp_path)
     try:
-        job_id = jm1.submit_job("system.write_test_file", {"filename": "a.txt", "contents": "hi"}, {"source": "test"})
+        job_id = jm1.submit_job("system.write_test_file", {"filename": "a.txt", "contents": "hi"}, {"source": "test"}, internal_call=True)
         st = _wait_status(jm1, job_id, {"SUCCEEDED", "FAILED", "TIMED_OUT", "CANCELED"}, timeout=5.0)
         assert st.status.value == "SUCCEEDED"
     finally:
@@ -112,7 +117,7 @@ def test_registry_unknown_kind_rejected(tmp_path):
     jm = _make_manager(tmp_path)
     try:
         with pytest.raises(ValueError):
-            _ = jm.submit_job("unknown.kind", {}, {"source": "test"})
+            _ = jm.submit_job("unknown.kind", {}, {"source": "test"}, internal_call=True)
     finally:
         jm.stop()
 
