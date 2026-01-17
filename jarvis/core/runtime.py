@@ -795,10 +795,15 @@ class JarvisRuntime:
         # If job manager exists, schedule as a job for observability; otherwise do it directly.
         if self.job_manager is not None and "system.sleep_llm" in getattr(self.job_manager, "allowed_kinds", lambda: [])():
             try:
-                self.job_manager.submit_job("system.sleep_llm", {}, {"source": "system", "client_id": "runtime"}, priority=5, max_runtime_seconds=30, trace_id=trace_id)
-                self._llm_loaded = False
-                self._log_sm("llm.unload_scheduled", {})
-                return
+                dispatcher = getattr(self.jarvis_app, "dispatcher", None)
+                if dispatcher is not None:
+                    ctx = {"source": "system", "client": {"name": "runtime", "id": "runtime"}, "safe_mode": bool(self.safe_mode), "shutting_down": bool(self._shutdown_in_progress)}
+                    res = dispatcher.submit_job(trace_id, "system.sleep_llm", {}, ctx, priority=5, max_runtime_seconds=30)
+                    if res.ok:
+                        self._llm_loaded = False
+                        self._log_sm("llm.unload_scheduled", {})
+                        return
+                # Fallback: no dispatcher or denied
             except Exception:
                 pass
         try:

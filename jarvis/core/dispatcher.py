@@ -50,6 +50,16 @@ class DispatchResult:
     ux_events: Optional[List[Dict[str, Any]]] = None
 
 
+@dataclass(frozen=True)
+class JobSubmitResult:
+    ok: bool
+    job_id: Optional[str] = None
+    reply: str = ""
+    denied_reason: Optional[str] = None
+    remediation: str = ""
+    required_capabilities: List[str] | None = None
+
+
 class Dispatcher:
     """
     Single enforcement point:
@@ -74,6 +84,7 @@ class Dispatcher:
         event_bus: Any = None,
         policy_engine: Any = None,
         module_manager: Any = None,
+        job_manager: Any = None,
         privacy_store: Any = None,
         identity_manager: Any = None,
         limiter: Limiter | None = None,
@@ -93,6 +104,7 @@ class Dispatcher:
         self.event_bus = event_bus
         self.policy_engine = policy_engine
         self.module_manager = module_manager
+        self.job_manager = job_manager
         self.privacy_store = privacy_store
         self.identity_manager = identity_manager
         self._privacy_gate = PrivacyGate(privacy_store=privacy_store) if privacy_store is not None else None
@@ -117,6 +129,46 @@ class Dispatcher:
                     trace_id=trace_id,
                     source_subsystem=SourceSubsystem.dispatcher,
                     severity=severity,
+                    payload=payload,
+                )
+            )
+        except Exception:
+            pass
+
+    def _emit_job_submit_event(
+        self,
+        trace_id: str,
+        *,
+        allowed: bool,
+        source: str,
+        kind: str,
+        required_caps: List[str],
+        args: Dict[str, Any],
+        denied_caps: Optional[List[str]] = None,
+        reason: str = "",
+        remediation: str = "",
+    ) -> None:
+        payload = {
+            "trace_id": trace_id,
+            "source": source,
+            "kind": kind,
+            "required_caps": list(required_caps or []),
+            "args": redact(args or {}),
+        }
+        if not allowed:
+            payload["denied_caps"] = list(denied_caps or [])
+            payload["reason"] = str(reason or "")[:200]
+            payload["remediation"] = str(remediation or "")[:200]
+        self.event_logger.log(trace_id, "job.submit.allowed" if allowed else "job.submit.denied", payload)
+        if self.event_bus is None:
+            return
+        try:
+            self.event_bus.publish_nowait(
+                BaseEvent(
+                    event_type="job.submit.allowed" if allowed else "job.submit.denied",
+                    trace_id=trace_id,
+                    source_subsystem=SourceSubsystem.dispatcher,
+                    severity=EventSeverity.INFO if allowed else EventSeverity.WARN,
                     payload=payload,
                 )
             )
@@ -316,6 +368,311 @@ class Dispatcher:
             secure_store_mode=secure_mode,
             confirmed=bool((context or {}).get("confirmed", False)),
         )
+
+    def _build_job_request_context(self, trace_id: str, *, intent_id: str, required_caps: List[str], context: Dict[str, Any]) -> RequestContext:
+        client = (context or {}).get("client") or {}
+        source_s = str((context or {}).get("source") or client.get("source") or client.get("name") or "cli").lower()
+        if source_s not in {"voice", "cli", "web", "ui", "system"}:
+            source_s = "cli"
+        shutting_down = bool((context or {}).get("shutting_down", False))
+        safe_mode = bool((context or {}).get("safe_mode", False))
+        client_id = str(client.get("id") or client.get("client_id") or "")
+        user_id = str((context or {}).get("user_id") or "")
+        if not user_id:
+            try:
+                im = getattr(self, "identity_manager", None)
+                if im is not None:
+                    user_id = str(im.get_active_user().user_id)
+            except Exception:
+                user_id = ""
+        if not user_id:
+            user_id = "default"
+
+        breaker_status = {}
+        try:
+            if self.breaker_registry is not None:
+                breaker_status = {"breakers": self.breaker_registry.status()}
+        except Exception:
+            breaker_status = {}
+
+        secure_mode = None
+        try:
+            if self.secure_store is not None:
+                st = self.secure_store.status()
+                secure_mode = str(getattr(st, "mode").value if hasattr(getattr(st, "mode"), "value") else getattr(st, "mode"))
+        except Exception:
+            secure_mode = None
+
+        req_caps = list(required_caps or [])
+        resource_intensive = bool("CAP_HEAVY_COMPUTE" in req_caps)
+        network_requested = bool("CAP_NETWORK_ACCESS" in req_caps)
+
+        return RequestContext(
+            trace_id=trace_id,
+            source=RequestSource(source_s),
+            client_id=client_id or None,
+            user_id=user_id,
+            is_admin=bool(self.security.is_admin()),
+            safe_mode=safe_mode,
+            shutting_down=shutting_down,
+            subsystem_health=breaker_status,
+            intent_id=intent_id,
+            resource_intensive=resource_intensive,
+            network_requested=network_requested,
+            extra_required_capabilities=req_caps,
+            secure_store_mode=secure_mode,
+            confirmed=bool((context or {}).get("confirmed", False)),
+        )
+
+    def _job_submit_denied(
+        self,
+        trace_id: str,
+        *,
+        source: str,
+        kind: str,
+        required_caps: List[str],
+        denied_reason: str,
+        reply: str,
+        remediation: str = "",
+        denied_caps: Optional[List[str]] = None,
+        args: Optional[Dict[str, Any]] = None,
+    ) -> JobSubmitResult:
+        self._emit_job_submit_event(
+            trace_id,
+            allowed=False,
+            source=source,
+            kind=kind,
+            required_caps=required_caps,
+            args=dict(args or {}),
+            denied_caps=list(denied_caps or []),
+            reason=denied_reason,
+            remediation=remediation,
+        )
+        return JobSubmitResult(
+            ok=False,
+            job_id=None,
+            reply=str(reply or "")[:300],
+            denied_reason=denied_reason,
+            remediation=str(remediation or "")[:300],
+            required_capabilities=list(required_caps or []),
+        )
+
+    def submit_job(
+        self,
+        trace_id: str,
+        kind: str,
+        args: Dict[str, Any],
+        dispatch_context: Dict[str, Any],
+        *,
+        priority: int = 50,
+        max_runtime_seconds: Optional[int] = None,
+    ) -> JobSubmitResult:
+        token = set_trace_id(trace_id)
+        try:
+            context = dict(dispatch_context or {})
+            source = str((context or {}).get("source") or "cli").lower()
+            if source not in {"voice", "cli", "web", "ui", "system"}:
+                source = "cli"
+
+            if self.lockdown_manager is not None and self.lockdown_manager.is_active():
+                context["safe_mode"] = True
+                return self._job_submit_denied(
+                    trace_id,
+                    source=source,
+                    kind=str(kind),
+                    required_caps=[],
+                    denied_reason="lockdown_active",
+                    reply="Lockdown mode active. Job submission is restricted.",
+                    remediation="Admin can exit lockdown explicitly.",
+                    args=args,
+                )
+
+            if self.job_manager is None:
+                return self._job_submit_denied(
+                    trace_id,
+                    source=source,
+                    kind=str(kind),
+                    required_caps=[],
+                    denied_reason="job_manager_unavailable",
+                    reply="Job system unavailable.",
+                    remediation="Start the job manager before submitting jobs.",
+                    args=args,
+                )
+
+            meta = self.job_manager.get_kind_metadata(str(kind)) if hasattr(self.job_manager, "get_kind_metadata") else None
+            if meta is None:
+                return self._job_submit_denied(
+                    trace_id,
+                    source=source,
+                    kind=str(kind),
+                    required_caps=[],
+                    denied_reason="unknown_job_kind",
+                    reply="Unknown job kind.",
+                    remediation="Check the job kind allowlist.",
+                    args=args,
+                )
+
+            required_caps = list(getattr(meta, "required_capabilities", []) or [])
+            if bool(getattr(meta, "heavy", False)) and "CAP_HEAVY_COMPUTE" not in required_caps:
+                required_caps.append("CAP_HEAVY_COMPUTE")
+            if bool(getattr(meta, "requires_admin", False)) and "CAP_ADMIN_ACTION" not in required_caps:
+                required_caps.append("CAP_ADMIN_ACTION")
+
+            if self.capability_engine is None:
+                return self._job_submit_denied(
+                    trace_id,
+                    source=source,
+                    kind=str(kind),
+                    required_caps=required_caps,
+                    denied_reason="capability_engine_missing",
+                    reply="I can’t submit jobs because enforcement is not configured.",
+                    remediation="Initialize the capability engine (config/capabilities.json).",
+                    args=args,
+                )
+
+            ctx = self._build_job_request_context(trace_id, intent_id="system.job.submit", required_caps=required_caps, context=context)
+
+            # Core limits (runaway protection) — deny before capability/policy evaluation.
+            if self.limiter is not None:
+                try:
+                    diagnostics_override = bool((context or {}).get("diagnostics_override") or (context or {}).get("diagnostics", False))
+                    dec0 = self.limiter.allow(
+                        source=str(getattr(ctx, "source").value if getattr(ctx, "source", None) is not None else "cli"),
+                        intent_id=str(ctx.intent_id),
+                        user_id=str(getattr(ctx, "user_id", "default")),
+                        client_id=getattr(ctx, "client_id", None),
+                        is_admin=bool(getattr(ctx, "is_admin", False)),
+                        diagnostics_override=bool(diagnostics_override),
+                    )
+                    if not bool(dec0.allowed):
+                        retry_s = float(getattr(dec0, "retry_after_seconds", 0.0) or 0.0)
+                        remediation = f"Wait {max(0.0, retry_s):.1f}s and try again."
+                        return self._job_submit_denied(
+                            trace_id,
+                            source=source,
+                            kind=str(kind),
+                            required_caps=required_caps,
+                            denied_reason="rate_limited",
+                            reply="I’m throttling requests to prevent overload.",
+                            remediation=remediation,
+                            denied_caps=[],
+                            args=args,
+                        )
+                except Exception:
+                    pass
+
+            dec = self.capability_engine.evaluate(ctx)
+            self.event_logger.log(
+                trace_id,
+                "dispatch.job.capabilities",
+                {"allowed": dec.allowed, "required": dec.required_capabilities, "denied": dec.denied_capabilities, "reasons": dec.reasons, "remediation": dec.remediation[:200]},
+            )
+            if not bool(dec.allowed):
+                return self._job_submit_denied(
+                    trace_id,
+                    source=source,
+                    kind=str(kind),
+                    required_caps=list(dec.required_capabilities or required_caps),
+                    denied_reason="capability_denied",
+                    reply="Job submission denied.",
+                    remediation=str(dec.remediation or "")[:200],
+                    denied_caps=list(dec.denied_capabilities or []),
+                    args=args,
+                )
+
+            # Policy decision (restriction-only layer)
+            pe = self._policy_engine()
+            if pe is not None:
+                try:
+                    from jarvis.core.policy.models import PolicyContext
+
+                    rc = None
+                    try:
+                        rg = getattr(self.capability_engine, "resource_governor", None)
+                        if rg is not None:
+                            rc = bool(rg.is_over_budget())
+                    except Exception:
+                        rc = None
+                    pctx = PolicyContext(
+                        trace_id=trace_id,
+                        intent_id=ctx.intent_id,
+                        required_capabilities=list(dec.required_capabilities or []),
+                        source=ctx.source.value,
+                        client_id=ctx.client_id,
+                        client_ip=None,
+                        is_admin=bool(ctx.is_admin),
+                        safe_mode=bool(ctx.safe_mode),
+                        shutting_down=bool(ctx.shutting_down),
+                        secure_store_mode=ctx.secure_store_mode,
+                        tags=[("resource_intensive" if ctx.resource_intensive else ""), ("networked" if ctx.network_requested else "")],
+                        resource_over_budget=rc,
+                        confirmed=bool(getattr(ctx, "confirmed", False)),
+                    )
+                    pctx.tags = [t for t in (pctx.tags or []) if t]
+                    pdec = pe.evaluate(pctx)
+                    if not bool(pdec.allowed):
+                        if bool(getattr(pdec, "require_confirmation", False)):
+                            return self._job_submit_denied(
+                                trace_id,
+                                source=source,
+                                kind=str(kind),
+                                required_caps=list(dec.required_capabilities or required_caps),
+                                denied_reason="confirmation_required",
+                                reply=str(pdec.remediation or "Confirmation required.")[:300],
+                                remediation="Reply 'confirm' to proceed or 'cancel' to abort.",
+                                args=args,
+                            )
+                        return self._job_submit_denied(
+                            trace_id,
+                            source=source,
+                            kind=str(kind),
+                            required_caps=list(dec.required_capabilities or required_caps),
+                            denied_reason="policy_denied",
+                            reply="Job submission denied.",
+                            remediation=str(pdec.remediation or pdec.final_reason or "Denied by policy.")[:200],
+                            args=args,
+                        )
+                except Exception:
+                    pass
+
+            if self.security.is_admin():
+                self.security.touch_admin()
+
+            client = (context or {}).get("client") or {}
+            client_id = str(client.get("id") or client.get("client_id") or "")
+            requested_by = {"source": source, "client_id": client_id}
+            try:
+                job_id = self.job_manager.submit_job(
+                    str(kind),
+                    args or {},
+                    requested_by=requested_by,
+                    priority=int(priority),
+                    max_runtime_seconds=max_runtime_seconds,
+                    trace_id=trace_id,
+                    internal_call=True,
+                )
+            except ValueError as e:
+                return self._job_submit_denied(
+                    trace_id,
+                    source=source,
+                    kind=str(kind),
+                    required_caps=list(dec.required_capabilities or required_caps),
+                    denied_reason="job_submit_invalid",
+                    reply=str(e),
+                    remediation="Validate job arguments and try again.",
+                    args=args,
+                )
+            self._emit_job_submit_event(
+                trace_id,
+                allowed=True,
+                source=source,
+                kind=str(kind),
+                required_caps=list(dec.required_capabilities or required_caps),
+                args=args,
+            )
+            return JobSubmitResult(ok=True, job_id=str(job_id), reply="", denied_reason=None, remediation="", required_capabilities=list(dec.required_capabilities or required_caps))
+        finally:
+            reset_trace_id(token)
 
     @staticmethod
     def _resolve_intent_contract(mod_meta: Dict[str, Any], intent_id: str) -> Dict[str, Any]:

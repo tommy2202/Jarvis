@@ -542,21 +542,23 @@ def main() -> None:
         event_bus=event_bus,
         resource_governor=resource_governor,
     )
+    dispatcher.job_manager = job_manager
     telemetry.attach(job_manager=job_manager)
     runtime_state.attach(job_manager=job_manager)
 
     # Register allowlisted job kinds (no shell, no arbitrary code).
-    job_manager.register_job("system.sleep", job_system_sleep, schema_model=SleepArgs)
-    job_manager.register_job("system.health_check", job_system_health_check)
-    job_manager.register_job("system.write_test_file", job_system_write_test_file, schema_model=WriteTestFileArgs)
-    job_manager.register_job("system.cleanup_jobs", job_system_cleanup_jobs)
-    job_manager.register_job("system.sleep_llm", job_system_sleep_llm)
+    job_manager.register_job("system.sleep", job_system_sleep, schema_model=SleepArgs, required_capabilities=["CAP_RUN_SUBPROCESS"])
+    job_manager.register_job("system.health_check", job_system_health_check, required_capabilities=["CAP_RUN_SUBPROCESS"])
+    job_manager.register_job(
+        "system.write_test_file",
+        job_system_write_test_file,
+        schema_model=WriteTestFileArgs,
+        required_capabilities=["CAP_RUN_SUBPROCESS", "CAP_WRITE_FILES"],
+    )
+    job_manager.register_job("system.cleanup_jobs", job_system_cleanup_jobs, required_capabilities=["CAP_RUN_SUBPROCESS"])
+    job_manager.register_job("system.sleep_llm", job_system_sleep_llm, required_capabilities=["CAP_RUN_SUBPROCESS"])
     # Prove governor gating end-to-end (heavy core job kind; not a feature module).
-    job_manager.register_job("system.test_heavy", job_system_sleep, schema_model=SleepArgs)
-    try:
-        job_manager.mark_kind_heavy("system.test_heavy", heavy=True)
-    except Exception:
-        pass
+    job_manager.register_job("system.test_heavy", job_system_sleep, schema_model=SleepArgs, required_capabilities=["CAP_RUN_SUBPROCESS"], heavy=True)
 
     # Post-complete hooks that must run in main process (stateful operations / retention).
     def _hook_cleanup(_st):
@@ -884,12 +886,24 @@ def main() -> None:
             if len(parts) >= 3 and parts[1] == "run":
                 name = parts[2]
                 if name == "health_check":
-                    jid = job_manager.submit_job("system.health_check", {}, {"source": "cli", "client_id": "stdin"})
-                    print(f"Submitted: {jid}")
+                    dispatch_ctx = {
+                        "source": "cli",
+                        "client": {"name": "cli", "id": "stdin"},
+                        "safe_mode": bool(getattr(runtime, "safe_mode", False)),
+                        "shutting_down": bool(controller.get_shutdown_status().get("in_progress")) if controller else False,
+                    }
+                    res = dispatcher.submit_job("cli", "system.health_check", {}, dispatch_ctx)
+                    print(f"Submitted: {res.job_id}" if res.ok else res.reply)
                     continue
                 if name == "cleanup":
-                    jid = job_manager.submit_job("system.cleanup_jobs", {}, {"source": "cli", "client_id": "stdin"})
-                    print(f"Submitted: {jid}")
+                    dispatch_ctx = {
+                        "source": "cli",
+                        "client": {"name": "cli", "id": "stdin"},
+                        "safe_mode": bool(getattr(runtime, "safe_mode", False)),
+                        "shutting_down": bool(controller.get_shutdown_status().get("in_progress")) if controller else False,
+                    }
+                    res = dispatcher.submit_job("cli", "system.cleanup_jobs", {}, dispatch_ctx)
+                    print(f"Submitted: {res.job_id}" if res.ok else res.reply)
                     continue
                 print("Unknown run target. Use: health_check | cleanup")
                 continue
@@ -923,8 +937,14 @@ def main() -> None:
                 print("Usage: /resources safe_mode on|off")
                 continue
             if len(parts) >= 2 and parts[1] == "test_heavy":
-                jid = job_manager.submit_job("system.test_heavy", {"seconds": 2.0}, {"source": "cli", "client_id": "stdin"})
-                print(f"Submitted heavy job: {jid}")
+                dispatch_ctx = {
+                    "source": "cli",
+                    "client": {"name": "cli", "id": "stdin"},
+                    "safe_mode": bool(getattr(runtime, "safe_mode", False)),
+                    "shutting_down": bool(controller.get_shutdown_status().get("in_progress")) if controller else False,
+                }
+                res = dispatcher.submit_job("cli", "system.test_heavy", {"seconds": 2.0}, dispatch_ctx)
+                print(f"Submitted heavy job: {res.job_id}" if res.ok else res.reply)
                 continue
             print("Usage: /resources status|snapshot|policy|safe_mode on|off|test_heavy")
             continue

@@ -191,6 +191,8 @@ class CapabilityEngine:
     # ---- helpers ----
     def _required_caps(self, ctx: RequestContext) -> List[str]:
         req = list(self.cfg.intent_requirements.get(ctx.intent_id) or [])
+        extra = list(getattr(ctx, "extra_required_capabilities", []) or [])
+        req.extend([str(c).strip() for c in extra if str(c or "").strip()])
         # Legacy flags augmentation (kept minimal):
         if ctx.network_requested and "CAP_NETWORK_ACCESS" not in req:
             req.append("CAP_NETWORK_ACCESS")

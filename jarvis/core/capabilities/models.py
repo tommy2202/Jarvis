@@ -79,6 +79,7 @@ class RequestContext(BaseModel):
     intent_id: str
     resource_intensive: bool = False
     network_requested: bool = False
+    extra_required_capabilities: List[str] = Field(default_factory=list)
     secure_store_mode: Optional[str] = None  # READY|KEY_MISSING|...
     confirmed: bool = False
 

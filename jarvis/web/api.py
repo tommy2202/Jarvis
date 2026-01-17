@@ -456,16 +456,31 @@ def create_app(
             if not remote_control_enabled:
                 raise HTTPException(status_code=503, detail="Remote control disabled (USB key required).")
             try:
-                job_id = job_manager.submit_job(
+                dispatcher = getattr(jarvis_app, "dispatcher", None)
+                if dispatcher is None:
+                    raise HTTPException(status_code=503, detail="Dispatcher unavailable.")
+                trace_id = getattr(getattr(request, "state", None), "trace_id", "web")
+                client_id = getattr(getattr(request, "client", None), "host", None)
+                ctx = {
+                    "source": "web",
+                    "client": {"name": "web", "id": client_id},
+                    "safe_mode": bool(getattr(runtime, "safe_mode", False)) if runtime is not None else False,
+                    "shutting_down": bool(draining_event.is_set()) if draining_event is not None else False,
+                }
+                res = dispatcher.submit_job(
+                    trace_id,
                     req.kind,
                     req.args,
-                    requested_by={"source": "web", "client_id": getattr(getattr(request, "client", None), "host", None)},
+                    ctx,
                     priority=req.priority,
                     max_runtime_seconds=req.max_runtime_seconds,
                 )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
-            return JobSubmitResponse(job_id=job_id)
+            if not res.ok:
+                code = 400 if res.denied_reason == "job_submit_invalid" else 403
+                raise HTTPException(status_code=code, detail=res.reply)
+            return JobSubmitResponse(job_id=str(res.job_id))
 
         @app.get("/v1/jobs", response_model=JobListResponse)
         async def list_jobs(request: Request):
