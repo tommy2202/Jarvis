@@ -20,6 +20,9 @@ from jarvis.core.trace import reset_trace_id, set_trace_id
 from jarvis.core.ux.primitives import acknowledge, completed, failed
 
 
+INLINE_SAFE_CAPS = {"CAP_AUDIO_OUTPUT", "CAP_READ_FILES"}
+
+
 def _dispatcher_subprocess_worker(q, module_path: str, intent_id: str, args: Dict[str, Any], context: Dict[str, Any]) -> None:  # noqa: ANN001
     """
     Top-level worker for multiprocessing spawn (Windows-safe).
@@ -704,6 +707,17 @@ class Dispatcher:
             return [str(x) for x in flags if isinstance(x, str) and x]
         return []
 
+    @staticmethod
+    def _normalize_execution_mode(value: Any) -> str:
+        v = str(value or "").strip().lower()
+        if v in {"process", "job_process"}:
+            return "process"
+        if v in {"thread", "job_thread"}:
+            return "thread"
+        if v == "inline":
+            return "inline"
+        return ""
+
     def execute_loaded_module(
         self,
         loaded: LoadedModule,
@@ -883,6 +897,7 @@ class Dispatcher:
                     ux_events=ux_events,
                     ux_action=ux_action,
                 )
+            required_caps = list((intent_map or {}).get(intent_id) or [])
 
             # Module contract enforcement (non-core)
             contract = self._resolve_intent_contract(mod.meta or {}, intent_id)
@@ -917,8 +932,6 @@ class Dispatcher:
             is_core = bool(contract.get("core")) or str(intent_id).startswith("core.")
             if not is_core:
                 missing = []
-                if not contract.get("execution_mode"):
-                    missing.append("execution_mode")
                 if not contract.get("resource_class"):
                     missing.append("resource_class")
                 if contract.get("required_capabilities") is None:
@@ -950,7 +963,6 @@ class Dispatcher:
                         ux_action=ux_action,
                     )
 
-                required_caps = list((intent_map or {}).get(intent_id) or [])
                 if set(declared) != set(required_caps):
                     return self._deny(
                         trace_id,
@@ -964,19 +976,26 @@ class Dispatcher:
                         ux_action=ux_action,
                     )
 
-                exec_mode = str(contract.get("execution_mode") or "").lower()
-                if exec_mode not in {"inline", "thread", "process"}:
-                    return self._deny(
-                        trace_id,
-                        intent_id=intent_id,
-                        module_id=module_id,
-                        denied_reason="execution_mode_invalid",
-                        reply="Module execution mode is unsupported.",
-                        remediation="Set execution_mode to one of: inline, thread, process.",
-                        details={"execution_mode": contract.get("execution_mode")},
-                        ux_events=ux_events,
-                        ux_action=ux_action,
-                    )
+            exec_mode_raw = contract.get("execution_mode")
+            exec_mode_norm = self._normalize_execution_mode(exec_mode_raw)
+            if exec_mode_raw not in (None, "") and not exec_mode_norm:
+                return self._deny(
+                    trace_id,
+                    intent_id=intent_id,
+                    module_id=module_id,
+                    denied_reason="execution_mode_invalid",
+                    reply="Module execution mode is unsupported.",
+                    remediation="Set execution_mode to one of: inline, thread, process.",
+                    details={"execution_mode": exec_mode_raw},
+                    ux_events=ux_events,
+                    ux_action=ux_action,
+                )
+            if not exec_mode_norm:
+                exec_mode_norm = "process"
+            inline_allowed = bool(is_core) or set(required_caps).issubset(INLINE_SAFE_CAPS)
+            exec_mode_effective = exec_mode_norm
+            if exec_mode_norm in {"inline", "thread"} and not inline_allowed:
+                exec_mode_effective = "process"
 
             # Build context (includes source/is_admin/safe_mode/shutting_down/trace_id)
             ctx = self._build_request_context(trace_id, intent_id=intent_id, mod_meta=(mod.meta or {}), context=(context or {}))
@@ -1114,6 +1133,39 @@ class Dispatcher:
                 except Exception:
                     pmods = {}
 
+            admitted_heavy_slot = False
+            rg = None
+            if exec_mode_effective == "process":
+                rg = getattr(self.capability_engine, "resource_governor", None)
+                if rg is not None:
+                    try:
+                        adm = rg.admit(
+                            operation="dispatch.process",
+                            trace_id=trace_id,
+                            required_caps=list(dec.required_capabilities or required_caps),
+                            allow_delay=False,
+                            wants_heavy_job_slot=True,
+                        )
+                        if not bool(adm.allowed):
+                            delay_s = float(getattr(adm, "delay_seconds", 0.0) or 0.0)
+                            remediation = str(adm.remediation or "System under resource pressure. Try again later.")
+                            if delay_s > 0:
+                                remediation = f"Retry in {delay_s:.1f}s."
+                            return self._deny(
+                                trace_id,
+                                intent_id=intent_id,
+                                module_id=module_id,
+                                denied_reason="resource_governor_denied",
+                                reply="I can’t run that right now.",
+                                remediation=remediation,
+                                details={"resource_action": str(getattr(getattr(adm, "action", None), "value", "")), "delay_seconds": delay_s},
+                                ux_events=ux_events,
+                                ux_action=ux_action,
+                            )
+                        admitted_heavy_slot = True
+                    except Exception:
+                        rg = None
+
             if self.event_bus is not None:
                 try:
                     self.event_bus.publish_nowait(
@@ -1167,8 +1219,7 @@ class Dispatcher:
                         except Exception:
                             pass
                 self.event_logger.log(trace_id, "dispatch.execute", {"module_id": module_id, "intent_id": intent_id})
-                contract = self._resolve_intent_contract(mod.meta or {}, intent_id)
-                exec_mode = str(contract.get("execution_mode") or "inline").lower()
+                exec_mode = exec_mode_effective
                 if exec_mode == "thread":
                     from concurrent.futures import ThreadPoolExecutor
 
@@ -1225,6 +1276,12 @@ class Dispatcher:
                     remediation=remediation,
                     ux_events=ux_events,
                 )
+            finally:
+                if admitted_heavy_slot and rg is not None:
+                    try:
+                        rg.release_heavy_job_slot()
+                    except Exception:
+                        pass
         finally:
             reset_trace_id(token)
 

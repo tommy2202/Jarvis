@@ -115,8 +115,8 @@ def safe_auto_enable_decision(*, manifest: ModuleManifest, safe_caps: set[str], 
         all_caps |= set(it.required_capabilities or [])
         if it.resource_class.value != "light":
             return False, "resource_class not light", True
-        if it.execution_mode.value == "job_process":
-            return False, "execution_mode job_process requires admin", True
+        if it.execution_mode.value != "inline":
+            return False, "execution_mode not inline requires admin", True
 
     if any(c in disallowed_caps for c in all_caps):
         return False, "disallowed capability present", True
