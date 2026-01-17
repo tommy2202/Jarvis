@@ -33,17 +33,19 @@ class LogsPanel(ttk.Frame):
         self._security = ScrolledText(self._nb, height=10, wrap="word")
         self._system = ScrolledText(self._nb, height=10, wrap="none")
         self._audit = ScrolledText(self._nb, height=10, wrap="word")
+        self._denials = ScrolledText(self._nb, height=10, wrap="word")
         self._health = HealthPanel(self._nb)
         self._caps = ScrolledText(self._nb, height=10, wrap="word")
         self._modules = ModulesPanel(self._nb, on_scan=self._on_modules_scan, on_toggle=self._on_modules_toggle)
         self._caps.configure(state="disabled")
-        for t in (self._errors, self._security, self._system, self._audit):
+        for t in (self._errors, self._security, self._system, self._audit, self._denials):
             t.configure(state="disabled")
 
         self._nb.add(self._errors, text="Errors")
         self._nb.add(self._security, text="Security")
         self._nb.add(self._system, text="System")
         self._nb.add(self._audit, text="Audit")
+        self._nb.add(self._denials, text="Denials")
         self._nb.add(self._health, text="Health")
         self._nb.add(self._caps, text="Capabilities")
         self._nb.add(self._modules, text="Modules")
@@ -71,6 +73,9 @@ class LogsPanel(ttk.Frame):
         self._audit.delete("1.0", "end")
         self._audit.insert("end", "\n".join(lines))
         self._audit.configure(state="disabled")
+
+    def set_denials(self, items: list[dict]) -> None:
+        self._set_jsonl(self._denials, items, severity_key="severity")
 
     def set_health_snapshot(self, snap: dict) -> None:
         self._health.set_snapshot(snap)

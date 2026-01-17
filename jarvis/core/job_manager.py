@@ -77,6 +77,16 @@ class JobHandler:
     handler_ref: str
     schema_model: Optional[Type[BaseModel]] = None
     heavy: bool = False
+    required_capabilities: Tuple[str, ...] = ()
+    requires_admin: bool = False
+
+
+@dataclass(frozen=True)
+class JobKindMetadata:
+    kind: str
+    required_capabilities: Tuple[str, ...]
+    heavy: bool
+    requires_admin: bool
 
 
 def _is_jsonable(x: Any) -> bool:
@@ -187,26 +197,63 @@ class JobManager:
             pass
 
     # ---------- Registry ----------
-    def register_job(self, kind: str, handler: Callable[..., Any], schema_model: Optional[Type[BaseModel]] = None) -> None:
+    def register_job(
+        self,
+        kind: str,
+        handler: Callable[..., Any],
+        schema_model: Optional[Type[BaseModel]] = None,
+        *,
+        required_capabilities: List[str],
+        heavy: bool = False,
+        requires_admin: bool = False,
+    ) -> None:
         if not kind or not isinstance(kind, str):
             raise ValueError("kind must be a non-empty string")
         if ":" in kind or " " in kind:
             raise ValueError("kind must not contain ':' or spaces")
         if not callable(handler):
             raise ValueError("handler must be callable")
+        if required_capabilities is None:
+            raise ValueError("required_capabilities must be provided")
+        if not isinstance(required_capabilities, (list, tuple)):
+            raise ValueError("required_capabilities must be a list of capability ids")
         # Ensure handler is importable by reference (required for spawn workers)
         mod = getattr(handler, "__module__", "")
         name = getattr(handler, "__name__", "")
         if not mod.startswith("jarvis.") or not name or name.startswith("<") or name.startswith("_"):
             raise ValueError("handler must be a top-level function under the 'jarvis.' package")
         ref = f"{mod}:{name}"
-        self._registry[kind] = JobHandler(handler_ref=ref, schema_model=schema_model, heavy=False)
+        req_caps = [str(c).strip() for c in list(required_capabilities or []) if str(c or "").strip()]
+        self._registry[kind] = JobHandler(
+            handler_ref=ref,
+            schema_model=schema_model,
+            heavy=bool(heavy),
+            required_capabilities=tuple(sorted(set(req_caps))),
+            requires_admin=bool(requires_admin),
+        )
 
     def mark_kind_heavy(self, kind: str, heavy: bool = True) -> None:
         h = self._registry.get(kind)
         if h is None:
             raise ValueError("Unknown job kind")
-        self._registry[kind] = JobHandler(handler_ref=h.handler_ref, schema_model=h.schema_model, heavy=bool(heavy))
+        self._registry[kind] = JobHandler(
+            handler_ref=h.handler_ref,
+            schema_model=h.schema_model,
+            heavy=bool(heavy),
+            required_capabilities=tuple(h.required_capabilities or ()),
+            requires_admin=bool(h.requires_admin),
+        )
+
+    def get_kind_metadata(self, kind: str) -> Optional[JobKindMetadata]:
+        h = self._registry.get(kind)
+        if h is None:
+            return None
+        return JobKindMetadata(
+            kind=str(kind),
+            required_capabilities=tuple(h.required_capabilities or ()),
+            heavy=bool(h.heavy),
+            requires_admin=bool(h.requires_admin),
+        )
 
     def allowed_kinds(self) -> List[str]:
         return sorted(self._registry.keys())
@@ -230,7 +277,13 @@ class JobManager:
         priority: int = 50,
         max_runtime_seconds: Optional[int] = None,
         trace_id: Optional[str] = None,
+        internal_call: bool = False,
     ) -> str:
+        """
+        DO NOT CALL DIRECTLY OUTSIDE DISPATCHER.
+        """
+        if not bool(internal_call):
+            raise ValueError("JobManager.submit_job is internal; use Dispatcher.submit_job.")
         if not self._accepting:
             raise ValueError("Job manager is shutting down.")
         if kind not in self._registry:

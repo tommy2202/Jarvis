@@ -234,14 +234,43 @@ def create_app(
             raise HTTPException(status_code=503, detail="Capabilities unavailable.")
         body = await request.json()
         intent_id = str(body.get("intent_id") or "")
-        src = str(body.get("source") or "web")
-        is_admin = bool(body.get("is_admin", False))
-        safe_mode = bool(body.get("safe_mode", False))
-        shutting_down = bool(body.get("shutting_down", False))
+        simulate = bool(body.get("simulate", False))
         trace_id = getattr(getattr(request, "state", None), "trace_id", "web")
+
+        admin_claim = bool("admin" in (getattr(getattr(request, "state", None), "scopes", []) or []))
+        is_admin_actual = False
+        if security_manager is not None:
+            try:
+                is_admin_actual = bool(security_manager.is_admin()) or bool(admin_claim)
+            except Exception:
+                is_admin_actual = False
+
+        safe_mode_actual = True
+        shutting_down_actual = True
+        if runtime is not None:
+            try:
+                safe_mode_actual = bool(getattr(runtime, "safe_mode", False))
+            except Exception:
+                safe_mode_actual = True
+            try:
+                shutting_down_actual = bool(getattr(runtime, "_shutdown_in_progress", False))
+            except Exception:
+                shutting_down_actual = True
+        if draining_event is not None and getattr(draining_event, "is_set", lambda: False)():
+            shutting_down_actual = True
+
+        simulated = bool(simulate and is_admin_actual)
+        if simulated:
+            is_admin = bool(body.get("is_admin", is_admin_actual))
+            safe_mode = bool(body.get("safe_mode", safe_mode_actual))
+            shutting_down = bool(body.get("shutting_down", shutting_down_actual))
+        else:
+            is_admin = bool(is_admin_actual)
+            safe_mode = bool(safe_mode_actual)
+            shutting_down = bool(shutting_down_actual)
         ctx = RequestContext(
             trace_id=trace_id,
-            source=RequestSource(src),
+            source=RequestSource("web"),
             is_admin=is_admin,
             safe_mode=safe_mode,
             shutting_down=shutting_down,
@@ -249,7 +278,9 @@ def create_app(
             intent_id=intent_id,
             secure_store_mode=(secure_store.status().mode.value if secure_store is not None else None),
         )
-        return eng.evaluate(ctx).model_dump()
+        out = eng.evaluate(ctx).model_dump()
+        out["simulated"] = bool(simulated)
+        return out
 
     @app.get("/v1/llm/status")
     async def llm_status(request: Request):
@@ -291,12 +322,53 @@ def create_app(
             raise HTTPException(status_code=503, detail="Policy unavailable.")
         body = await request.json()
         intent_id = str(body.get("intent_id") or "")
-        src = str(body.get("source") or "web")
-        is_admin = bool(body.get("is_admin", False))
+        simulate = bool(body.get("simulate", False))
         trace_id = getattr(getattr(request, "state", None), "trace_id", "web")
+
+        admin_claim = bool("admin" in (getattr(getattr(request, "state", None), "scopes", []) or []))
+        is_admin_actual = False
+        if security_manager is not None:
+            try:
+                is_admin_actual = bool(security_manager.is_admin()) or bool(admin_claim)
+            except Exception:
+                is_admin_actual = False
+
+        safe_mode_actual = True
+        shutting_down_actual = True
+        if runtime is not None:
+            try:
+                safe_mode_actual = bool(getattr(runtime, "safe_mode", False))
+            except Exception:
+                safe_mode_actual = True
+            try:
+                shutting_down_actual = bool(getattr(runtime, "_shutdown_in_progress", False))
+            except Exception:
+                shutting_down_actual = True
+        if draining_event is not None and getattr(draining_event, "is_set", lambda: False)():
+            shutting_down_actual = True
+
+        simulated = bool(simulate and is_admin_actual)
+        if simulated:
+            is_admin = bool(body.get("is_admin", is_admin_actual))
+            safe_mode = bool(body.get("safe_mode", safe_mode_actual))
+            shutting_down = bool(body.get("shutting_down", shutting_down_actual))
+        else:
+            is_admin = bool(is_admin_actual)
+            safe_mode = bool(safe_mode_actual)
+            shutting_down = bool(shutting_down_actual)
         req_caps = eng.get_intent_requirements().get(intent_id) if eng is not None else []
-        pctx = PolicyContext(trace_id=trace_id, intent_id=intent_id, source=src, is_admin=is_admin, required_capabilities=list(req_caps or []))
-        return pe.evaluate(pctx).model_dump()
+        pctx = PolicyContext(
+            trace_id=trace_id,
+            intent_id=intent_id,
+            source="web",
+            is_admin=is_admin,
+            safe_mode=safe_mode,
+            shutting_down=shutting_down,
+            required_capabilities=list(req_caps or []),
+        )
+        out = pe.evaluate(pctx).model_dump()
+        out["simulated"] = bool(simulated)
+        return out
 
     # ---- Modules API (authenticated; admin required for enable/disable) ----
     @app.get("/v1/modules")
@@ -456,16 +528,31 @@ def create_app(
             if not remote_control_enabled:
                 raise HTTPException(status_code=503, detail="Remote control disabled (USB key required).")
             try:
-                job_id = job_manager.submit_job(
+                dispatcher = getattr(jarvis_app, "dispatcher", None)
+                if dispatcher is None:
+                    raise HTTPException(status_code=503, detail="Dispatcher unavailable.")
+                trace_id = getattr(getattr(request, "state", None), "trace_id", "web")
+                client_id = getattr(getattr(request, "client", None), "host", None)
+                ctx = {
+                    "source": "web",
+                    "client": {"name": "web", "id": client_id},
+                    "safe_mode": bool(getattr(runtime, "safe_mode", False)) if runtime is not None else False,
+                    "shutting_down": bool(draining_event.is_set()) if draining_event is not None else False,
+                }
+                res = dispatcher.submit_job(
+                    trace_id,
                     req.kind,
                     req.args,
-                    requested_by={"source": "web", "client_id": getattr(getattr(request, "client", None), "host", None)},
+                    ctx,
                     priority=req.priority,
                     max_runtime_seconds=req.max_runtime_seconds,
                 )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
-            return JobSubmitResponse(job_id=job_id)
+            if not res.ok:
+                code = 400 if res.denied_reason == "job_submit_invalid" else 403
+                raise HTTPException(status_code=code, detail=res.reply)
+            return JobSubmitResponse(job_id=str(res.job_id))
 
         @app.get("/v1/jobs", response_model=JobListResponse)
         async def list_jobs(request: Request):

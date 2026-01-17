@@ -10,6 +10,9 @@ def test_dirty_shutdown_triggers_degraded(tmp_path, monkeypatch):
 
     from jarvis.core.ops_log import OpsLogger
     from jarvis.core.startup.runner import StartupFlags, StartupSelfCheckRunner
+    from jarvis.core.capabilities.engine import CapabilityEngine
+    from jarvis.core.capabilities.loader import default_config_dict, validate_and_normalize
+    from jarvis.core.capabilities.audit import CapabilityAuditLogger
 
     class FakeConfig:
         def __init__(self):
@@ -40,6 +43,9 @@ def test_dirty_shutdown_triggers_degraded(tmp_path, monkeypatch):
     ops = OpsLogger(path=str(tmp_path / "ops.jsonl"))
     runner = StartupSelfCheckRunner(ops=ops)
     cfg = FakeConfig().get()
+    caps = validate_and_normalize(default_config_dict())
+    cap_engine = CapabilityEngine(cfg=caps, audit=CapabilityAuditLogger(path=str(tmp_path / "security.jsonl")), logger=None)
+    dispatcher = SimpleNamespace(capability_engine=cap_engine)
     res = runner.run(
         flags=StartupFlags(),
         root_dir=str(tmp_path),
@@ -50,6 +56,11 @@ def test_dirty_shutdown_triggers_degraded(tmp_path, monkeypatch):
         cfg_obj=cfg,
         capabilities_cfg_raw={"capabilities": {}},
         core_ready={"capability_ok": True, "event_bus_ok": True, "telemetry_ok": True, "job_manager_ok": True, "error_policy_ok": True, "runtime_ok": True},
+        dispatcher=dispatcher,
+        capability_engine=cap_engine,
+        policy_engine=None,
+        privacy_store=object(),
+        modules_root=str(tmp_path / "jarvis" / "modules"),
     )
     assert res.overall_status.value in {"DEGRADED", "OK"}
     assert any(p.phase_id == 3 and p.status.value == "DEGRADED" for p in res.phases)

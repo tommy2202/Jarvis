@@ -437,7 +437,7 @@ def main() -> None:
         security_manager=security,
     )
     try:
-        module_manager.scan(trace_id="startup")
+        module_manager.scan(trace_id="startup", trigger="startup")
     except Exception as e:
         logger.warning(f"Module scan failed (continuing): {e}")
 
@@ -542,21 +542,23 @@ def main() -> None:
         event_bus=event_bus,
         resource_governor=resource_governor,
     )
+    dispatcher.job_manager = job_manager
     telemetry.attach(job_manager=job_manager)
     runtime_state.attach(job_manager=job_manager)
 
     # Register allowlisted job kinds (no shell, no arbitrary code).
-    job_manager.register_job("system.sleep", job_system_sleep, schema_model=SleepArgs)
-    job_manager.register_job("system.health_check", job_system_health_check)
-    job_manager.register_job("system.write_test_file", job_system_write_test_file, schema_model=WriteTestFileArgs)
-    job_manager.register_job("system.cleanup_jobs", job_system_cleanup_jobs)
-    job_manager.register_job("system.sleep_llm", job_system_sleep_llm)
+    job_manager.register_job("system.sleep", job_system_sleep, schema_model=SleepArgs, required_capabilities=["CAP_RUN_SUBPROCESS"])
+    job_manager.register_job("system.health_check", job_system_health_check, required_capabilities=["CAP_RUN_SUBPROCESS"])
+    job_manager.register_job(
+        "system.write_test_file",
+        job_system_write_test_file,
+        schema_model=WriteTestFileArgs,
+        required_capabilities=["CAP_RUN_SUBPROCESS", "CAP_WRITE_FILES"],
+    )
+    job_manager.register_job("system.cleanup_jobs", job_system_cleanup_jobs, required_capabilities=["CAP_RUN_SUBPROCESS"])
+    job_manager.register_job("system.sleep_llm", job_system_sleep_llm, required_capabilities=["CAP_RUN_SUBPROCESS"])
     # Prove governor gating end-to-end (heavy core job kind; not a feature module).
-    job_manager.register_job("system.test_heavy", job_system_sleep, schema_model=SleepArgs)
-    try:
-        job_manager.mark_kind_heavy("system.test_heavy", heavy=True)
-    except Exception:
-        pass
+    job_manager.register_job("system.test_heavy", job_system_sleep, schema_model=SleepArgs, required_capabilities=["CAP_RUN_SUBPROCESS"], heavy=True)
 
     # Post-complete hooks that must run in main process (stateful operations / retention).
     def _hook_cleanup(_st):
@@ -615,6 +617,11 @@ def main() -> None:
         cfg_obj=cfg_obj,
         capabilities_cfg_raw=cap_raw,
         core_ready=core_ready,
+        dispatcher=dispatcher,
+        capability_engine=cap_engine,
+        policy_engine=policy_engine,
+        privacy_store=privacy_store,
+        modules_root=os.path.join("jarvis", "modules"),
     )
     try:
         runtime_state.record_startup_self_check(
@@ -786,6 +793,14 @@ def main() -> None:
             st["shutdown_status"] = controller.get_shutdown_status()
             print(st)
             continue
+        if text.startswith("/why"):
+            parts = text.split()
+            if len(parts) < 2:
+                print("Usage: /why <trace_id>")
+                continue
+            info = getattr(runtime, "get_denial", lambda _tid: None)(parts[1])
+            print(info or {"error": "denial not found"})
+            continue
         if text.startswith("/lockdown"):
             parts = text.split()
             if len(parts) == 1 or parts[1] == "status":
@@ -884,12 +899,24 @@ def main() -> None:
             if len(parts) >= 3 and parts[1] == "run":
                 name = parts[2]
                 if name == "health_check":
-                    jid = job_manager.submit_job("system.health_check", {}, {"source": "cli", "client_id": "stdin"})
-                    print(f"Submitted: {jid}")
+                    dispatch_ctx = {
+                        "source": "cli",
+                        "client": {"name": "cli", "id": "stdin"},
+                        "safe_mode": bool(getattr(runtime, "safe_mode", False)),
+                        "shutting_down": bool(controller.get_shutdown_status().get("in_progress")) if controller else False,
+                    }
+                    res = dispatcher.submit_job("cli", "system.health_check", {}, dispatch_ctx)
+                    print(f"Submitted: {res.job_id}" if res.ok else res.reply)
                     continue
                 if name == "cleanup":
-                    jid = job_manager.submit_job("system.cleanup_jobs", {}, {"source": "cli", "client_id": "stdin"})
-                    print(f"Submitted: {jid}")
+                    dispatch_ctx = {
+                        "source": "cli",
+                        "client": {"name": "cli", "id": "stdin"},
+                        "safe_mode": bool(getattr(runtime, "safe_mode", False)),
+                        "shutting_down": bool(controller.get_shutdown_status().get("in_progress")) if controller else False,
+                    }
+                    res = dispatcher.submit_job("cli", "system.cleanup_jobs", {}, dispatch_ctx)
+                    print(f"Submitted: {res.job_id}" if res.ok else res.reply)
                     continue
                 print("Unknown run target. Use: health_check | cleanup")
                 continue
@@ -923,8 +950,14 @@ def main() -> None:
                 print("Usage: /resources safe_mode on|off")
                 continue
             if len(parts) >= 2 and parts[1] == "test_heavy":
-                jid = job_manager.submit_job("system.test_heavy", {"seconds": 2.0}, {"source": "cli", "client_id": "stdin"})
-                print(f"Submitted heavy job: {jid}")
+                dispatch_ctx = {
+                    "source": "cli",
+                    "client": {"name": "cli", "id": "stdin"},
+                    "safe_mode": bool(getattr(runtime, "safe_mode", False)),
+                    "shutting_down": bool(controller.get_shutdown_status().get("in_progress")) if controller else False,
+                }
+                res = dispatcher.submit_job("cli", "system.test_heavy", {"seconds": 2.0}, dispatch_ctx)
+                print(f"Submitted heavy job: {res.job_id}" if res.ok else res.reply)
                 continue
             print("Usage: /resources status|snapshot|policy|safe_mode on|off|test_heavy")
             continue
@@ -1105,7 +1138,40 @@ def main() -> None:
             if len(parts) >= 3 and parts[1] == "intent":
                 iid = parts[2]
                 reqs = cap_engine.get_intent_requirements().get(iid)
-                print({"intent_id": iid, "required_caps": reqs})
+                from jarvis.core.capabilities.models import RequestContext, RequestSource
+
+                safe_mode = bool(getattr(runtime, "safe_mode", False))
+                shutting_down = bool(controller.get_shutdown_status().get("in_progress"))
+                ctx = RequestContext(
+                    trace_id="caps",
+                    source=RequestSource.cli,
+                    is_admin=bool(security.is_admin()),
+                    safe_mode=safe_mode,
+                    shutting_down=shutting_down,
+                    subsystem_health={"breakers": breaker_registry.status()},
+                    intent_id=iid,
+                    secure_store_mode=(secure_store.status().mode.value if secure_store else None),
+                )
+                dec = cap_engine.evaluate(ctx)
+                denied_by = "capabilities"
+                reasons = [str(r or "").lower() for r in (dec.reasons or [])]
+                if not bool(dec.allowed):
+                    if shutting_down and any("shutting down" in r for r in reasons):
+                        denied_by = "shutdown"
+                    elif safe_mode and any("safe mode" in r for r in reasons):
+                        denied_by = "safe_mode"
+                    elif any("resource governor" in r for r in reasons):
+                        denied_by = "limits"
+                print(
+                    {
+                        "intent_id": iid,
+                        "required_caps": reqs,
+                        "allowed": bool(dec.allowed),
+                        "denied_by": denied_by if not bool(dec.allowed) else "",
+                        "reasons": list(dec.reasons or []),
+                        "remediation": str(dec.remediation or ""),
+                    }
+                )
                 continue
             if len(parts) >= 3 and parts[1] == "eval":
                 iid = parts[2]
@@ -1158,8 +1224,14 @@ def main() -> None:
                 for line in modules_list_lines(module_manager=module_manager, trace_id="cli"):
                     print(line)
                 continue
+            if cmd == "status":
+                from jarvis.core.modules.cli import modules_status_lines
+
+                for line in modules_status_lines(module_manager=module_manager, trace_id="cli"):
+                    print(line)
+                continue
             if cmd == "scan":
-                print(module_manager.scan(trace_id="cli"))
+                print(module_manager.scan(trace_id="cli", trigger="manual"))
                 continue
             if cmd == "show" and len(parts) >= 3:
                 mid = parts[2]
@@ -1179,7 +1251,7 @@ def main() -> None:
                 out_path = parts[2]
                 print({"exported": module_manager.export(out_path)})
                 continue
-            print("Usage: /modules list | /modules scan | /modules show <id> | /modules enable <id> | /modules disable <id> | /modules export <path>")
+            print("Usage: /modules list | /modules status | /modules scan | /modules show <id> | /modules enable <id> | /modules disable <id> | /modules export <path>")
             continue
         if text.startswith("/privacy"):
             parts = text.split()

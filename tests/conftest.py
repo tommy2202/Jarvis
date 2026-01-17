@@ -1,12 +1,28 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
 import pytest
 
-from jarvis.core.config.manager import ConfigManager
-from jarvis.core.config.paths import ConfigFsPaths
-from jarvis.core.crypto import generate_usb_master_key_bytes, write_usb_key
+
+def _ensure_repo_on_path() -> None:
+    try:
+        import jarvis  # noqa: F401
+        return
+    except Exception:
+        pass
+    root = Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+
+_ensure_repo_on_path()
+
+from jarvis.core.config.manager import ConfigManager  # noqa: E402
+from jarvis.core.config.paths import ConfigFsPaths  # noqa: E402
+from jarvis.core.crypto import generate_usb_master_key_bytes, write_usb_key  # noqa: E402
 
 
 @pytest.fixture

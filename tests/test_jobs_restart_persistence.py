@@ -26,8 +26,8 @@ def test_job_persists_state(tmp_path):
     jobs_dir = str(tmp_path / "jobs")
     bus = _Bus()
     jm = JobManager(jobs_dir=jobs_dir, event_logger=EventLogger(str(tmp_path / "events.jsonl")), logger=_L(), poll_interval_ms=50, event_bus=bus)
-    jm.register_job("system.checkpoint_demo", job_system_checkpoint_demo)
-    jid = jm.submit_job("system.checkpoint_demo", {"step": 7}, {"source": "cli"})
+    jm.register_job("system.checkpoint_demo", job_system_checkpoint_demo, required_capabilities=["CAP_RUN_SUBPROCESS"])
+    jid = jm.submit_job("system.checkpoint_demo", {"step": 7}, {"source": "cli"}, internal_call=True)
 
     # wait for completion
     deadline = time.time() + 5.0

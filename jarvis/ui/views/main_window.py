@@ -166,6 +166,9 @@ class MainWindow(ttk.Frame):
             self.logs.set_errors(self.core.get_recent_errors(n=n))
             self.logs.set_security(self.core.get_recent_security_events(n=n))
             self.logs.set_system_lines(self.core.get_recent_system_logs(n=n))
+            denies = getattr(self.core, "get_recent_denials", lambda n=30: [])(n=min(200, n))
+            if denies is not None:
+                self.logs.set_denials(denies)
             audit_lines = getattr(self.core, "get_audit_tail", lambda n=30: [])(n=min(200, n))
             if audit_lines:
                 self.logs.set_audit_lines(audit_lines)

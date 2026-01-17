@@ -19,6 +19,7 @@ def default_config_dict() -> Dict[str, Any]:
         "intent_requirements": {
             "music.play": ["CAP_AUDIO_OUTPUT"],
             "anime_dubbing.run": ["CAP_HEAVY_COMPUTE", "CAP_RUN_SUBPROCESS", "CAP_WRITE_FILES"],
+            "system.job.submit": [],
         },
         "source_policies": {
             "voice": {"deny": ["CAP_ADMIN_ACTION"], "require_admin_for": [], "allow_all_non_sensitive": False},

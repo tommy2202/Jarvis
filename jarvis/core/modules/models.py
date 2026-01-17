@@ -24,8 +24,8 @@ class ResourceClass(str, Enum):
 
 class ExecutionMode(str, Enum):
     inline = "inline"
-    job_thread = "job_thread"
-    job_process = "job_process"
+    thread = "thread"
+    process = "process"
 
 
 class ModuleIntentContract(BaseModel):
@@ -36,7 +36,23 @@ class ModuleIntentContract(BaseModel):
     args_schema: Dict[str, Any] = Field(default_factory=dict)
     required_capabilities: List[str] = Field(default_factory=list)
     resource_class: ResourceClass = ResourceClass.light
-    execution_mode: ExecutionMode = ExecutionMode.inline
+    execution_mode: ExecutionMode = ExecutionMode.process
+
+    @field_validator("execution_mode", mode="before")
+    @classmethod
+    def _norm_execution_mode(cls, v: Any) -> Any:
+        if v is None or v == "":
+            return ExecutionMode.process
+        if isinstance(v, ExecutionMode):
+            return v
+        vv = str(v or "").strip().lower()
+        if vv in {"process", "job_process"}:
+            return ExecutionMode.process
+        if vv in {"thread", "job_thread"}:
+            return ExecutionMode.thread
+        if vv == "inline":
+            return ExecutionMode.inline
+        return v
 
     @field_validator("required_capabilities", mode="before")
     @classmethod
@@ -105,6 +121,8 @@ class InstalledModuleRecord(BaseModel):
     missing_on_disk: bool = False
     pending_user_input: bool = False
     changed_requires_review: bool = False
+    # Debounce: fingerprint that triggered changed_requires_review.
+    changed_requires_review_fingerprint: str = ""
 
 
 class ModulesRegistryFile(BaseModel):
@@ -168,6 +186,8 @@ class ModuleTrustConfigFile(BaseModel):
 
     allow_unsigned_modules: bool = False
     dev_mode_override: bool = False
+    dev_mode: bool = False
+    scan_mode: str = "startup_only"
 
 
 def default_module_trust_config_dict() -> Dict[str, Any]:

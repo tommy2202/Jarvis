@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import os
 import platform
 import sys
@@ -67,4 +68,227 @@ def hash_runtime_fingerprint(*parts: str) -> str:
         h.update(p.encode("utf-8", errors="ignore"))
         h.update(b"\n")
     return h.hexdigest()
+
+
+def check_dispatcher_capability_engine(dispatcher: Any) -> CheckResult:
+    if dispatcher is None:
+        return CheckResult(
+            check_id="dispatcher.capability_engine",
+            status=CheckStatus.FAILED,
+            message="Dispatcher missing.",
+            remediation="Initialize dispatcher before startup checks.",
+            severity=Severity.CRITICAL,
+        )
+    if getattr(dispatcher, "capability_engine", None) is None:
+        return CheckResult(
+            check_id="dispatcher.capability_engine",
+            status=CheckStatus.FAILED,
+            message="Dispatcher missing capability engine.",
+            remediation="Wire capability engine into dispatcher.",
+            severity=Severity.CRITICAL,
+        )
+    return CheckResult(check_id="dispatcher.capability_engine", status=CheckStatus.OK, message="Dispatcher capability engine wired.")
+
+
+def check_capability_engine_ready(capability_engine: Any) -> CheckResult:
+    if capability_engine is None:
+        return CheckResult(
+            check_id="capability_engine.ready",
+            status=CheckStatus.FAILED,
+            message="Capability engine missing.",
+            remediation="Initialize capability engine before startup.",
+            severity=Severity.CRITICAL,
+        )
+    cfg = getattr(capability_engine, "cfg", None)
+    intent_reqs = getattr(cfg, "intent_requirements", None) if cfg is not None else None
+    if not isinstance(intent_reqs, dict) or not intent_reqs:
+        return CheckResult(
+            check_id="capability_engine.config",
+            status=CheckStatus.FAILED,
+            message="Capability config missing or empty.",
+            remediation="Load config/capabilities.json successfully before startup.",
+            severity=Severity.CRITICAL,
+        )
+    # Hard rule check: web cannot perform CAP_ADMIN_ACTION even if admin.
+    try:
+        from jarvis.core.capabilities.models import RequestContext, RequestSource
+
+        test_intent = next(iter(intent_reqs.keys()))
+        ctx = RequestContext(
+            trace_id="startup",
+            source=RequestSource.web,
+            intent_id=str(test_intent),
+            is_admin=True,
+            extra_required_capabilities=["CAP_ADMIN_ACTION"],
+        )
+        dec = capability_engine.evaluate(ctx)
+        if bool(getattr(dec, "allowed", False)) or "CAP_ADMIN_ACTION" not in list(getattr(dec, "denied_capabilities", []) or []):
+            return CheckResult(
+                check_id="capability_engine.hard_rules",
+                status=CheckStatus.FAILED,
+                message="Capability hard rules inactive.",
+                remediation="Ensure capability engine enforces web/admin hard rules.",
+                severity=Severity.CRITICAL,
+            )
+    except Exception as e:  # noqa: BLE001
+        return CheckResult(
+            check_id="capability_engine.hard_rules",
+            status=CheckStatus.FAILED,
+            message="Capability hard rule check failed.",
+            remediation=str(e),
+            severity=Severity.CRITICAL,
+        )
+    return CheckResult(check_id="capability_engine.ready", status=CheckStatus.OK, message="Capability engine ready.")
+
+
+def check_policy_engine_presence(policy_engine: Any, *, policy_enabled: bool) -> CheckResult:
+    if not bool(policy_enabled):
+        return CheckResult(check_id="policy_engine", status=CheckStatus.OK, message="Policy disabled (skip engine check).")
+    if policy_engine is None:
+        return CheckResult(
+            check_id="policy_engine",
+            status=CheckStatus.FAILED,
+            message="Policy enabled but engine missing.",
+            remediation="Initialize policy engine or disable policy in config.",
+            severity=Severity.CRITICAL,
+        )
+    return CheckResult(check_id="policy_engine", status=CheckStatus.OK, message="Policy engine ready.")
+
+
+def check_privacy_store_presence(privacy_store: Any, *, privacy_enabled: bool) -> CheckResult:
+    if not bool(privacy_enabled):
+        return CheckResult(check_id="privacy_store", status=CheckStatus.OK, message="Privacy disabled (skip store check).")
+    if privacy_store is None:
+        return CheckResult(
+            check_id="privacy_store",
+            status=CheckStatus.FAILED,
+            message="Privacy store missing.",
+            remediation="Initialize privacy store before startup.",
+            severity=Severity.CRITICAL,
+        )
+    return CheckResult(check_id="privacy_store", status=CheckStatus.OK, message="Privacy store ready.")
+
+
+def check_web_remote_control(*, web_cfg: Dict[str, Any], secure_store: Any) -> CheckResult:
+    if not bool((web_cfg or {}).get("enabled", False)):
+        return CheckResult(check_id="web.remote_control", status=CheckStatus.OK, message="Web disabled (skip remote control checks).")
+    if secure_store is None:
+        return CheckResult(
+            check_id="web.remote_control",
+            status=CheckStatus.FAILED,
+            message="Web enabled but secure store unavailable.",
+            remediation="Initialize secure store before enabling web.",
+            severity=Severity.CRITICAL,
+        )
+    try:
+        st = secure_store.status()
+        mode = st.mode.value if hasattr(st.mode, "value") else str(st.mode)
+        if mode != "READY":
+            return CheckResult(
+                check_id="web.remote_control",
+                status=CheckStatus.FAILED,
+                message="Web enabled but secure store not READY.",
+                remediation=str(getattr(st, "next_steps", "") or "Insert USB key to unlock secure store."),
+                severity=Severity.CRITICAL,
+            )
+    except Exception as e:  # noqa: BLE001
+        return CheckResult(
+            check_id="web.remote_control",
+            status=CheckStatus.FAILED,
+            message="Secure store status check failed.",
+            remediation=str(e),
+            severity=Severity.CRITICAL,
+        )
+    try:
+        if not bool(getattr(secure_store, "is_unlocked", lambda: False)()):
+            return CheckResult(
+                check_id="web.remote_control",
+                status=CheckStatus.FAILED,
+                message="Web enabled but secure store locked.",
+                remediation="Unlock secure store before enabling web.",
+                severity=Severity.CRITICAL,
+            )
+    except Exception as e:  # noqa: BLE001
+        return CheckResult(
+            check_id="web.remote_control",
+            status=CheckStatus.FAILED,
+            message="Unable to verify secure store unlocked.",
+            remediation=str(e),
+            severity=Severity.CRITICAL,
+        )
+    try:
+        from jarvis.web.security.auth import ApiKeyStore
+
+        keys = ApiKeyStore(secure_store).list_keys()
+        if not keys:
+            return CheckResult(
+                check_id="web.api_keys",
+                status=CheckStatus.FAILED,
+                message="Web enabled but no API key configured.",
+                remediation="Create an API key before enabling web (scripts/rotate_api_key.py).",
+                severity=Severity.CRITICAL,
+            )
+    except Exception as e:  # noqa: BLE001
+        return CheckResult(
+            check_id="web.api_keys",
+            status=CheckStatus.FAILED,
+            message="Unable to verify API key presence.",
+            remediation=str(e),
+            severity=Severity.CRITICAL,
+        )
+
+    bind_host = str((web_cfg or {}).get("bind_host") or "127.0.0.1")
+    allow_remote = bool((web_cfg or {}).get("allow_remote", False))
+    if not allow_remote and bind_host not in {"127.0.0.1", "localhost"}:
+        return CheckResult(
+            check_id="web.bind_host",
+            status=CheckStatus.FAILED,
+            message="Web bind_host must be localhost when allow_remote=false.",
+            remediation="Set bind_host to 127.0.0.1 or enable allow_remote.",
+            severity=Severity.CRITICAL,
+        )
+    return CheckResult(check_id="web.remote_control", status=CheckStatus.OK, message="Web remote control prerequisites OK.")
+
+
+def check_module_discovery_no_import(modules_root: str) -> CheckResult:
+    if not modules_root:
+        return CheckResult(
+            check_id="modules.discovery_no_import",
+            status=CheckStatus.FAILED,
+            message="Modules root not configured.",
+            remediation="Configure modules root for discovery.",
+            severity=Severity.CRITICAL,
+        )
+    try:
+        from jarvis.core.modules.discovery import ModuleDiscovery
+
+        called = {"n": 0}
+        orig = importlib.import_module
+
+        def boom(*_a, **_k):  # noqa: ANN001
+            called["n"] += 1
+            raise RuntimeError("import attempted during discovery")
+
+        importlib.import_module = boom
+        try:
+            ModuleDiscovery(modules_root=str(modules_root)).scan()
+        finally:
+            importlib.import_module = orig
+        if called["n"] > 0:
+            return CheckResult(
+                check_id="modules.discovery_no_import",
+                status=CheckStatus.FAILED,
+                message="Module discovery attempted imports.",
+                remediation="Ensure module discovery reads only manifest/filesystem.",
+                severity=Severity.CRITICAL,
+            )
+    except Exception as e:  # noqa: BLE001
+        return CheckResult(
+            check_id="modules.discovery_no_import",
+            status=CheckStatus.FAILED,
+            message="Module discovery no-import check failed.",
+            remediation=str(e),
+            severity=Severity.CRITICAL,
+        )
+    return CheckResult(check_id="modules.discovery_no_import", status=CheckStatus.OK, message="Module discovery no-import check passed.")
 

@@ -57,6 +57,7 @@ class ModuleManager:
         self.event_bus = event_bus
         self.logger = logger
         self.security = security_manager
+        self._startup_scan_done = False
 
     # ---- helpers ----
     def _emit(self, trace_id: str, event_type: str, payload: Dict[str, Any], *, severity: EventSeverity = EventSeverity.INFO) -> None:
@@ -81,7 +82,15 @@ class ModuleManager:
             raw = {}
         raw.setdefault("allow_unsigned_modules", False)
         raw.setdefault("dev_mode_override", False)
+        raw.setdefault("dev_mode", False)
+        raw.setdefault("scan_mode", "startup_only")
         return raw
+
+    def _dev_mode_reason(self, rec: Dict[str, Any]) -> str:
+        if bool(rec.get("enabled")) or bool(rec.get("safe_auto_enabled")):
+            return "dev_mode: auto-enable suppressed"
+        base = str(rec.get("reason") or "installed disabled")
+        return f"dev_mode: {base}"[:200]
 
     def _is_trusted_record(self, rec: Dict[str, Any]) -> bool:
         cfg = self._trust_cfg()
@@ -239,6 +248,7 @@ class ModuleManager:
         This must not import/execute module code and must not mutate config.
         """
         now = _iso_now()
+        dev_mode = bool(self._trust_cfg().get("dev_mode", False))
 
         # Disk scan (read-only)
         disc = ModuleDiscovery(modules_root=self.modules_root).scan()
@@ -472,12 +482,15 @@ class ModuleManager:
                     )
                 else:
                     rc = ModuleReasonCode.REQUIRES_ADMIN_TO_ENABLE if bool(rec.get("requires_admin_to_enable", False)) else ModuleReasonCode.UNKNOWN
+                    reason = str(rec.get("reason") or "Disabled.")[:200]
+                    if dev_mode and "dev_mode" not in reason.lower():
+                        reason = ("dev_mode: " + reason)[:200]
                     out.append(
                         ModuleStatus(
                             module_id=mid,
                             state=ModuleState.INSTALLED_DISABLED,
                             reason_code=rc,
-                            reason_human=str(rec.get("reason") or "Disabled.")[:200],
+                            reason_human=reason,
                             remediation=("Unlock admin and run /modules enable <id>." if rc == ModuleReasonCode.REQUIRES_ADMIN_TO_ENABLE else "Run /modules enable <id>."),
                             last_seen_at=now,
                             fingerprint_short=fp_short,
@@ -520,11 +533,27 @@ class ModuleManager:
             requires_admin_to_enable=True,
         )
 
-    def scan(self, *, trace_id: str = "modules") -> Dict[str, Any]:
+    def scan(self, *, trace_id: str = "modules", trigger: str = "manual") -> Dict[str, Any]:
         """
         Scan modules folder, reconcile registry, and write runtime inventory.
         Does not import module code.
         """
+        cfg = self._trust_cfg()
+        dev_mode = bool(cfg.get("dev_mode", False))
+        scan_mode = str(cfg.get("scan_mode") or "startup_only").strip().lower()
+        trigger = str(trigger or "manual").strip().lower()
+        if trigger not in {"startup", "manual"}:
+            trigger = "auto"
+        if scan_mode not in {"startup_only", "manual_only", "always"}:
+            scan_mode = "startup_only"
+        if trigger == "startup":
+            if scan_mode == "manual_only":
+                return {"ok": True, "skipped": "manual_only"}
+            if self._startup_scan_done:
+                return {"ok": True, "skipped": "startup_already_scanned"}
+            self._startup_scan_done = True
+        if trigger == "auto" and scan_mode in {"startup_only", "manual_only"}:
+            return {"ok": True, "skipped": "auto_scan_disabled"}
         self._emit(trace_id, "module.scan_started", {"action": "scan"})
         disc = ModuleDiscovery(modules_root=self.modules_root).scan()
 
@@ -599,6 +628,12 @@ class ModuleManager:
                     safe_caps=set(SAFE_CAPS_DEFAULT),
                     disallowed_caps=set(DISALLOWED_CAPS),
                 )
+                if dev_mode:
+                    rec["enabled"] = False
+                    rec["enabled_at"] = None
+                    rec["safe_auto_enabled"] = False
+                    rec["requires_admin_to_enable"] = True
+                    rec["reason"] = self._dev_mode_reason(rec)
                 rec.setdefault("provenance", "local")
                 rec.setdefault("trusted", True)
                 rec["fingerprint_hash"] = str(d.fingerprint or "")
@@ -633,11 +668,14 @@ class ModuleManager:
             if prev_fp and prev_fp != d.fingerprint:
                 # contract change => disable + require review
                 if d.contract_hash and prev_contract and d.contract_hash != prev_contract:
-                    rec2["enabled"] = False
-                    rec2["enabled_at"] = None
-                    rec2["changed_requires_review"] = True
-                    rec2["reason"] = "contract changed; requires review"
-                    self._emit(trace_id, "module.changed_requires_review", {"module_id": mid, "fingerprint": d.fingerprint})
+                    last_review_fp = str(rec2.get("changed_requires_review_fingerprint") or "")
+                    if last_review_fp != d.fingerprint:
+                        rec2["enabled"] = False
+                        rec2["enabled_at"] = None
+                        rec2["changed_requires_review"] = True
+                        rec2["changed_requires_review_fingerprint"] = d.fingerprint
+                        rec2["reason"] = "contract changed; requires review"
+                        self._emit(trace_id, "module.changed_requires_review", {"module_id": mid, "fingerprint": d.fingerprint})
                 rec2["last_seen_fingerprint"] = d.fingerprint
                 rec2["fingerprint_hash"] = str(d.fingerprint or "")
                 if d.contract_hash:
@@ -759,6 +797,7 @@ class ModuleManager:
         rec["reason"] = "enabled"
         rec["pending_user_input"] = False
         rec["changed_requires_review"] = False
+        rec["changed_requires_review_fingerprint"] = ""
         reg[module_id] = rec
         raw["modules"] = reg
         self._save_modules_file_raw(raw)
