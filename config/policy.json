@@ -6,6 +6,22 @@
   },
   "rules": [
     {
+      "id": "deny_job_submit_from_web",
+      "description": "Do not allow job submission from web",
+      "priority": 5,
+      "effect": "DENY",
+      "match": {
+        "intent_id_in": [
+          "system.job.submit"
+        ],
+        "source_in": [
+          "web"
+        ]
+      },
+      "reason": "Job submission is restricted on web.",
+      "remediation": "Use CLI or UI to submit jobs."
+    },
+    {
       "id": "deny_network_when_locked",
       "description": "Do not allow network access when admin is locked",
       "priority": 10,
