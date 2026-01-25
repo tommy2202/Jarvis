@@ -21,6 +21,8 @@ from jarvis.core.recovery import RecoveryPolicy, RecoveryConfig
 from jarvis.core.circuit_breaker import BreakerRegistry
 from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
 from jarvis.core.privacy.redaction import privacy_redact
+from jarvis.core.broker.write_broker import WriteBroker
+from jarvis.core.security_events import SecurityAuditLogger
 from jarvis.core.trace import resolve_trace_id
 from jarvis.core.ux.primitives import acknowledge, completed
 
@@ -167,6 +169,7 @@ class JarvisRuntime:
         self.privacy_store = privacy_store
         self.dsar_engine = dsar_engine
         self.lockdown_manager = lockdown_manager
+        self.write_broker = WriteBroker(privacy_store=privacy_store, secure_store=secure_store, audit_logger=SecurityAuditLogger())
 
         self._writer = _JsonlWriter(persist_path)
         self._q: "queue.Queue[RuntimeEvent]" = queue.Queue()
@@ -651,62 +654,13 @@ class JarvisRuntime:
         """
         if not transcript:
             return
-        ps = getattr(self, "privacy_store", None)
-        if ps is None:
-            return
-        # config gate
-        try:
-            cfg = ps._privacy_cfg_raw()  # noqa: SLF001
-            dm = (cfg.get("data_minimization") or {}) if isinstance(cfg, dict) else {}
-            if bool(dm.get("disable_persistent_transcripts", True)):
-                return
-        except Exception:
-            return
-        # consent gate
-        try:
-            c = ps.get_consent(user_id="default", scope="transcripts")
-            if not (c and bool(c.granted)):
-                return
-        except Exception:
-            return
-        # retention: use TRANSCRIPT policy to compute expires_at
-        try:
-            from jarvis.core.privacy.models import DataCategory, LawfulBasis, Sensitivity, StorageKind, DataRecord
-
-            pol = ps.resolve_retention_policy(data_category=DataCategory.TRANSCRIPT, sensitivity=Sensitivity.HIGH)
-            expires = pol.resolve_expires_at(created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-        except Exception:
-            expires = None
-        # store encrypted in secure store if available; otherwise fail-safe: do not store
-        key = f"transcript:{trace_id}"
-        if self.secure_store is None:
+        broker = getattr(self, "write_broker", None)
+        if broker is None:
             return
         try:
-            self.secure_store.set(key, transcript, trace_id=str(trace_id))
+            broker.write_transcript(trace_id=str(trace_id), user_id="default", transcript=transcript, tags={"scope": "transcripts"})
         except Exception:
             return
-        # register inventory record (no content)
-        try:
-            from jarvis.core.privacy.models import DataCategory, DataRecord, LawfulBasis, Sensitivity, StorageKind
-
-            ps.register_record(
-                DataRecord(
-                    user_id="default",
-                    data_category=DataCategory.TRANSCRIPT,
-                    sensitivity=Sensitivity.HIGH,
-                    lawful_basis=LawfulBasis.CONSENT,
-                    created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    expires_at=expires,
-                    storage_kind=StorageKind.OTHER,
-                    storage_ref=f"secure_store:{key}",
-                    storage_ref_hash="",
-                    trace_id=str(trace_id),
-                    producer="runtime.transcript",
-                    tags={"scope": "transcripts"},
-                )
-            )
-        except Exception:
-            pass
 
     def _log_sm(self, name: str, details: Dict[str, Any]) -> None:
         self._writer.write({"ts": time.time(), "trace_id": self._last_trace_id or "sm", "event": name, "details": redact(details)})

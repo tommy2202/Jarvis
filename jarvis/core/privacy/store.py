@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
 from jarvis.core.privacy.gates import persist_allowed_current
+from jarvis.core.privacy.write_api import allow_ephemeral_metadata_category
 from jarvis.core.privacy.models import (
     ConsentRecord,
     DataCategory,
@@ -405,7 +406,8 @@ class PrivacyStore:
         # Global persistence gate (set by dispatcher via PrivacyGate).
         # If not allowed, do not persist inventory entries (ephemeral execution).
         if not bool(persist_allowed_current()):
-            return rec.record_id or self._derive_record_id(rec)
+            if not allow_ephemeral_metadata_category(rec.data_category):
+                return rec.record_id or self._derive_record_id(rec)
 
         # Ensure user exists
         _ = self.get_or_create_user(user_id=rec.user_id, display_name="", is_default=(rec.user_id == "default"))
