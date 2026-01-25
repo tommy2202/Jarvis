@@ -28,6 +28,8 @@ def _dispatcher_subprocess_worker(q, module_path: str, intent_id: str, args: Dic
     Top-level worker for multiprocessing spawn (Windows-safe).
     """
     try:
+        if not bool((context or {}).get("_dispatcher_execute", False)):
+            raise RuntimeError("Unsafe subprocess handler call detected. Use Dispatcher.dispatch().")
         import importlib
 
         m = importlib.import_module(module_path)
@@ -747,11 +749,14 @@ class Dispatcher:
         args: Dict[str, Any],
         context: Dict[str, Any],
         persist_allowed: bool,
+        internal_call: bool = False,
     ) -> Dict[str, Any]:
         """
         Safe execution facade for module handlers.
         Use this instead of accessing LoadedModule.handler directly.
         """
+        if not bool(internal_call):
+            raise RuntimeError("Dispatcher.execute_loaded_module is internal; use Dispatcher.dispatch().")
         handler = getattr(loaded, "_unsafe_handler", None)
         if not callable(handler):
             raise RuntimeError("Loaded module missing handler.")
@@ -759,13 +764,17 @@ class Dispatcher:
         ctx = dict(context or {})
         ctx["_dispatcher_execute"] = True
         with persistence_context(persist_allowed=persist_allowed):
-            return loaded._call_unsafe(intent_id=intent_id, args=args, context=ctx)
+            return loaded._call_unsafe(intent_id=intent_id, args=args, context=ctx, internal_call=True)
 
     @staticmethod
-    def _run_in_subprocess(module_path: str, intent_id: str, args: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    def _run_in_subprocess(module_path: str, intent_id: str, args: Dict[str, Any], context: Dict[str, Any], *, internal_call: bool = False) -> Dict[str, Any]:
         """
         Windows-safe subprocess execution helper (spawn-friendly).
         """
+        if not bool(internal_call):
+            raise RuntimeError("Dispatcher._run_in_subprocess is internal; use Dispatcher.dispatch().")
+        if not bool((context or {}).get("_dispatcher_execute", False)):
+            raise RuntimeError("Unsafe subprocess handler call detected. Use Dispatcher.dispatch().")
 
         mp = multiprocessing.get_context("spawn")
         q: Any = mp.Queue()
@@ -1274,7 +1283,7 @@ class Dispatcher:
                         cv = contextvars.copy_context()
 
                         def _run():  # noqa: ANN001
-                            return self.execute_loaded_module(mod, intent_id=intent_id, args=args, context=context, persist_allowed=persist_allowed)
+                            return self.execute_loaded_module(mod, intent_id=intent_id, args=args, context=context, persist_allowed=persist_allowed, internal_call=True)
 
                         fut = ex.submit(cv.run, _run)
                         out = fut.result(timeout=30.0)
@@ -1282,9 +1291,9 @@ class Dispatcher:
                     # process isolation: pass ephemeral flag via context (best effort)
                     ctx = dict(context or {})
                     ctx["_dispatcher_execute"] = True
-                    out = self._run_in_subprocess(getattr(mod, "module_path", ""), intent_id, args or {}, ctx)
+                    out = self._run_in_subprocess(getattr(mod, "module_path", ""), intent_id, args or {}, ctx, internal_call=True)
                 else:
-                    out = self.execute_loaded_module(mod, intent_id=intent_id, args=args, context=context, persist_allowed=persist_allowed)
+                    out = self.execute_loaded_module(mod, intent_id=intent_id, args=args, context=context, persist_allowed=persist_allowed, internal_call=True)
                 summary = ""
                 if isinstance(out, dict):
                     summary = str(out.get("summary") or out.get("message") or "")

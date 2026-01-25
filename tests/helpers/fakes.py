@@ -139,7 +139,7 @@ class FakeDispatcher:
         self.policy_engine = policy_engine
         self._privacy_gate = PrivacyGate(privacy_store=privacy_store) if privacy_store is not None else None
 
-    def execute_loaded_module(self, _loaded, *, intent_id, args, context, persist_allowed):  # noqa: ANN001
+    def execute_loaded_module(self, _loaded, *, intent_id, args, context, persist_allowed, internal_call: bool = False):  # noqa: ANN001
         from jarvis.core.privacy.gates import persistence_context
 
         with persistence_context(persist_allowed=bool(persist_allowed)):

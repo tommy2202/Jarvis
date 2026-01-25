@@ -24,7 +24,9 @@ class LoadedModule:
         """
         raise RuntimeError("LoadedModule.handler is unsafe; use Dispatcher.execute_loaded_module().")
 
-    def _call_unsafe(self, *, intent_id: str, args: Dict[str, Any], context: Dict[str, Any]) -> Any:
+    def _call_unsafe(self, *, intent_id: str, args: Dict[str, Any], context: Dict[str, Any], internal_call: bool = False) -> Any:
+        if not bool(internal_call):
+            raise RuntimeError("LoadedModule._call_unsafe is internal; use Dispatcher.execute_loaded_module().")
         if not bool((context or {}).get("_dispatcher_execute", False)):
             raise RuntimeError("Unsafe handler call detected. Use Dispatcher.execute_loaded_module().")
         return self._unsafe_handler(intent_id=intent_id, args=args, context=context)
