@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import multiprocessing
 import traceback
-import contextvars
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,6 +17,9 @@ from jarvis.core.privacy.gates import PrivacyGate, persistence_context
 from jarvis.core.limits.limiter import Limiter
 from jarvis.core.trace import reset_trace_id, set_trace_id
 from jarvis.core.ux.primitives import acknowledge, completed, failed
+from jarvis.core.execution.models import ExecutionBackend, ExecutionPlan, ExecutionRequest
+from jarvis.core.execution.local_runner import LocalExecutionRunner
+from jarvis.core.execution.router import select_backend
 
 
 
@@ -97,6 +99,7 @@ class Dispatcher:
         lockdown_manager: Any = None,
         inline_intent_allowlist: Optional[List[str]] = None,
         tool_broker: Any = None,
+        execution_config: Optional[Dict[str, Any]] = None,
     ):
         self.registry = registry
         self.policy = policy
@@ -120,6 +123,9 @@ class Dispatcher:
         self.lockdown_manager = lockdown_manager
         self.inline_intent_allowlist = {str(x).strip() for x in (inline_intent_allowlist or []) if str(x or "").strip()}
         self.tool_broker = tool_broker
+        self.execution_config = execution_config or {}
+        self.local_runner = LocalExecutionRunner()
+        self.sandbox_runner = None
 
     @staticmethod
     def _ux_action_label(intent_id: str, module_id: str) -> str:
@@ -775,6 +781,29 @@ class Dispatcher:
             return False
         return True
 
+    def _execution_cfg(self) -> Dict[str, Any]:
+        cfg = dict(self.execution_config or {})
+        cfg.setdefault("enabled", True)
+        if not str(cfg.get("default_backend") or "").strip():
+            cfg["default_backend"] = "local_process"
+        if not str(cfg.get("fallback_backend") or "").strip():
+            cfg["fallback_backend"] = "local_process"
+        sandbox = cfg.get("sandbox")
+        if not isinstance(sandbox, dict):
+            sandbox = {}
+        sandbox.setdefault("require_available", True)
+        cfg["sandbox"] = sandbox
+
+        allow_inline = cfg.get("allow_inline_intents")
+        if allow_inline is None:
+            allow_inline = list(self.inline_intent_allowlist or [])
+        if isinstance(allow_inline, str):
+            allow_inline = [allow_inline]
+        if not isinstance(allow_inline, list):
+            allow_inline = []
+        cfg["allow_inline_intents"] = [str(x).strip() for x in allow_inline if str(x or "").strip()]
+        return cfg
+
     @staticmethod
     def _capability_denied_by(ctx: RequestContext, dec) -> str:  # noqa: ANN001
         reasons = [str(r or "").lower() for r in (getattr(dec, "reasons", None) or [])]
@@ -1080,10 +1109,6 @@ class Dispatcher:
                 )
             if not exec_mode_norm:
                 exec_mode_norm = "process"
-            inline_allowed = self._inline_allowed(intent_id=intent_id, required_caps=list(required_caps or []))
-            exec_mode_effective = exec_mode_norm
-            if exec_mode_norm in {"inline", "thread"} and not inline_allowed:
-                exec_mode_effective = "process"
 
             # Build context (includes source/is_admin/safe_mode/shutting_down/trace_id)
             ctx = self._build_request_context(trace_id, intent_id=intent_id, mod_meta=(mod.meta or {}), context=(context or {}))
@@ -1232,9 +1257,35 @@ class Dispatcher:
                 except Exception:
                     pmods = {}
 
+            exec_cfg = self._execution_cfg()
+            sandbox_available = bool(getattr(self, "sandbox_runner", None))
+            base_request = ExecutionRequest(
+                trace_id=trace_id,
+                intent_id=intent_id,
+                module_id=module_id,
+                args=dict(args or {}),
+                context=dict(context or {}),
+                required_capabilities=list(dec.required_capabilities or required_caps),
+                execution_mode=exec_mode_norm,
+                is_core=bool(is_core),
+                allow_inline_intents=list(exec_cfg.get("allow_inline_intents") or []),
+                default_backend=str(exec_cfg.get("default_backend") or "local_process"),
+                fallback_backend=str(exec_cfg.get("fallback_backend") or "local_process"),
+                sandbox_require_available=bool((exec_cfg.get("sandbox") or {}).get("require_available", True)),
+                sandbox_available=sandbox_available,
+                module_path=str(getattr(mod, "module_path", "") or ""),
+                loaded_module=mod,
+                persist_allowed=True,
+                tool_broker=self.tool_broker,
+            )
+            if not bool(exec_cfg.get("enabled", True)):
+                plan = ExecutionPlan(backend=ExecutionBackend.local_process, mode="process", reason="execution_disabled", fallback_used=False)
+            else:
+                plan = select_backend(base_request)
+
             admitted_heavy_slot = False
             rg = None
-            if exec_mode_effective == "process":
+            if plan.backend == ExecutionBackend.local_process:
                 rg = getattr(self.capability_engine, "resource_governor", None)
                 if rg is not None:
                     try:
@@ -1318,30 +1369,40 @@ class Dispatcher:
                             )
                         except Exception:
                             pass
+                exec_request = base_request.model_copy(update={"context": context, "persist_allowed": bool(persist_allowed)})
                 self.event_logger.log(trace_id, "dispatch.execute", {"module_id": module_id, "intent_id": intent_id})
-                exec_mode = exec_mode_effective
-                exec_context = dict(context or {})
-                if self.tool_broker is not None and exec_mode in {"inline", "thread"}:
-                    exec_context.setdefault("tool_broker", self.tool_broker)
-                if exec_mode == "thread":
-                    from concurrent.futures import ThreadPoolExecutor
-
-                    with ThreadPoolExecutor(max_workers=1) as ex:
-                        # Ensure persistence context propagates into thread execution.
-                        cv = contextvars.copy_context()
-
-                        def _run():  # noqa: ANN001
-                            return self.execute_loaded_module(mod, intent_id=intent_id, args=args, context=exec_context, persist_allowed=persist_allowed, internal_call=True)
-
-                        fut = ex.submit(cv.run, _run)
-                        out = fut.result(timeout=30.0)
-                elif exec_mode == "process":
-                    # process isolation: pass ephemeral flag via context (best effort)
-                    ctx = dict(context or {})
-                    ctx["_dispatcher_execute"] = True
-                    out = self._run_in_subprocess(getattr(mod, "module_path", ""), intent_id, args or {}, ctx, internal_call=True)
+                if plan.backend == ExecutionBackend.sandbox:
+                    if self.sandbox_runner is None:
+                        raise RuntimeError("Sandbox backend unavailable.")
+                    result = self.sandbox_runner.run(request=exec_request, plan=plan)
                 else:
-                    out = self.execute_loaded_module(mod, intent_id=intent_id, args=args, context=exec_context, persist_allowed=persist_allowed, internal_call=True)
+                    result = self.local_runner.run(request=exec_request, plan=plan, dispatcher=self)
+                payload = {
+                    "intent_id": intent_id,
+                    "module_id": module_id,
+                    "backend": plan.backend.value,
+                    "mode": plan.mode,
+                    "ok": bool(result.ok),
+                }
+                if not result.ok:
+                    payload["error"] = str(result.error or "")[:200]
+                self.event_logger.log(trace_id, "execution.result", payload)
+                if self.event_bus is not None:
+                    try:
+                        self.event_bus.publish_nowait(
+                            BaseEvent(
+                                event_type="execution.result",
+                                trace_id=trace_id,
+                                source_subsystem=SourceSubsystem.dispatcher,
+                                severity=EventSeverity.INFO if result.ok else EventSeverity.WARN,
+                                payload=payload,
+                            )
+                        )
+                    except Exception:
+                        pass
+                if not result.ok:
+                    raise RuntimeError(str(result.error or "Execution failed."))
+                out = result.output or {}
                 summary = ""
                 if isinstance(out, dict):
                     summary = str(out.get("summary") or out.get("message") or "")

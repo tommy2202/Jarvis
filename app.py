@@ -490,6 +490,7 @@ def main() -> None:
 
     policy = PermissionPolicy(intents=dict(perms_cfg.get("intents") or {}))
     limiter = Limiter(config_manager=config)
+    exec_cfg = cfg_obj.execution.model_dump() if getattr(cfg_obj, "execution", None) is not None else {}
     dispatcher = Dispatcher(
         registry=registry,
         policy=policy,
@@ -510,6 +511,7 @@ def main() -> None:
         feature_flags=feature_flags,
         lockdown_manager=lockdown_manager,
         inline_intent_allowlist=list(modules_cfg.get("inline_intent_allowlist") or []),
+        execution_config=exec_cfg,
     )
 
     jarvis = JarvisApp(

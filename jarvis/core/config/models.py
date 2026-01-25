@@ -320,6 +320,33 @@ class ModulesConfig(BaseModel):
         return _default_inline_intent_allowlist()
 
 
+class ExecutionConfigFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    default_backend: str = "sandbox"
+    fallback_backend: str = "local_process"
+    sandbox: Dict[str, Any] = Field(default_factory=lambda: {"require_available": True})
+    allow_inline_intents: List[str] = Field(default_factory=lambda: _default_inline_intent_allowlist())
+
+    @field_validator("allow_inline_intents", mode="before")
+    @classmethod
+    def _coerce_inline_allowlist(cls, v: Any) -> List[str]:
+        if v is None:
+            return _default_inline_intent_allowlist()
+        if isinstance(v, str):
+            v = [v]
+        if isinstance(v, list):
+            out: List[str] = []
+            for item in v:
+                s = str(item or "").strip()
+                if not s:
+                    continue
+                out.append(s)
+            return sorted(set(out))
+        return _default_inline_intent_allowlist()
+
+
 class PermissionsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intents: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
@@ -363,6 +390,7 @@ class AppConfigV2(BaseModel):
     ui: UiConfig
     telemetry: TelemetryConfigFile
     resources: ResourcesConfigFile
+    execution: ExecutionConfigFile
     audit: AuditConfigFile
     policy: PolicyConfigFile
     backup: BackupConfigFile
