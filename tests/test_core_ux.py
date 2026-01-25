@@ -59,6 +59,7 @@ def _make_dispatcher(tmp_path, *, intent_id: str, allow: bool):
         capability_engine=eng,
         secure_store=store,
         event_bus=bus,
+        inline_intent_allowlist=[intent_id],
     )
     return disp, bus, events
 

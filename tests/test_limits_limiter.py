@@ -71,6 +71,7 @@ def test_rate_limit_exceeded_denied(tmp_path):
         logger=_L(),
         capability_engine=_cap_engine(cm, tmp_path),
         limiter=limiter,
+        inline_intent_allowlist=["core.ping"],
     )
 
     r1 = disp.dispatch("t", "core.ping", "core", {}, {"source": "cli"})
@@ -118,6 +119,7 @@ def test_rate_limit_recovers(tmp_path):
         logger=_L(),
         capability_engine=_cap_engine(cm, tmp_path),
         limiter=limiter,
+        inline_intent_allowlist=["core.ping"],
     )
 
     r1 = disp.dispatch("t", "core.ping", "core", {}, {"source": "cli"})
@@ -169,6 +171,7 @@ def test_admin_override(tmp_path):
         logger=_L(),
         capability_engine=_cap_engine(cm, tmp_path),
         limiter=limiter,
+        inline_intent_allowlist=["core.ping"],
     )
 
     r1 = disp.dispatch("t", "core.ping", "core", {}, {"source": "cli"})

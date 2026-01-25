@@ -105,6 +105,7 @@ def main() -> int:
                 capability_engine=cap_engine,
                 policy_engine=pol_engine,
                 secure_store=store,
+                inline_intent_allowlist=["music.play"],
             )
 
             res = dispatcher.dispatch(

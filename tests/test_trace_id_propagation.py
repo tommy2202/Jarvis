@@ -76,6 +76,7 @@ def test_trace_id_propagation(tmp_path):
         event_bus=bus,
         policy_engine=policy_engine,
         job_manager=jobs,
+        inline_intent_allowlist=["demo.run"],
     )
 
     def handler(intent_id, args, context):  # noqa: ANN001

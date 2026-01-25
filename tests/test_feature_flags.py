@@ -74,6 +74,7 @@ def test_flag_disabled_blocks_feature(tmp_path):
         capability_engine=eng,
         secure_store=store,
         feature_flags=ff,
+        inline_intent_allowlist=["demo.run"],
     )
     res = disp.dispatch("t1", "demo.run", "demo", {}, {"source": "cli"})
     assert res.ok is False

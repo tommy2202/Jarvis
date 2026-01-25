@@ -54,6 +54,7 @@ def test_dispatcher_never_crashes_on_module_exception(tmp_path):
         error_reporter=reporter,
         capability_engine=eng,
         secure_store=store,
+        inline_intent_allowlist=["x.run"],
     )
     res = d.dispatch("t1", "x.run", "x", {}, {})
     assert res.ok is False

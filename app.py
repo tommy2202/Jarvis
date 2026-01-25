@@ -509,6 +509,7 @@ def main() -> None:
         limiter=limiter,
         feature_flags=feature_flags,
         lockdown_manager=lockdown_manager,
+        inline_intent_allowlist=list(modules_cfg.get("inline_intent_allowlist") or []),
     )
 
     jarvis = JarvisApp(

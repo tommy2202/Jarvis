@@ -258,6 +258,7 @@ def test_dispatcher_denies_uninstalled_or_disabled_module_intent(tmp_path):
         capability_engine=_cap_engine(),
         secure_store=store,
         module_manager=mm,
+        inline_intent_allowlist=["safe.three.ping"],
     )
 
     # Not scanned/installed yet -> deny

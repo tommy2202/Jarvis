@@ -56,6 +56,7 @@ def test_dispatcher_executes_loaded_module_safely(tmp_path):
         logger=DummyLogger(),
         capability_engine=eng,
         secure_store=store,
+        inline_intent_allowlist=["demo.run"],
     )
 
     res = disp.dispatch("t1", "demo.run", "demo", {}, {"source": "cli"})

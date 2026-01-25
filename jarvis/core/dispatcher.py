@@ -20,8 +20,6 @@ from jarvis.core.trace import reset_trace_id, set_trace_id
 from jarvis.core.ux.primitives import acknowledge, completed, failed
 
 
-INLINE_SAFE_CAPS = {"CAP_AUDIO_OUTPUT", "CAP_READ_FILES"}
-
 
 def _dispatcher_subprocess_worker(q, module_path: str, intent_id: str, args: Dict[str, Any], context: Dict[str, Any]) -> None:  # noqa: ANN001
     """
@@ -96,6 +94,7 @@ class Dispatcher:
         limiter: Limiter | None = None,
         feature_flags: Any = None,
         lockdown_manager: Any = None,
+        inline_intent_allowlist: Optional[List[str]] = None,
     ):
         self.registry = registry
         self.policy = policy
@@ -117,6 +116,7 @@ class Dispatcher:
         self.limiter = limiter
         self.feature_flags = feature_flags
         self.lockdown_manager = lockdown_manager
+        self.inline_intent_allowlist = {str(x).strip() for x in (inline_intent_allowlist or []) if str(x or "").strip()}
 
     @staticmethod
     def _ux_action_label(intent_id: str, module_id: str) -> str:
@@ -730,6 +730,19 @@ class Dispatcher:
             return "inline"
         return ""
 
+    def _inline_allowed(self, *, intent_id: str, required_caps: List[str]) -> bool:
+        if intent_id not in self.inline_intent_allowlist:
+            return False
+        try:
+            from jarvis.core.modules.manager import DISALLOWED_CAPS
+
+            risky_caps = set(DISALLOWED_CAPS)
+        except Exception:
+            risky_caps = set()
+        if any(c in risky_caps for c in (required_caps or [])):
+            return False
+        return True
+
     @staticmethod
     def _capability_denied_by(ctx: RequestContext, dec) -> str:  # noqa: ANN001
         reasons = [str(r or "").lower() for r in (getattr(dec, "reasons", None) or [])]
@@ -1035,7 +1048,7 @@ class Dispatcher:
                 )
             if not exec_mode_norm:
                 exec_mode_norm = "process"
-            inline_allowed = bool(is_core) or set(required_caps).issubset(INLINE_SAFE_CAPS)
+            inline_allowed = self._inline_allowed(intent_id=intent_id, required_caps=list(required_caps or []))
             exec_mode_effective = exec_mode_norm
             if exec_mode_norm in {"inline", "thread"} and not inline_allowed:
                 exec_mode_effective = "process"
