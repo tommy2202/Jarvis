@@ -130,7 +130,15 @@ class Dispatcher:
 
     def _get_sandbox_runner(self) -> SandboxExecutionRunner:
         if self.sandbox_runner is None:
-            self.sandbox_runner = SandboxExecutionRunner(config=self._execution_cfg(), logger=self.logger)
+            self.sandbox_runner = SandboxExecutionRunner(
+                config=self._execution_cfg(),
+                logger=self.logger,
+                capability_engine=self.capability_engine,
+                policy_engine=self._policy_engine(),
+                security_manager=self.security,
+                event_logger=self.event_logger,
+                event_bus=self.event_bus,
+            )
         else:
             try:
                 self.sandbox_runner.update_config(self._execution_cfg())
@@ -1416,7 +1424,7 @@ class Dispatcher:
                             )
                         except Exception:
                             pass
-                exec_request = base_request.model_copy(update={"context": context, "persist_allowed": bool(persist_allowed)})
+                exec_request = base_request.model_copy(update={"context": context, "persist_allowed": bool(persist_allowed), "execution_plan": plan})
                 self.event_logger.log(trace_id, "dispatch.execute", {"module_id": module_id, "intent_id": intent_id})
                 if plan.backend == ExecutionBackend.sandbox:
                     result = self._get_sandbox_runner().run(request=exec_request, plan=plan)

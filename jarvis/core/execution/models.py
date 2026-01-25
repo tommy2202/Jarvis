@@ -5,8 +5,6 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from jarvis.core.broker.interface import ToolCall as BrokerToolCall
-
 
 class ExecutionBackend(str, Enum):
     inline = "inline"
@@ -15,7 +13,13 @@ class ExecutionBackend(str, Enum):
     sandbox = "sandbox"
 
 
-ToolCall = BrokerToolCall
+class ToolCall(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str
+    tool_args: Dict[str, Any] = Field(default_factory=dict)
+    requested_caps: List[str] = Field(default_factory=list)
+    expected_artifacts: List[str] = Field(default_factory=list)
 
 
 class ExecutionPlan(BaseModel):
@@ -25,6 +29,7 @@ class ExecutionPlan(BaseModel):
     mode: str = ""
     reason: str = ""
     fallback_used: bool = False
+    tool_calls: List[ToolCall] = Field(default_factory=list)
 
 
 class ExecutionRequest(BaseModel):
@@ -47,6 +52,7 @@ class ExecutionRequest(BaseModel):
     loaded_module: Any = None
     persist_allowed: bool = True
     tool_broker: Any = None
+    execution_plan: Optional[ExecutionPlan] = None
 
 
 class ExecutionResult(BaseModel):

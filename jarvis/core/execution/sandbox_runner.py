@@ -6,10 +6,12 @@ import shutil
 import subprocess
 import tempfile
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from jarvis.core.events import redact
 from jarvis.core.execution.models import ExecutionPlan, ExecutionRequest, ExecutionResult
+from jarvis.core.broker.registry import ToolRegistry
+from jarvis.core.broker.server import BrokerServer
 
 
 def _json_safe(obj: Any) -> Any:
@@ -26,9 +28,24 @@ def _json_safe(obj: Any) -> Any:
 
 
 class SandboxExecutionRunner:
-    def __init__(self, *, config: Dict[str, Any] | None = None, logger=None):
+    def __init__(
+        self,
+        *,
+        config: Dict[str, Any] | None = None,
+        logger=None,
+        capability_engine: Any = None,
+        policy_engine: Any = None,
+        security_manager: Any = None,
+        event_logger: Any = None,
+        event_bus: Any = None,
+    ):
         self._config = dict(config or {})
         self._logger = logger
+        self._capability_engine = capability_engine
+        self._policy_engine = policy_engine
+        self._security = security_manager
+        self._event_logger = event_logger
+        self._event_bus = event_bus
 
     def update_config(self, config: Dict[str, Any]) -> None:
         self._config = dict(config or {})
@@ -59,6 +76,7 @@ class SandboxExecutionRunner:
         memory_mb = (sandbox_cfg or {}).get("memory_mb")
         pids_limit = (sandbox_cfg or {}).get("pids_limit")
         work_root = str((sandbox_cfg or {}).get("work_root") or os.path.join("runtime", "sandbox")).replace("\\", "/")
+        broker_token_ttl = float((sandbox_cfg or {}).get("broker_token_ttl_seconds", 30.0))
 
         os.makedirs(work_root, exist_ok=True)
         temp_root = tempfile.mkdtemp(prefix="sandbox_", dir=work_root)
@@ -110,6 +128,23 @@ class SandboxExecutionRunner:
             cmd += ["--memory", f"{int(memory_mb)}m"]
         if pids_limit:
             cmd += ["--pids-limit", str(int(pids_limit))]
+        broker_server: Optional[BrokerServer] = None
+        if request.tool_broker is not None or (request.execution_plan and request.execution_plan.tool_calls):
+            tool_broker = request.tool_broker or ToolRegistry()
+            broker_server = BrokerServer(
+                tool_broker=tool_broker,
+                capability_engine=self._capability_engine,
+                policy_engine=self._policy_engine,
+                security_manager=self._security,
+                event_logger=self._event_logger,
+                event_bus=self._event_bus,
+                logger=self._logger,
+                token_ttl_seconds=broker_token_ttl,
+            )
+            info = broker_server.start()
+            endpoint = f"{info.get('host')}:{info.get('port')}"
+            cmd += ["-e", f"JARVIS_BROKER_ENDPOINT={endpoint}", "-e", f"JARVIS_BROKER_TOKEN={info.get('token')}"]
+
         cmd.append(image)
 
         try:
@@ -123,6 +158,8 @@ class SandboxExecutionRunner:
         finally:
             # allow slight flush time for container to write result.json
             time.sleep(0.05)
+            if broker_server is not None:
+                broker_server.stop()
 
         if not os.path.exists(res_path):
             shutil.rmtree(temp_root, ignore_errors=True)

@@ -110,7 +110,8 @@
     "music.play": [
       "CAP_AUDIO_OUTPUT"
     ],
-    "system.job.submit": []
+    "system.job.submit": [],
+    "system.tool.call": []
   },
   "safe_mode": {
     "deny": [
