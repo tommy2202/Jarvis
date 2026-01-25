@@ -58,15 +58,18 @@ def select_backend(request: ExecutionRequest) -> ExecutionPlan:
         else:
             backend = ExecutionBackend.local_process
 
-    if backend == ExecutionBackend.sandbox and request.sandbox_require_available and not request.sandbox_available:
-        backend = _normalize_backend(request.fallback_backend)
-        if backend in {ExecutionBackend.local_process, ExecutionBackend.local_thread}:
-            if requested_mode == "thread":
-                backend = ExecutionBackend.local_thread
-            else:
-                backend = ExecutionBackend.local_process
-        reason = "sandbox_unavailable_fallback"
-        fallback_used = True
+    if backend == ExecutionBackend.sandbox and not request.sandbox_available:
+        if request.sandbox_require_available:
+            reason = "sandbox_unavailable"
+        else:
+            backend = _normalize_backend(request.fallback_backend)
+            if backend in {ExecutionBackend.local_process, ExecutionBackend.local_thread}:
+                if requested_mode == "thread":
+                    backend = ExecutionBackend.local_thread
+                else:
+                    backend = ExecutionBackend.local_process
+            reason = "sandbox_unavailable_fallback"
+            fallback_used = True
 
     mode = "sandbox"
     if backend == ExecutionBackend.inline:

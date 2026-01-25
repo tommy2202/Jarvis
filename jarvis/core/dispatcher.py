@@ -19,6 +19,7 @@ from jarvis.core.trace import reset_trace_id, set_trace_id
 from jarvis.core.ux.primitives import acknowledge, completed, failed
 from jarvis.core.execution.models import ExecutionBackend, ExecutionPlan, ExecutionRequest
 from jarvis.core.execution.local_runner import LocalExecutionRunner
+from jarvis.core.execution.sandbox_runner import SandboxExecutionRunner
 from jarvis.core.execution.router import select_backend
 
 
@@ -126,6 +127,23 @@ class Dispatcher:
         self.execution_config = execution_config or {}
         self.local_runner = LocalExecutionRunner()
         self.sandbox_runner = None
+
+    def _get_sandbox_runner(self) -> SandboxExecutionRunner:
+        if self.sandbox_runner is None:
+            self.sandbox_runner = SandboxExecutionRunner(config=self._execution_cfg(), logger=self.logger)
+        else:
+            try:
+                self.sandbox_runner.update_config(self._execution_cfg())
+            except Exception:
+                pass
+        return self.sandbox_runner
+
+    def _sandbox_available(self) -> bool:
+        try:
+            runner = self._get_sandbox_runner()
+            return bool(runner.is_available())
+        except Exception:
+            return False
 
     @staticmethod
     def _ux_action_label(intent_id: str, module_id: str) -> str:
@@ -1258,7 +1276,7 @@ class Dispatcher:
                     pmods = {}
 
             exec_cfg = self._execution_cfg()
-            sandbox_available = bool(getattr(self, "sandbox_runner", None))
+            sandbox_available = self._sandbox_available()
             base_request = ExecutionRequest(
                 trace_id=trace_id,
                 intent_id=intent_id,
@@ -1282,6 +1300,35 @@ class Dispatcher:
                 plan = ExecutionPlan(backend=ExecutionBackend.local_process, mode="process", reason="execution_disabled", fallback_used=False)
             else:
                 plan = select_backend(base_request)
+            if plan.backend == ExecutionBackend.sandbox and bool((exec_cfg.get("sandbox") or {}).get("require_available", True)) and not sandbox_available:
+                return self._deny(
+                    trace_id,
+                    intent_id=intent_id,
+                    module_id=module_id,
+                    denied_by="execution",
+                    denied_reason="sandbox_unavailable",
+                    reply="Sandbox backend unavailable.",
+                    remediation="Install/start Docker or set execution.sandbox.require_available=false to allow local fallback.",
+                    details={"backend": plan.backend.value, "reason": plan.reason},
+                    ux_events=ux_events,
+                    ux_action=ux_action,
+                )
+            if plan.fallback_used:
+                fallback_payload = {"intent_id": intent_id, "module_id": module_id, "backend": plan.backend.value, "reason": plan.reason}
+                self.event_logger.log(trace_id, "execution.sandbox_fallback", fallback_payload)
+                if self.event_bus is not None:
+                    try:
+                        self.event_bus.publish_nowait(
+                            BaseEvent(
+                                event_type="execution.sandbox_fallback",
+                                trace_id=trace_id,
+                                source_subsystem=SourceSubsystem.dispatcher,
+                                severity=EventSeverity.WARN,
+                                payload=fallback_payload,
+                            )
+                        )
+                    except Exception:
+                        pass
 
             admitted_heavy_slot = False
             rg = None
@@ -1372,9 +1419,7 @@ class Dispatcher:
                 exec_request = base_request.model_copy(update={"context": context, "persist_allowed": bool(persist_allowed)})
                 self.event_logger.log(trace_id, "dispatch.execute", {"module_id": module_id, "intent_id": intent_id})
                 if plan.backend == ExecutionBackend.sandbox:
-                    if self.sandbox_runner is None:
-                        raise RuntimeError("Sandbox backend unavailable.")
-                    result = self.sandbox_runner.run(request=exec_request, plan=plan)
+                    result = self._get_sandbox_runner().run(request=exec_request, plan=plan)
                 else:
                     result = self.local_runner.run(request=exec_request, plan=plan, dispatcher=self)
                 payload = {

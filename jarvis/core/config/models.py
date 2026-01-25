@@ -326,7 +326,17 @@ class ExecutionConfigFile(BaseModel):
     enabled: bool = True
     default_backend: str = "sandbox"
     fallback_backend: str = "local_process"
-    sandbox: Dict[str, Any] = Field(default_factory=lambda: {"require_available": True})
+    sandbox: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "require_available": True,
+            "image": "jarvis-sandbox:latest",
+            "cpus": 1,
+            "memory_mb": 512,
+            "pids_limit": 256,
+            "timeout_seconds": 30,
+            "work_root": "runtime/sandbox",
+        }
+    )
     allow_inline_intents: List[str] = Field(default_factory=lambda: _default_inline_intent_allowlist())
 
     @field_validator("allow_inline_intents", mode="before")
