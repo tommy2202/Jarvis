@@ -49,6 +49,7 @@ class CapabilitiesConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    enabled: bool = True
     capabilities: Dict[str, CapabilityDefinition]
     intent_requirements: Dict[str, List[str]] = Field(default_factory=dict)
     source_policies: Dict[str, SourcePolicy] = Field(default_factory=dict)

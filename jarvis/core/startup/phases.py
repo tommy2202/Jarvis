@@ -9,9 +9,12 @@ from jarvis.core.startup.checks import (
     check_clock_sanity,
     check_dir_writable,
     check_dispatcher_capability_engine,
+    check_dispatcher_policy_engine,
     check_module_discovery_no_import,
     check_os_windows,
+    check_policy_engine_config,
     check_policy_engine_presence,
+    check_privacy_gate_enforced,
     check_privacy_store_presence,
     check_python_version,
     check_web_remote_control,
@@ -196,39 +199,57 @@ def phase7_enforcement_chain(
     privacy_store,
     secure_store,
     cfg_obj,
+    capabilities_cfg_raw: Dict[str, Any] | None = None,
+    privacy_cfg_raw: Dict[str, Any] | None = None,
+    module_trust_cfg_raw: Dict[str, Any] | None = None,
     modules_root: str,
 ) -> PhaseResult:
     checks: List[CheckResult] = []
 
+    def _obj_to_dict(obj: Any) -> Dict[str, Any]:
+        if obj is None:
+            return {}
+        if isinstance(obj, dict):
+            return dict(obj)
+        if hasattr(obj, "model_dump"):
+            try:
+                return obj.model_dump()
+            except Exception:
+                return {}
+        try:
+            return dict(vars(obj))
+        except Exception:
+            return {}
+
     policy_enabled = False
     try:
-        policy_enabled = bool(getattr(getattr(cfg_obj, "policy", None), "enabled", False))
+        policy_enabled = bool(_obj_to_dict(getattr(cfg_obj, "policy", None)).get("enabled", False))
     except Exception:
         policy_enabled = False
+    capabilities_enabled = bool((capabilities_cfg_raw or {}).get("enabled", True))
     privacy_enabled = True
     try:
-        privacy_enabled = bool(getattr(getattr(cfg_obj, "privacy", None), "enabled", True))
+        privacy_enabled = bool((privacy_cfg_raw or {}).get("enabled", True))
     except Exception:
         privacy_enabled = True
 
-    web_cfg = {}
-    try:
-        web_obj = getattr(cfg_obj, "web", None)
-        if web_obj is not None and hasattr(web_obj, "model_dump"):
-            web_cfg = web_obj.model_dump()
-        elif isinstance(web_obj, dict):
-            web_cfg = dict(web_obj)
-        else:
-            web_cfg = {}
-    except Exception:
-        web_cfg = {}
+    web_cfg = _obj_to_dict(getattr(cfg_obj, "web", None))
+    scan_mode = str((module_trust_cfg_raw or {}).get("scan_mode") or "startup_only").strip().lower()
+    if scan_mode not in {"startup_only", "manual_only", "always"}:
+        scan_mode = "startup_only"
+    module_discovery_enabled = scan_mode != "manual_only"
 
-    checks.append(check_dispatcher_capability_engine(dispatcher))
-    checks.append(check_capability_engine_ready(capability_engine))
+    if capabilities_enabled:
+        checks.append(check_dispatcher_capability_engine(dispatcher))
+        checks.append(check_capability_engine_ready(capability_engine))
     checks.append(check_policy_engine_presence(policy_engine, policy_enabled=policy_enabled))
+    checks.append(check_dispatcher_policy_engine(dispatcher, policy_enabled=policy_enabled))
+    checks.append(check_policy_engine_config(policy_engine, policy_enabled=policy_enabled))
     checks.append(check_privacy_store_presence(privacy_store, privacy_enabled=privacy_enabled))
+    checks.append(check_privacy_gate_enforced(dispatcher, privacy_store, privacy_enabled=privacy_enabled))
     checks.append(check_web_remote_control(web_cfg=web_cfg, secure_store=secure_store))
-    checks.append(check_module_discovery_no_import(modules_root))
+    if module_discovery_enabled:
+        checks.append(check_module_discovery_no_import(modules_root))
 
     status = _phase_status(checks, fail_if_any_failed=True)
     return PhaseResult(phase_id=7, name="Enforcement Chain Integrity", status=status, checks=checks)

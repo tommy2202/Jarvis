@@ -85,6 +85,18 @@ class StartupSelfCheckRunner:
         ph6 = phase6_policy_safety(cfg_obj=cfg_obj, secure_store_mode=secure_mode, capabilities_cfg=capabilities_cfg_raw)
         phases.append(ph6)
 
+        def _read_raw(name: str) -> Dict[str, Any]:
+            try:
+                fn = getattr(config_manager, "read_non_sensitive", None)
+                if callable(fn):
+                    return fn(name) or {}
+            except Exception:
+                return {}
+            return {}
+
+        privacy_cfg_raw = _read_raw("privacy.json")
+        module_trust_cfg_raw = _read_raw("module_trust.json")
+
         ph7 = phase7_enforcement_chain(
             dispatcher=dispatcher,
             capability_engine=capability_engine,
@@ -92,6 +104,9 @@ class StartupSelfCheckRunner:
             privacy_store=privacy_store,
             secure_store=secure_store,
             cfg_obj=cfg_obj,
+            capabilities_cfg_raw=capabilities_cfg_raw,
+            privacy_cfg_raw=privacy_cfg_raw,
+            module_trust_cfg_raw=module_trust_cfg_raw,
             modules_root=modules_root,
         )
         phases.append(ph7)
@@ -101,9 +116,11 @@ class StartupSelfCheckRunner:
         blocking = []
         warnings = []
         remediation = []
+        reason_codes = []
         for ph in phases:
             for ck in ph.checks:
                 if ck.status == "FAILED":
+                    reason_codes.append(str(ck.check_id))
                     blocking.append(f"{ph.name}:{ck.check_id}: {ck.message}")
                     if ck.remediation:
                         remediation.append(ck.remediation)
@@ -146,13 +163,20 @@ class StartupSelfCheckRunner:
                     pass
             if self.event_bus is not None:
                 try:
+                    dedup_codes = []
+                    seen = set()
+                    for code in reason_codes:
+                        if code in seen:
+                            continue
+                        seen.add(code)
+                        dedup_codes.append(code)
                     self.event_bus.publish_nowait(
                         BaseEvent(
                             event_type="startup.failed",
                             trace_id="startup",
                             source_subsystem=SourceSubsystem.telemetry,
                             severity=EventSeverity.CRITICAL,
-                            payload={"blocking_reasons": list(blocking)[:50]},
+                            payload={"reason_codes": dedup_codes[:50]},
                         )
                     )
                 except Exception:

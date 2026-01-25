@@ -233,6 +233,7 @@ class PrivacyConfigFile(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    enabled: bool = True
     schema_version: int = Field(default=1, ge=1, le=10)
     default_user_id: str = Field(default="default", min_length=1, max_length=64)
     data_minimization: Dict[str, Any] = Field(
