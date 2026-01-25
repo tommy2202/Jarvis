@@ -145,6 +145,31 @@ Standalone scripts:
 
 ## Windows setup
 
+## Dependency lock (pip-tools)
+
+Jarvis uses a deterministic dependency lock for offline installs:
+
+- Source: `requirements.in`
+- Lock: `requirements.txt` (pinned + hashes)
+
+Generate/refresh the lock file:
+
+```powershell
+.\scripts\lock_deps.ps1
+```
+
+Verify the lock file (offline, no network required):
+
+```powershell
+.\scripts\verify_deps.ps1
+```
+
+Install from the lock file (offline-ready if wheels are pre-downloaded):
+
+```powershell
+pip install --require-hashes -r requirements.txt
+```
+
 ### 1) Create a venv + install dependencies
 
 ```bash
