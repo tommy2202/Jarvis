@@ -81,10 +81,22 @@ class ModuleManager:
         if not isinstance(raw, dict):
             raw = {}
         raw.setdefault("allow_unsigned_modules", False)
+        raw.setdefault("trusted_module_ids", [])
         raw.setdefault("dev_mode_override", False)
         raw.setdefault("dev_mode", False)
         raw.setdefault("scan_mode", "startup_only")
+        ids = raw.get("trusted_module_ids")
+        if not isinstance(ids, list):
+            ids = []
+        raw["trusted_module_ids"] = [str(x).strip() for x in ids if str(x or "").strip()]
         return raw
+
+    @staticmethod
+    def _trusted_allowlist(cfg: Dict[str, Any]) -> set[str]:
+        ids = cfg.get("trusted_module_ids") or []
+        if not isinstance(ids, list):
+            return set()
+        return {str(x).strip() for x in ids if str(x or "").strip()}
 
     def _dev_mode_reason(self, rec: Dict[str, Any]) -> str:
         if bool(rec.get("enabled")) or bool(rec.get("safe_auto_enabled")):
@@ -92,10 +104,19 @@ class ModuleManager:
         base = str(rec.get("reason") or "installed disabled")
         return f"dev_mode: {base}"[:200]
 
-    def _is_trusted_record(self, rec: Dict[str, Any]) -> bool:
+    def _is_trusted_record(self, rec: Dict[str, Any], *, module_id: Optional[str] = None) -> bool:
         cfg = self._trust_cfg()
         if bool(cfg.get("dev_mode_override", False)):
             return True
+
+        allowlist = self._trusted_allowlist(cfg)
+        if allowlist:
+            mid = str(module_id or rec.get("module_id") or "")
+            if mid not in allowlist:
+                if bool(cfg.get("dev_mode", False)) and bool(rec.get("allowlist_override", False)):
+                    pass
+                else:
+                    return False
 
         prov = str(rec.get("provenance") or "local").strip().lower()
         trusted = bool(rec.get("trusted", True))
@@ -206,7 +227,7 @@ class ModuleManager:
         rec = (raw.get("modules") or {}).get(module_id) if isinstance(raw.get("modules"), dict) else None
         if not isinstance(rec, dict):
             return False
-        if not self._is_trusted_record(rec):
+        if not self._is_trusted_record(rec, module_id=module_id):
             return False
         return bool(rec.get("installed")) and bool(rec.get("enabled")) and not bool(rec.get("missing_on_disk"))
 
@@ -634,6 +655,19 @@ class ModuleManager:
                     rec["safe_auto_enabled"] = False
                     rec["requires_admin_to_enable"] = True
                     rec["reason"] = self._dev_mode_reason(rec)
+                cfg = self._trust_cfg()
+                allowlist = self._trusted_allowlist(cfg)
+                if allowlist and mid not in allowlist and not bool(cfg.get("dev_mode_override", False)):
+                    rec["enabled"] = False
+                    rec["enabled_at"] = None
+                    rec["safe_auto_enabled"] = False
+                    rec["reason"] = "not in trusted allowlist"
+                    self._emit(
+                        trace_id,
+                        "module.allowlist_blocked",
+                        {"module_id": mid, "provenance": rec.get("provenance"), "trusted": bool(rec.get("trusted", False))},
+                        severity=EventSeverity.WARN,
+                    )
                 rec.setdefault("provenance", "local")
                 rec.setdefault("trusted", True)
                 rec["fingerprint_hash"] = str(d.fingerprint or "")
@@ -705,7 +739,21 @@ class ModuleManager:
                     {"module_id": mid, "provenance": rec2.get("provenance"), "trusted": bool(rec2.get("trusted", False))},
                     severity=EventSeverity.WARN,
                 )
-            if (not dev_override) and (not self._is_trusted_record(rec2)):
+            allowlist = self._trusted_allowlist(cfg)
+            if allowlist and mid not in allowlist and not (bool(cfg.get("dev_mode", False)) and bool(rec2.get("allowlist_override", False))):
+                if bool(rec2.get("enabled", False)):
+                    rec2["enabled"] = False
+                    rec2["enabled_at"] = None
+                    rec2["safe_auto_enabled"] = False
+                rec2["reason"] = "not in trusted allowlist"
+                registry[mid] = rec2
+                self._emit(
+                    trace_id,
+                    "module.allowlist_blocked",
+                    {"module_id": mid, "provenance": rec2.get("provenance"), "trusted": bool(rec2.get("trusted", False))},
+                    severity=EventSeverity.WARN,
+                )
+            if (not dev_override) and (not self._is_trusted_record(rec2, module_id=mid)):
                 if bool(rec2.get("enabled", False)):
                     rec2["enabled"] = False
                     rec2["enabled_at"] = None
@@ -758,8 +806,34 @@ class ModuleManager:
         if not isinstance(rec, dict) or not bool(rec.get("installed")):
             self._emit(trace_id, "module.enable_denied", {"module_id": module_id, "reason": "not installed"}, severity=EventSeverity.WARN)
             return False
+        cfg = self._trust_cfg()
+        allowlist = self._trusted_allowlist(cfg)
+        if allowlist and module_id not in allowlist:
+            if not bool(cfg.get("dev_mode", False)):
+                self._emit(
+                    trace_id,
+                    "module.enable_denied",
+                    {"module_id": module_id, "reason": "not in trusted allowlist"},
+                    severity=EventSeverity.WARN,
+                )
+                return False
+            if self.security is None or not bool(getattr(self.security, "is_admin", lambda: False)()):
+                self._emit(
+                    trace_id,
+                    "module.enable_denied",
+                    {"module_id": module_id, "reason": "admin required (dev_mode allowlist override)"},
+                    severity=EventSeverity.WARN,
+                )
+                return False
+            rec["allowlist_override"] = True
+            self._emit(
+                trace_id,
+                "module.dev_mode_allowlist_override",
+                {"module_id": module_id, "reason": "dev_mode allowlist override"},
+                severity=EventSeverity.WARN,
+            )
         # Trust gate: admin must explicitly trust before enabling (unless dev override).
-        if not self._is_trusted_record(rec):
+        if not self._is_trusted_record(rec, module_id=module_id):
             self._emit(
                 trace_id,
                 "module.enable_denied",
@@ -845,7 +919,7 @@ class ModuleManager:
         rec = (raw.get("modules") or {}).get(module_id) if isinstance(raw.get("modules"), dict) else None
         if not isinstance(rec, dict) or not bool(rec.get("enabled")):
             return None
-        if not self._is_trusted_record(rec):
+        if not self._is_trusted_record(rec, module_id=module_id):
             return None
         mdir = str(rec.get("module_path") or "")
         mpath = os.path.join(mdir, "module.json")
