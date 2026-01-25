@@ -802,6 +802,21 @@ def main() -> None:
             info = getattr(runtime, "get_denial", lambda _tid: None)(parts[1])
             print(info or {"error": "denial not found"})
             continue
+        if text.startswith("/recent"):
+            parts = text.split()
+            if len(parts) < 2 or parts[1] != "denies":
+                print("Usage: /recent denies [N]")
+                continue
+            n = 50
+            if len(parts) >= 3:
+                try:
+                    n = max(1, int(parts[2]))
+                except Exception:
+                    n = 50
+            rows = getattr(runtime, "get_recent_denials", lambda _n=50: [])(n=n)
+            for row in rows:
+                print(row)
+            continue
         if text.startswith("/lockdown"):
             parts = text.split()
             if len(parts) == 1 or parts[1] == "status":
@@ -1218,7 +1233,7 @@ def main() -> None:
             continue
         if text.startswith("/modules"):
             parts = text.split()
-            cmd = parts[1] if len(parts) >= 2 else "list"
+            cmd = parts[1] if len(parts) >= 2 else "status"
             if cmd == "list":
                 from jarvis.core.modules.cli import modules_list_lines
 
@@ -1233,6 +1248,10 @@ def main() -> None:
                 continue
             if cmd == "scan":
                 print(module_manager.scan(trace_id="cli", trigger="manual"))
+                continue
+            if cmd == "repair" and len(parts) >= 3:
+                mid = parts[2]
+                print(module_manager.repair_manifest(mid, trace_id="cli"))
                 continue
             if cmd == "show" and len(parts) >= 3:
                 mid = parts[2]
@@ -1252,7 +1271,7 @@ def main() -> None:
                 out_path = parts[2]
                 print({"exported": module_manager.export(out_path)})
                 continue
-            print("Usage: /modules list | /modules status | /modules scan | /modules show <id> | /modules enable <id> | /modules disable <id> | /modules export <path>")
+            print("Usage: /modules list | /modules status | /modules scan | /modules repair <id> | /modules show <id> | /modules enable <id> | /modules disable <id> | /modules export <path>")
             continue
         if text.startswith("/privacy"):
             parts = text.split()

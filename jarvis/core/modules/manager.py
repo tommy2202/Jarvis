@@ -333,7 +333,7 @@ class ModuleManager:
                             state=ModuleState.BLOCKED,
                             reason_code=ModuleReasonCode.NO_MANIFEST,
                             reason_human="module.json missing.",
-                            remediation="Run /modules scan to generate a template manifest.",
+                            remediation="Run /modules repair <id> or /modules scan to generate a template manifest.",
                             last_seen_at=now,
                             fingerprint_short=fp_short,
                             safe_auto_enabled=False,
@@ -348,7 +348,7 @@ class ModuleManager:
                             state=ModuleState.BLOCKED,
                             reason_code=ModuleReasonCode.MANIFEST_INVALID,
                             reason_human="module.json invalid.",
-                            remediation="Fix module.json then run /modules scan.",
+                            remediation="Fix module.json or run /modules repair <id>, then /modules scan.",
                             last_seen_at=now,
                             fingerprint_short=fp_short,
                             safe_auto_enabled=False,
@@ -364,7 +364,7 @@ class ModuleManager:
                             state=ModuleState.BLOCKED,
                             reason_code=ModuleReasonCode.MANIFEST_INVALID,
                             reason_human=("Manifest invalid: " + str(err or ""))[:200],
-                            remediation="Fix module.json schema then run /modules scan.",
+                            remediation="Fix module.json schema or run /modules repair <id>, then /modules scan.",
                             last_seen_at=now,
                             fingerprint_short=fp_short,
                             safe_auto_enabled=False,
@@ -405,6 +405,24 @@ class ModuleManager:
 
             # Registry present (and disk present if discovered)
             if rec is not None:
+                if bool(rec.get("pending_user_input", False)):
+                    rc = ModuleReasonCode.MANIFEST_INVALID
+                    if d is not None and str(d.manifest_error or "") == "module.json missing":
+                        rc = ModuleReasonCode.NO_MANIFEST
+                    out.append(
+                        ModuleStatus(
+                            module_id=mid,
+                            state=ModuleState.PENDING_INSTALL,
+                            reason_code=rc,
+                            reason_human=str(rec.get("reason") or "Manifest requires review.")[:200],
+                            remediation="Run /modules repair <id> or /modules scan.",
+                            last_seen_at=now,
+                            fingerprint_short=fp_short,
+                            safe_auto_enabled=safe_auto_enabled,
+                            requires_admin_to_enable=True,
+                        )
+                    )
+                    continue
                 if bool(rec.get("changed_requires_review", False)):
                     out.append(
                         ModuleStatus(
@@ -430,7 +448,7 @@ class ModuleManager:
                             state=ModuleState.BLOCKED,
                             reason_code=ModuleReasonCode.NO_MANIFEST,
                             reason_human="module.json missing.",
-                            remediation="Restore module.json then run /modules scan.",
+                            remediation="Restore module.json or run /modules repair <id>, then /modules scan.",
                             last_seen_at=now,
                             fingerprint_short=fp_short,
                             safe_auto_enabled=safe_auto_enabled,
@@ -445,7 +463,7 @@ class ModuleManager:
                             state=ModuleState.BLOCKED,
                             reason_code=ModuleReasonCode.MANIFEST_INVALID,
                             reason_human="module.json invalid.",
-                            remediation="Fix module.json then run /modules scan.",
+                            remediation="Fix module.json or run /modules repair <id>, then /modules scan.",
                             last_seen_at=now,
                             fingerprint_short=fp_short,
                             safe_auto_enabled=safe_auto_enabled,
@@ -461,7 +479,7 @@ class ModuleManager:
                             state=ModuleState.BLOCKED,
                             reason_code=ModuleReasonCode.MANIFEST_INVALID,
                             reason_human=("Manifest invalid: " + str(err or ""))[:200],
-                            remediation="Fix module.json schema then run /modules scan.",
+                            remediation="Fix module.json schema or run /modules repair <id>, then /modules scan.",
                             last_seen_at=now,
                             fingerprint_short=fp_short,
                             safe_auto_enabled=safe_auto_enabled,
@@ -797,7 +815,97 @@ class ModuleManager:
         except Exception:
             pass
 
-        return {"ok": True, "found": sorted(list(disc.keys())), "registry": raw.get("modules")}
+        # Dev-mode batching summary (reduce per-module noise).
+        dev_mode_summary: Dict[str, Any] = {}
+        if dev_mode:
+            try:
+                counts: Dict[str, int] = {}
+                statuses = self.list_status(trace_id=trace_id)
+                for st in statuses:
+                    key = str(getattr(getattr(st, "state", None), "value", "") or "UNKNOWN")
+                    counts[key] = counts.get(key, 0) + 1
+                dev_mode_summary = {"total": len(statuses), "state_counts": counts}
+                self._emit(trace_id, "module.dev_mode_summary", dev_mode_summary, severity=EventSeverity.INFO)
+            except Exception:
+                dev_mode_summary = {}
+
+        res = {"ok": True, "found": sorted(list(disc.keys())), "registry": raw.get("modules")}
+        if dev_mode_summary:
+            res["dev_mode_summary"] = dev_mode_summary
+        return res
+
+    def repair_manifest(self, module_id: str, *, trace_id: str = "modules") -> Dict[str, Any]:
+        """
+        Repair or create a module.json without importing module code.
+        """
+        mid = str(module_id or "").strip()
+        if not mid:
+            return {"ok": False, "error": "missing_module_id"}
+        module_dir = os.path.join(self.modules_root, mid)
+        if not os.path.isdir(module_dir):
+            self._emit(trace_id, "module.repair_denied", {"module_id": mid, "reason": "missing_on_disk"}, severity=EventSeverity.WARN)
+            return {"ok": False, "error": "missing_on_disk"}
+
+        man_raw, wrote, status = repair_or_create_manifest(module_dir=module_dir, module_id=mid)
+        if status in {"created", "repaired"}:
+            self._emit(trace_id, "module.manifest_repaired" if status == "repaired" else "module.manifest_created", {"module_id": mid})
+
+        disc = ModuleDiscovery(modules_root=self.modules_root).scan()
+        d = disc.get(mid)
+
+        raw = self._load_modules_file_raw()
+        reg: Dict[str, Any] = dict(raw.get("modules") or {})
+        rec = reg.get(mid) if isinstance(reg, dict) else None
+        if not isinstance(rec, dict):
+            rec = registry_record_from_manifest(
+                module_id=mid,
+                module_path=module_dir.replace("\\", "/"),
+                fingerprint=str(getattr(d, "fingerprint", "")),
+                manifest_raw=man_raw if isinstance(man_raw, dict) else {},
+                safe_caps=set(SAFE_CAPS_DEFAULT),
+                disallowed_caps=set(DISALLOWED_CAPS),
+            )
+        else:
+            rec["installed"] = True
+            rec["module_path"] = module_dir.replace("\\", "/")
+            rec["missing_on_disk"] = False
+            if d is not None:
+                rec["last_seen_fingerprint"] = str(d.fingerprint or "")
+                rec["fingerprint_hash"] = str(d.fingerprint or "")
+                if getattr(d, "contract_hash", ""):
+                    rec["contract_hash"] = str(d.contract_hash or "")
+            rec.setdefault("provenance", "local")
+            rec.setdefault("trusted", True)
+
+        man, err = validate_manifest_dict(man_raw if isinstance(man_raw, dict) else {})
+        if man is None:
+            rec["pending_user_input"] = True
+            rec["enabled"] = False
+            rec["enabled_at"] = None
+            rec["safe_auto_enabled"] = False
+            rec["requires_admin_to_enable"] = True
+            rec["reason"] = (f"manifest_invalid: {err}" if err else "manifest invalid")[:200]
+        else:
+            rec["pending_user_input"] = False
+            rec["requires_admin_to_enable"] = bool(man.module_defaults.admin_required_to_enable)
+            if status in {"created", "repaired"}:
+                rec["reason"] = f"manifest_{status}"
+            try:
+                self._sync_manifest_to_configs(module_id=mid, manifest_raw=man_raw, trace_id=trace_id)
+            except Exception as e:
+                rec["pending_user_input"] = True
+                rec["enabled"] = False
+                rec["enabled_at"] = None
+                rec["safe_auto_enabled"] = False
+                rec["requires_admin_to_enable"] = True
+                rec["reason"] = f"manifest/capabilities sync failed: {str(e)[:120]}"
+                self._emit(trace_id, "module.manifest_invalid", {"module_id": mid, "reason": str(e)[:200]}, severity=EventSeverity.WARN)
+
+        reg[mid] = rec
+        raw["modules"] = reg
+        self._save_modules_file_raw(raw)
+
+        return {"ok": True, "module_id": mid, "status": status, "wrote": bool(wrote), "pending_user_input": bool(rec.get("pending_user_input", False))}
 
     def enable(self, module_id: str, *, trace_id: str = "modules") -> bool:
         raw = self._load_modules_file_raw()

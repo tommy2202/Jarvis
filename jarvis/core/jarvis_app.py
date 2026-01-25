@@ -110,6 +110,21 @@ class JarvisApp:
             action = str(module_id or "request").strip()
         return action.replace(".", " ")
 
+    @staticmethod
+    def _parse_cancel_job_id(text: str) -> Optional[str]:
+        parts = str(text or "").strip().split()
+        if not parts:
+            return None
+        if parts[0] != "cancel":
+            return None
+        if len(parts) < 2:
+            return None
+        if parts[1] == "job" and len(parts) >= 3:
+            return str(parts[2] or "").strip() or None
+        if parts[1] in {"current", "confirm"}:
+            return None
+        return str(parts[1] or "").strip() or None
+
     def _finalize_ux_events(
         self,
         *,
@@ -226,6 +241,42 @@ class JarvisApp:
                 request_source = str(source or "cli")
                 key = self._confirmation_key(request_source, client)
                 normalized = str(message or "").strip().lower()
+                cancel_job_id = self._parse_cancel_job_id(normalized)
+                if cancel_job_id:
+                    jm = getattr(self.dispatcher, "job_manager", None)
+                    if jm is None:
+                        return MessageResponse(
+                            trace_id=trace_id,
+                            reply="Job system unavailable.",
+                            intent_id="system.job.cancel",
+                            intent_source="system",
+                            confidence=1.0,
+                            requires_followup=False,
+                            followup_question=None,
+                            modifications={},
+                        )
+                    if not bool(self.dispatcher.security.is_admin()):
+                        return MessageResponse(
+                            trace_id=trace_id,
+                            reply="Admin required to cancel jobs.",
+                            intent_id="system.job.cancel",
+                            intent_source="system",
+                            confidence=1.0,
+                            requires_followup=False,
+                            followup_question=None,
+                            modifications={},
+                        )
+                    ok = bool(jm.cancel_job(cancel_job_id))
+                    return MessageResponse(
+                        trace_id=trace_id,
+                        reply=("Job canceled." if ok else "Unable to cancel job."),
+                        intent_id="system.job.cancel",
+                        intent_source="system",
+                        confidence=1.0,
+                        requires_followup=False,
+                        followup_question=None,
+                        modifications={},
+                    )
                 if normalized in {"confirm", "cancel"}:
                     pending = self._consume_confirmation(key)
                     if not pending:

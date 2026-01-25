@@ -371,6 +371,11 @@ class JarvisRuntime:
             raise AdminRequiredError()
         return bool(self.module_manager.disable(str(module_id), trace_id="runtime"))
 
+    def modules_repair(self, module_id: str) -> Dict[str, Any]:
+        if self.module_manager is None:
+            return {"ok": False, "error": "unavailable"}
+        return self.module_manager.repair_manifest(str(module_id), trace_id="runtime")
+
     def get_audit_status(self) -> Dict[str, Any]:
         if self.audit_timeline is None:
             return {"enabled": False}
@@ -1104,8 +1109,8 @@ def _format_denial_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
         "trace_id": str(entry.get("trace_id") or ""),
         "event": str(entry.get("event") or ""),
         "ts": str(entry.get("ts") or ""),
-        "denied_by": str(breakdown.get("denied_by") or "unknown"),
-        "reason_code": str(breakdown.get("reason_code") or details.get("denied_reason") or ""),
+        "denied_by": str(breakdown.get("denied_by") or details.get("denied_by") or "unknown"),
+        "reason_code": str(breakdown.get("reason_code") or details.get("denied_reason") or details.get("reason") or ""),
         "remediation": str(breakdown.get("remediation") or details.get("remediation") or ""),
         "intent_id": str(details.get("intent_id") or ""),
         "module_id": str(details.get("module_id") or ""),

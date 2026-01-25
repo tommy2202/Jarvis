@@ -16,6 +16,10 @@ from pydantic import BaseModel, Field, ValidationError
 from jarvis.core.events import EventLogger, redact
 from jarvis.core.job_worker import worker_main
 from jarvis.core.trace import resolve_trace_id
+from jarvis.core.ux.primitives import acknowledge as ux_acknowledge
+from jarvis.core.ux.primitives import completed as ux_completed
+from jarvis.core.ux.primitives import failed as ux_failed
+from jarvis.core.ux.primitives import progress as ux_progress
 
 
 class JobStatus(str, Enum):
@@ -352,6 +356,12 @@ class JobManager:
                 )
             except Exception:
                 pass
+        try:
+            ux_payload = ux_acknowledge(f"job {kind}")
+            ux_payload.update({"job_id": job_id, "kind": kind})
+            self._publish_job_event(trace_id=trace_id, event_type="ux.acknowledge", payload=ux_payload, severity="INFO")
+        except Exception:
+            pass
         if self.telemetry is not None:
             try:
                 self.telemetry.set_gauge("jobs_queued", self.get_counts().get("queued", 0))
@@ -376,6 +386,12 @@ class JobManager:
                 self._persist_index_locked()
                 self._exec_args.pop(job_id, None)
                 self.event_logger.log(st.trace_id, "jobs.canceled", {"job_id": job_id, "kind": st.kind})
+                try:
+                    ux_payload = ux_failed(f"Job {st.kind} canceled.", "Resubmit if needed.")
+                    ux_payload.update({"job_id": job_id, "kind": st.kind})
+                    self._publish_job_event(trace_id=st.trace_id, event_type="ux.failed", payload=ux_payload, severity="WARN")
+                except Exception:
+                    pass
                 return True
 
             # RUNNING: terminate worker
@@ -394,6 +410,12 @@ class JobManager:
             self._persist_index_locked()
             self._exec_args.pop(job_id, None)
             self.event_logger.log(st.trace_id, "jobs.canceled", {"job_id": job_id, "kind": st.kind, "running": True})
+            try:
+                ux_payload = ux_failed(f"Job {st.kind} canceled.", "Resubmit if needed.")
+                ux_payload.update({"job_id": job_id, "kind": st.kind})
+                self._publish_job_event(trace_id=st.trace_id, event_type="ux.failed", payload=ux_payload, severity="WARN")
+            except Exception:
+                pass
             return True
 
     def resume_job(self, job_id: str, *, is_admin: bool, trace_id: str = "jobs") -> bool:
@@ -800,6 +822,12 @@ class JobManager:
                         self._append_event_locked(job_id, JobEvent(job_id=job_id, event_type="finished", payload={"status": "TIMED_OUT"}).model_dump())
                         self._persist_index_locked()
                         self.event_logger.log(st.trace_id, "jobs.timeout", {"job_id": job_id, "kind": st.kind})
+                        try:
+                            ux_payload = ux_failed(f"Job {st.kind} timed out.", "Increase max_runtime_seconds or reduce workload.")
+                            ux_payload.update({"job_id": job_id, "kind": st.kind})
+                            self._publish_job_event(trace_id=st.trace_id, event_type="ux.failed", payload=ux_payload, severity="ERROR")
+                        except Exception:
+                            pass
                         finished.append((job_id, JobStatus.TIMED_OUT))
                         self._exec_args.pop(job_id, None)
                 continue
@@ -885,6 +913,14 @@ class JobManager:
                         )
                     except Exception:
                         pass
+                try:
+                    ux_payload = ux_progress(st.progress)
+                    if st.message:
+                        ux_payload["message"] = str(st.message)[:200]
+                    ux_payload.update({"job_id": job_id, "kind": st.kind})
+                    self._publish_job_event(trace_id=st.trace_id, event_type="ux.progress", payload=ux_payload, severity="INFO")
+                except Exception:
+                    pass
                 return
 
             if et == "log":
@@ -924,6 +960,12 @@ class JobManager:
                         )
                     except Exception:
                         pass
+                try:
+                    ux_payload = ux_failed(f"Job {st.kind} failed.", "Check job logs for details.")
+                    ux_payload.update({"job_id": job_id, "kind": st.kind})
+                    self._publish_job_event(trace_id=st.trace_id, event_type="ux.failed", payload=ux_payload, severity="ERROR")
+                except Exception:
+                    pass
                 return
 
             if et == "finished":
@@ -956,6 +998,17 @@ class JobManager:
                         )
                     except Exception:
                         pass
+                try:
+                    if st.status == JobStatus.SUCCEEDED:
+                        ux_payload = ux_completed(f"Job {st.kind} completed.")
+                        ux_payload.update({"job_id": job_id, "kind": st.kind})
+                        self._publish_job_event(trace_id=st.trace_id, event_type="ux.completed", payload=ux_payload, severity="INFO")
+                    else:
+                        ux_payload = ux_failed(f"Job {st.kind} failed.", "Check job logs for details.")
+                        ux_payload.update({"job_id": job_id, "kind": st.kind})
+                        self._publish_job_event(trace_id=st.trace_id, event_type="ux.failed", payload=ux_payload, severity="ERROR")
+                except Exception:
+                    pass
                 self._exec_args.pop(job_id, None)
 
         if et == "finished" and self.telemetry is not None:

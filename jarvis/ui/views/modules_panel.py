@@ -13,10 +13,11 @@ from tkinter import ttk
 
 
 class ModulesPanel(ttk.Frame):
-    def __init__(self, master, *, on_scan, on_toggle):  # noqa: ANN001
+    def __init__(self, master, *, on_scan, on_toggle, on_repair=None):  # noqa: ANN001
         super().__init__(master, padding=(8, 6))
         self._on_scan = on_scan
         self._on_toggle = on_toggle
+        self._on_repair = on_repair or (lambda _mid: None)
         self._by_id: dict[str, dict] = {}
 
         header = ttk.Frame(self)
@@ -25,11 +26,11 @@ class ModulesPanel(ttk.Frame):
         ttk.Button(header, text="Scan Modules", command=self._on_scan).grid(row=0, column=1, padx=(10, 0), sticky="e")
         header.columnconfigure(0, weight=1)
 
-        cols = ("module_id", "state", "enabled", "reason_code", "remediation")
+        cols = ("module_id", "state", "enabled", "reason_code", "reason", "remediation")
         self._tree = ttk.Treeview(self, columns=cols, show="headings", height=8)
         for c in cols:
             self._tree.heading(c, text=c)
-            self._tree.column(c, width=220 if c in {"remediation"} else 140 if c in {"state"} else 120, stretch=True)
+            self._tree.column(c, width=240 if c in {"reason", "remediation"} else 140 if c in {"state"} else 120, stretch=True)
         self._tree.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
         self._tree.bind("<<TreeviewSelect>>", self._on_select)
 
@@ -45,7 +46,7 @@ class ModulesPanel(ttk.Frame):
         btns.grid(row=3, column=0, sticky="ew", pady=(6, 0))
         ttk.Button(btns, text="Enable", command=lambda: self._toggle_selected(True)).grid(row=0, column=0, padx=(0, 6))
         ttk.Button(btns, text="Disable", command=lambda: self._toggle_selected(False)).grid(row=0, column=1, padx=(0, 6))
-        ttk.Button(btns, text="Repair", state="disabled").grid(row=0, column=2)  # Repair flow implemented in core later.
+        ttk.Button(btns, text="Repair", command=self._repair_selected).grid(row=0, column=2)
         btns.columnconfigure(3, weight=1)
 
         self.columnconfigure(0, weight=1)
@@ -88,6 +89,7 @@ class ModulesPanel(ttk.Frame):
                     str(r.get("state") or ""),
                     enabled,
                     str(r.get("reason_code") or ""),
+                    str(r.get("reason_human") or "")[:120],
                     str(r.get("remediation") or "")[:120],
                 ),
             )
@@ -120,4 +122,10 @@ class ModulesPanel(ttk.Frame):
         if not mid:
             return
         self._on_toggle(mid, enable)
+
+    def _repair_selected(self) -> None:
+        mid = self._selected_module_id()
+        if not mid:
+            return
+        self._on_repair(mid)
 

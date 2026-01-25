@@ -62,6 +62,7 @@ class JobSubmitResult:
     denied_reason: Optional[str] = None
     remediation: str = ""
     required_capabilities: List[str] | None = None
+    decision_breakdown: Optional[Dict[str, Any]] = None
 
 
 class Dispatcher:
@@ -155,6 +156,8 @@ class Dispatcher:
         denied_caps: Optional[List[str]] = None,
         reason: str = "",
         remediation: str = "",
+        denied_by: str = "",
+        decision_breakdown: Optional[Dict[str, Any]] = None,
     ) -> None:
         payload = {
             "trace_id": trace_id,
@@ -164,9 +167,14 @@ class Dispatcher:
             "args": redact(args or {}),
         }
         if not allowed:
+            denied_reason = str(reason or "")[:200]
             payload["denied_caps"] = list(denied_caps or [])
-            payload["reason"] = str(reason or "")[:200]
+            payload["reason"] = denied_reason
+            payload["denied_reason"] = denied_reason
             payload["remediation"] = str(remediation or "")[:200]
+            payload["denied_by"] = str(denied_by or "capabilities")
+            if isinstance(decision_breakdown, dict):
+                payload["decision_breakdown"] = decision_breakdown
         self.event_logger.log(trace_id, "job.submit.allowed" if allowed else "job.submit.denied", payload)
         if self.event_bus is None:
             return
@@ -451,9 +459,18 @@ class Dispatcher:
         denied_reason: str,
         reply: str,
         remediation: str = "",
+        denied_by: str = "",
         denied_caps: Optional[List[str]] = None,
         args: Optional[Dict[str, Any]] = None,
     ) -> JobSubmitResult:
+        denied_by = str(denied_by or "capabilities")
+        remediation = remediation or "Review logs for details."
+        breakdown = {
+            "denied_by": denied_by,
+            "reason_code": str(denied_reason or ""),
+            "remediation": str(remediation or "")[:300],
+            "trace_id": trace_id,
+        }
         self._emit_job_submit_event(
             trace_id,
             allowed=False,
@@ -464,6 +481,8 @@ class Dispatcher:
             denied_caps=list(denied_caps or []),
             reason=denied_reason,
             remediation=remediation,
+            denied_by=denied_by,
+            decision_breakdown=breakdown,
         )
         return JobSubmitResult(
             ok=False,
@@ -472,6 +491,7 @@ class Dispatcher:
             denied_reason=denied_reason,
             remediation=str(remediation or "")[:300],
             required_capabilities=list(required_caps or []),
+            decision_breakdown=breakdown,
         )
 
     def submit_job(
@@ -501,6 +521,7 @@ class Dispatcher:
                     denied_reason="lockdown_active",
                     reply="Lockdown mode active. Job submission is restricted.",
                     remediation="Admin can exit lockdown explicitly.",
+                    denied_by="lockdown",
                     args=args,
                 )
 
@@ -513,6 +534,7 @@ class Dispatcher:
                     denied_reason="job_manager_unavailable",
                     reply="Job system unavailable.",
                     remediation="Start the job manager before submitting jobs.",
+                    denied_by="system",
                     args=args,
                 )
 
@@ -526,6 +548,7 @@ class Dispatcher:
                     denied_reason="unknown_job_kind",
                     reply="Unknown job kind.",
                     remediation="Check the job kind allowlist.",
+                    denied_by="job_registry",
                     args=args,
                 )
 
@@ -544,6 +567,7 @@ class Dispatcher:
                     denied_reason="capability_engine_missing",
                     reply="I can’t submit jobs because enforcement is not configured.",
                     remediation="Initialize the capability engine (config/capabilities.json).",
+                    denied_by="capabilities",
                     args=args,
                 )
 
@@ -572,6 +596,7 @@ class Dispatcher:
                             denied_reason="rate_limited",
                             reply="I’m throttling requests to prevent overload.",
                             remediation=remediation,
+                            denied_by="limits",
                             denied_caps=[],
                             args=args,
                         )
@@ -585,6 +610,7 @@ class Dispatcher:
                 {"allowed": dec.allowed, "required": dec.required_capabilities, "denied": dec.denied_capabilities, "reasons": dec.reasons, "remediation": dec.remediation[:200]},
             )
             if not bool(dec.allowed):
+                denied_by = self._capability_denied_by(ctx, dec)
                 return self._job_submit_denied(
                     trace_id,
                     source=source,
@@ -593,6 +619,7 @@ class Dispatcher:
                     denied_reason="capability_denied",
                     reply="Job submission denied.",
                     remediation=str(dec.remediation or "")[:200],
+                    denied_by=denied_by,
                     denied_caps=list(dec.denied_capabilities or []),
                     args=args,
                 )
@@ -637,6 +664,7 @@ class Dispatcher:
                                 denied_reason="confirmation_required",
                                 reply=str(pdec.remediation or "Confirmation required.")[:300],
                                 remediation="Reply 'confirm' to proceed or 'cancel' to abort.",
+                                denied_by="policy",
                                 args=args,
                             )
                         return self._job_submit_denied(
@@ -647,6 +675,7 @@ class Dispatcher:
                             denied_reason="policy_denied",
                             reply="Job submission denied.",
                             remediation=str(pdec.remediation or pdec.final_reason or "Denied by policy.")[:200],
+                            denied_by="policy",
                             args=args,
                         )
                 except Exception:
@@ -677,6 +706,7 @@ class Dispatcher:
                     denied_reason="job_submit_invalid",
                     reply=str(e),
                     remediation="Validate job arguments and try again.",
+                    denied_by="validation",
                     args=args,
                 )
             self._emit_job_submit_event(

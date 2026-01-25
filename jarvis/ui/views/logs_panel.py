@@ -9,12 +9,13 @@ from jarvis.ui.views.modules_panel import ModulesPanel
 
 
 class LogsPanel(ttk.Frame):
-    def __init__(self, master, *, on_refresh, on_export, on_modules_scan=None, on_modules_toggle=None):  # noqa: ANN001
+    def __init__(self, master, *, on_refresh, on_export, on_modules_scan=None, on_modules_toggle=None, on_modules_repair=None):  # noqa: ANN001
         super().__init__(master, padding=(8, 6))
         self._on_refresh = on_refresh
         self._on_export = on_export
         self._on_modules_scan = on_modules_scan or (lambda: None)
         self._on_modules_toggle = on_modules_toggle or (lambda _mid, _en: None)
+        self._on_modules_repair = on_modules_repair or (lambda _mid: None)
 
         header = ttk.Frame(self)
         header.grid(row=0, column=0, sticky="ew")
@@ -36,7 +37,7 @@ class LogsPanel(ttk.Frame):
         self._denials = ScrolledText(self._nb, height=10, wrap="word")
         self._health = HealthPanel(self._nb)
         self._caps = ScrolledText(self._nb, height=10, wrap="word")
-        self._modules = ModulesPanel(self._nb, on_scan=self._on_modules_scan, on_toggle=self._on_modules_toggle)
+        self._modules = ModulesPanel(self._nb, on_scan=self._on_modules_scan, on_toggle=self._on_modules_toggle, on_repair=self._on_modules_repair)
         self._caps.configure(state="disabled")
         for t in (self._errors, self._security, self._system, self._audit, self._denials):
             t.configure(state="disabled")
@@ -45,7 +46,7 @@ class LogsPanel(ttk.Frame):
         self._nb.add(self._security, text="Security")
         self._nb.add(self._system, text="System")
         self._nb.add(self._audit, text="Audit")
-        self._nb.add(self._denials, text="Denials")
+        self._nb.add(self._denials, text="Denials (50)")
         self._nb.add(self._health, text="Health")
         self._nb.add(self._caps, text="Capabilities")
         self._nb.add(self._modules, text="Modules")
