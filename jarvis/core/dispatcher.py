@@ -95,6 +95,7 @@ class Dispatcher:
         feature_flags: Any = None,
         lockdown_manager: Any = None,
         inline_intent_allowlist: Optional[List[str]] = None,
+        tool_broker: Any = None,
     ):
         self.registry = registry
         self.policy = policy
@@ -117,6 +118,7 @@ class Dispatcher:
         self.feature_flags = feature_flags
         self.lockdown_manager = lockdown_manager
         self.inline_intent_allowlist = {str(x).strip() for x in (inline_intent_allowlist or []) if str(x or "").strip()}
+        self.tool_broker = tool_broker
 
     @staticmethod
     def _ux_action_label(intent_id: str, module_id: str) -> str:
@@ -1288,6 +1290,9 @@ class Dispatcher:
                             pass
                 self.event_logger.log(trace_id, "dispatch.execute", {"module_id": module_id, "intent_id": intent_id})
                 exec_mode = exec_mode_effective
+                exec_context = dict(context or {})
+                if self.tool_broker is not None and exec_mode in {"inline", "thread"}:
+                    exec_context.setdefault("tool_broker", self.tool_broker)
                 if exec_mode == "thread":
                     from concurrent.futures import ThreadPoolExecutor
 
@@ -1296,7 +1301,7 @@ class Dispatcher:
                         cv = contextvars.copy_context()
 
                         def _run():  # noqa: ANN001
-                            return self.execute_loaded_module(mod, intent_id=intent_id, args=args, context=context, persist_allowed=persist_allowed, internal_call=True)
+                            return self.execute_loaded_module(mod, intent_id=intent_id, args=args, context=exec_context, persist_allowed=persist_allowed, internal_call=True)
 
                         fut = ex.submit(cv.run, _run)
                         out = fut.result(timeout=30.0)
@@ -1306,7 +1311,7 @@ class Dispatcher:
                     ctx["_dispatcher_execute"] = True
                     out = self._run_in_subprocess(getattr(mod, "module_path", ""), intent_id, args or {}, ctx, internal_call=True)
                 else:
-                    out = self.execute_loaded_module(mod, intent_id=intent_id, args=args, context=context, persist_allowed=persist_allowed, internal_call=True)
+                    out = self.execute_loaded_module(mod, intent_id=intent_id, args=args, context=exec_context, persist_allowed=persist_allowed, internal_call=True)
                 summary = ""
                 if isinstance(out, dict):
                     summary = str(out.get("summary") or out.get("message") or "")

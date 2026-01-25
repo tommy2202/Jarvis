@@ -3,16 +3,12 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from jarvis.core.privacy.models import DataCategory, LawfulBasis, Sensitivity
-from jarvis.core.privacy.write_api import (
-    WriteDecision,
-    write_artifact_metadata,
-    write_memory,
-    write_user_log,
-)
+from jarvis.core.broker.interface import ToolBroker, ToolResult
+from jarvis.core.privacy.write_api import WriteDecision, write_artifact_metadata, write_memory, write_user_log
 from jarvis.core.security_events import SecurityAuditLogger
 
 
-class WriteBroker:
+class WriteBroker(ToolBroker):
     """
     Adapter that routes persistence writes through the privacy Write API.
     """
@@ -62,3 +58,30 @@ class WriteBroker:
             trace_id=trace_id,
             audit_logger=self.audit_logger,
         )
+
+    def run(self, tool_name: str, args: Dict[str, Any], context: Dict[str, Any]) -> ToolResult:
+        name = str(tool_name or "")
+        trace_id = str((context or {}).get("trace_id") or (args or {}).get("trace_id") or "tool")
+        try:
+            if name == "write.memory":
+                dec = self.write_memory(
+                    trace_id=trace_id,
+                    user_id=str((args or {}).get("user_id") or "default"),
+                    content=str((args or {}).get("content") or ""),
+                    tags=dict((args or {}).get("tags") or {}),
+                )
+                return ToolResult(allowed=bool(dec.allowed), reason_code=str(dec.reason_code), trace_id=trace_id, output={"record_id": dec.record_id})
+            if name == "write.transcript":
+                dec = self.write_transcript(
+                    trace_id=trace_id,
+                    user_id=str((args or {}).get("user_id") or "default"),
+                    transcript=str((args or {}).get("content") or ""),
+                    tags=dict((args or {}).get("tags") or {}),
+                )
+                return ToolResult(allowed=bool(dec.allowed), reason_code=str(dec.reason_code), trace_id=trace_id, output={"record_id": dec.record_id})
+            if name == "write.artifact_metadata":
+                dec = self.write_artifact_metadata(record=(args or {}).get("record") or {}, trace_id=trace_id)
+                return ToolResult(allowed=bool(dec.allowed), reason_code=str(dec.reason_code), trace_id=trace_id, output={"record_id": dec.record_id})
+            return ToolResult(allowed=False, reason_code="unknown_tool", trace_id=trace_id)
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(allowed=False, reason_code="tool_error", trace_id=trace_id, error=str(e))
