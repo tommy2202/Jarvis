@@ -20,6 +20,15 @@
       ],
       "required_args": []
     }
+  ],
+  "inline_intent_allowlist": [
+    "core.time.now",
+    "core.date.today",
+    "core.status.listening",
+    "core.status.admin",
+    "core.status.busy",
+    "core.status.health",
+    "core.identity.version"
   ]
 }
 

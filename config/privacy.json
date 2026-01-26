@@ -99,6 +99,13 @@
       "ttl_days": 7,
       "deletion_action": "delete",
       "review_required": false
+    },
+    {
+      "data_category": "MEMORY",
+      "sensitivity": "HIGH",
+      "ttl_days": 30,
+      "deletion_action": "delete",
+      "review_required": true
     }
   ]
 }

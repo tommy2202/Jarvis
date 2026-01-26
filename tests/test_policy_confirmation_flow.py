@@ -59,6 +59,7 @@ def test_require_confirmation_blocks_until_confirm(tmp_path):
         capability_engine=cap_engine,
         policy_engine=pol_engine,
         secure_store=store,
+        inline_intent_allowlist=["intent.x"],
     )
 
     # Jarvis app

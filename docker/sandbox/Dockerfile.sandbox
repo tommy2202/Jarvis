@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+WORKDIR /opt/jarvis
+
+COPY pyproject.toml README.md /opt/jarvis/
+COPY jarvis/ /opt/jarvis/jarvis/
+COPY docker/sandbox/entrypoint.py /runner/entrypoint.py
+
+RUN python -m pip install --no-cache-dir -U pip \
+    && python -m pip install --no-cache-dir -e /opt/jarvis
+
+WORKDIR /work
+
+ENTRYPOINT ["python", "/runner/entrypoint.py"]

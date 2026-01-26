@@ -95,6 +95,7 @@ def test_lockdown_blocks_execution(tmp_path):
         capability_engine=eng,
         secure_store=store,
         lockdown_manager=lockdown,
+        inline_intent_allowlist=["demo.run"],
     )
 
     res = disp.dispatch("t1", "demo.run", "demo", {}, {"source": "cli"})

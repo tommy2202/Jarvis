@@ -137,6 +137,7 @@ def test_ephemeral_mode_executes_action(tmp_path):
         capability_engine=eng,
         secure_store=store,
         privacy_store=ps,
+        inline_intent_allowlist=["core.privacy.test"],
     )
 
     r0 = disp.dispatch("t", "core.privacy.test", "core.mod", {}, {"source": "cli", "user_id": "default", "privacy_scopes": ["memory"]})
@@ -193,6 +194,7 @@ def test_consent_allows_persistence(tmp_path):
         capability_engine=eng,
         secure_store=store,
         privacy_store=ps,
+        inline_intent_allowlist=["core.privacy.test2"],
     )
 
     r1 = disp.dispatch("t", "core.privacy.test2", "core.mod2", {}, {"source": "cli", "user_id": "default", "privacy_scopes": ["memory"]})

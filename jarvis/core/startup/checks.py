@@ -100,13 +100,22 @@ def check_capability_engine_ready(capability_engine: Any) -> CheckResult:
             severity=Severity.CRITICAL,
         )
     cfg = getattr(capability_engine, "cfg", None)
-    intent_reqs = getattr(cfg, "intent_requirements", None) if cfg is not None else None
-    if not isinstance(intent_reqs, dict) or not intent_reqs:
+    caps = getattr(cfg, "capabilities", None) if cfg is not None else None
+    if not isinstance(caps, dict) or not caps:
         return CheckResult(
             check_id="capability_engine.config",
             status=CheckStatus.FAILED,
             message="Capability config missing or empty.",
             remediation="Load config/capabilities.json successfully before startup.",
+            severity=Severity.CRITICAL,
+        )
+    intent_reqs = getattr(cfg, "intent_requirements", None) if cfg is not None else None
+    if not isinstance(intent_reqs, dict) or not intent_reqs:
+        return CheckResult(
+            check_id="capability_engine.config",
+            status=CheckStatus.FAILED,
+            message="Capability intent requirements missing or empty.",
+            remediation="Define intent_requirements in config/capabilities.json before startup.",
             severity=Severity.CRITICAL,
         )
     # Hard rule check: web cannot perform CAP_ADMIN_ACTION even if admin.
@@ -155,6 +164,96 @@ def check_policy_engine_presence(policy_engine: Any, *, policy_enabled: bool) ->
     return CheckResult(check_id="policy_engine", status=CheckStatus.OK, message="Policy engine ready.")
 
 
+def check_dispatcher_policy_engine(dispatcher: Any, *, policy_enabled: bool) -> CheckResult:
+    if not bool(policy_enabled):
+        return CheckResult(check_id="dispatcher.policy_engine", status=CheckStatus.OK, message="Policy disabled (skip dispatcher wiring check).")
+    if dispatcher is None:
+        return CheckResult(
+            check_id="dispatcher.policy_engine",
+            status=CheckStatus.FAILED,
+            message="Dispatcher missing.",
+            remediation="Initialize dispatcher before startup checks.",
+            severity=Severity.CRITICAL,
+        )
+    if getattr(dispatcher, "policy_engine", None) is None:
+        return CheckResult(
+            check_id="dispatcher.policy_engine",
+            status=CheckStatus.FAILED,
+            message="Dispatcher missing policy engine.",
+            remediation="Wire policy engine into dispatcher.",
+            severity=Severity.CRITICAL,
+        )
+    return CheckResult(check_id="dispatcher.policy_engine", status=CheckStatus.OK, message="Dispatcher policy engine wired.")
+
+
+def check_policy_engine_config(policy_engine: Any, *, policy_enabled: bool) -> CheckResult:
+    if not bool(policy_enabled):
+        return CheckResult(check_id="policy_engine.config", status=CheckStatus.OK, message="Policy disabled (skip config check).")
+    if policy_engine is None:
+        return CheckResult(
+            check_id="policy_engine.config",
+            status=CheckStatus.FAILED,
+            message="Policy engine missing.",
+            remediation="Initialize policy engine before startup.",
+            severity=Severity.CRITICAL,
+        )
+    try:
+        status = policy_engine.status() if callable(getattr(policy_engine, "status", None)) else None
+    except Exception as e:  # noqa: BLE001
+        return CheckResult(
+            check_id="policy_engine.config",
+            status=CheckStatus.FAILED,
+            message="Unable to verify policy engine status.",
+            remediation=str(e),
+            severity=Severity.CRITICAL,
+        )
+    if isinstance(status, dict):
+        if bool(status.get("failsafe", False)):
+            return CheckResult(
+                check_id="policy_engine.config",
+                status=CheckStatus.FAILED,
+                message="Policy config failed validation (failsafe active).",
+                remediation=str(status.get("error") or "Fix config/policy.json and restart."),
+                severity=Severity.CRITICAL,
+            )
+        if not bool(status.get("enabled", False)):
+            return CheckResult(
+                check_id="policy_engine.config",
+                status=CheckStatus.FAILED,
+                message="Policy enabled in config but engine disabled.",
+                remediation="Set policy.enabled=true in config/policy.json and restart.",
+                severity=Severity.CRITICAL,
+            )
+        return CheckResult(check_id="policy_engine.config", status=CheckStatus.OK, message="Policy config validated.")
+    # Fallback: inspect attributes when status() not available.
+    cfg = getattr(policy_engine, "cfg", None)
+    if cfg is None:
+        return CheckResult(
+            check_id="policy_engine.config",
+            status=CheckStatus.FAILED,
+            message="Policy config missing.",
+            remediation="Load config/policy.json before startup.",
+            severity=Severity.CRITICAL,
+        )
+    if bool(getattr(policy_engine, "_failsafe", False)):
+        return CheckResult(
+            check_id="policy_engine.config",
+            status=CheckStatus.FAILED,
+            message="Policy engine running in failsafe mode.",
+            remediation="Fix config/policy.json and restart.",
+            severity=Severity.CRITICAL,
+        )
+    if not bool(getattr(cfg, "enabled", False)):
+        return CheckResult(
+            check_id="policy_engine.config",
+            status=CheckStatus.FAILED,
+            message="Policy enabled in config but engine disabled.",
+            remediation="Set policy.enabled=true in config/policy.json and restart.",
+            severity=Severity.CRITICAL,
+        )
+    return CheckResult(check_id="policy_engine.config", status=CheckStatus.OK, message="Policy config validated.")
+
+
 def check_privacy_store_presence(privacy_store: Any, *, privacy_enabled: bool) -> CheckResult:
     if not bool(privacy_enabled):
         return CheckResult(check_id="privacy_store", status=CheckStatus.OK, message="Privacy disabled (skip store check).")
@@ -167,6 +266,57 @@ def check_privacy_store_presence(privacy_store: Any, *, privacy_enabled: bool) -
             severity=Severity.CRITICAL,
         )
     return CheckResult(check_id="privacy_store", status=CheckStatus.OK, message="Privacy store ready.")
+
+
+def check_privacy_gate_enforced(dispatcher: Any, privacy_store: Any, *, privacy_enabled: bool) -> CheckResult:
+    if not bool(privacy_enabled):
+        return CheckResult(check_id="privacy_gate", status=CheckStatus.OK, message="Privacy disabled (skip gate check).")
+    if dispatcher is None:
+        return CheckResult(
+            check_id="privacy_gate",
+            status=CheckStatus.FAILED,
+            message="Dispatcher missing.",
+            remediation="Initialize dispatcher before startup checks.",
+            severity=Severity.CRITICAL,
+        )
+    gate = getattr(dispatcher, "_privacy_gate", None)
+    if gate is None or not callable(getattr(gate, "evaluate", None)):
+        return CheckResult(
+            check_id="privacy_gate",
+            status=CheckStatus.FAILED,
+            message="Privacy gate missing.",
+            remediation="Wire PrivacyGate into dispatcher.",
+            severity=Severity.CRITICAL,
+        )
+    if privacy_store is not None and getattr(gate, "privacy_store", None) is not None and getattr(gate, "privacy_store", None) is not privacy_store:
+        return CheckResult(
+            check_id="privacy_gate",
+            status=CheckStatus.FAILED,
+            message="Privacy gate store mismatch.",
+            remediation="Ensure dispatcher privacy gate uses the active privacy store.",
+            severity=Severity.CRITICAL,
+        )
+    try:
+        fn = getattr(dispatcher, "execute_loaded_module", None)
+        code = getattr(fn, "__code__", None)
+        names = set(code.co_names or []) | set(code.co_varnames or []) if code is not None else set()
+        if code is None or "persistence_context" not in names:
+            return CheckResult(
+                check_id="privacy_gate",
+                status=CheckStatus.FAILED,
+                message="Dispatcher execution path missing privacy enforcement.",
+                remediation="Wrap module execution in persistence_context via PrivacyGate.",
+                severity=Severity.CRITICAL,
+            )
+    except Exception as e:  # noqa: BLE001
+        return CheckResult(
+            check_id="privacy_gate",
+            status=CheckStatus.FAILED,
+            message="Unable to verify privacy gate enforcement.",
+            remediation=str(e),
+            severity=Severity.CRITICAL,
+        )
+    return CheckResult(check_id="privacy_gate", status=CheckStatus.OK, message="Privacy gate enforced in dispatcher path.")
 
 
 def check_web_remote_control(*, web_cfg: Dict[str, Any], secure_store: Any) -> CheckResult:
@@ -237,7 +387,7 @@ def check_web_remote_control(*, web_cfg: Dict[str, Any], secure_store: Any) -> C
             severity=Severity.CRITICAL,
         )
 
-    bind_host = str((web_cfg or {}).get("bind_host") or "127.0.0.1")
+    bind_host = str((web_cfg or {}).get("bind_host") or "127.0.0.1").strip() or "127.0.0.1"
     allow_remote = bool((web_cfg or {}).get("allow_remote", False))
     if not allow_remote and bind_host not in {"127.0.0.1", "localhost"}:
         return CheckResult(

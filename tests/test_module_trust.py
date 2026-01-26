@@ -3,46 +3,17 @@ from __future__ import annotations
 import json
 import os
 
-from jarvis.core.config.manager import ConfigManager
-from jarvis.core.config.paths import ConfigFsPaths
 from jarvis.core.modules.manager import ModuleManager
 from jarvis.core.security import AdminSession, SecurityManager
 from jarvis.core.secure_store import SecureStore
-
-
-class _L:
-    def info(self, *_a, **_k): ...
-    def warning(self, *_a, **_k): ...
-    def error(self, *_a, **_k): ...
-
-
-class _Bus:
-    def __init__(self) -> None:
-        self.events: list[object] = []
-
-    def publish_nowait(self, ev) -> None:  # noqa: ANN001
-        self.events.append(ev)
-
-
-def _make_cfg(tmp_path) -> ConfigManager:
-    cm = ConfigManager(fs=ConfigFsPaths(str(tmp_path)), logger=_L(), read_only=False)
-    cm.load_all()
-    return cm
-
-
-def _write_module_json(mod_dir: str, obj: dict) -> None:
-    os.makedirs(mod_dir, exist_ok=True)
-    path = os.path.join(mod_dir, "module.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+from tests.helpers.module_trust import DummyLogger, EventBusCapture, make_cfg, write_module_json
 
 
 def test_untrusted_module_blocked(tmp_path):
-    cm = _make_cfg(tmp_path)
+    cm = make_cfg(tmp_path)
     modules_root = tmp_path / "jarvis" / "modules"
     mod_dir = modules_root / "safe.three"
-    _write_module_json(
+    write_module_json(
         str(mod_dir),
         {
             "schema_version": 1,
@@ -81,7 +52,7 @@ def test_untrusted_module_blocked(tmp_path):
         },
     )
 
-    mm = ModuleManager(config_manager=cm, modules_root=str(modules_root), runtime_dir=str(tmp_path / "runtime"), event_bus=None, logger=_L(), security_manager=None)
+    mm = ModuleManager(config_manager=cm, modules_root=str(modules_root), runtime_dir=str(tmp_path / "runtime"), event_bus=None, logger=DummyLogger(), security_manager=None)
     _ = mm.scan(trace_id="t")
     reg = mm.list_registry().get("modules") or {}
     assert bool(reg["safe.three"]["enabled"]) is False
@@ -89,10 +60,10 @@ def test_untrusted_module_blocked(tmp_path):
 
 
 def test_admin_can_trust_module(tmp_path):
-    cm = _make_cfg(tmp_path)
+    cm = make_cfg(tmp_path)
     modules_root = tmp_path / "jarvis" / "modules"
     mod_dir = modules_root / "safe.three"
-    _write_module_json(
+    write_module_json(
         str(mod_dir),
         {
             "schema_version": 1,
@@ -132,7 +103,7 @@ def test_admin_can_trust_module(tmp_path):
 
     store = SecureStore(usb_key_path=str(tmp_path / "usb_missing.bin"), store_path=str(tmp_path / "store.enc"))
     sec = SecurityManager(secure_store=store, admin_session=AdminSession(timeout_seconds=9999))
-    mm = ModuleManager(config_manager=cm, modules_root=str(modules_root), runtime_dir=str(tmp_path / "runtime"), event_bus=None, logger=_L(), security_manager=sec)
+    mm = ModuleManager(config_manager=cm, modules_root=str(modules_root), runtime_dir=str(tmp_path / "runtime"), event_bus=None, logger=DummyLogger(), security_manager=sec)
     _ = mm.scan(trace_id="t")
 
     sec.admin_session.unlock()
@@ -142,11 +113,11 @@ def test_admin_can_trust_module(tmp_path):
 
 
 def test_dev_mode_override_logged(tmp_path):
-    cm = _make_cfg(tmp_path)
+    cm = make_cfg(tmp_path)
     cm.save_non_sensitive("module_trust.json", {"allow_unsigned_modules": False, "dev_mode_override": True})
     modules_root = tmp_path / "jarvis" / "modules"
     mod_dir = modules_root / "safe.three"
-    _write_module_json(
+    write_module_json(
         str(mod_dir),
         {
             "schema_version": 1,
@@ -184,8 +155,8 @@ def test_dev_mode_override_logged(tmp_path):
         },
     )
 
-    bus = _Bus()
-    mm = ModuleManager(config_manager=cm, modules_root=str(modules_root), runtime_dir=str(tmp_path / "runtime"), event_bus=bus, logger=_L(), security_manager=None)
+    bus = EventBusCapture()
+    mm = ModuleManager(config_manager=cm, modules_root=str(modules_root), runtime_dir=str(tmp_path / "runtime"), event_bus=bus, logger=DummyLogger(), security_manager=None)
     _ = mm.scan(trace_id="t")
 
     assert mm.is_module_enabled("safe.three") is True

@@ -37,7 +37,7 @@ def main() -> int:
 
         cfg_mgr = ConfigManager(logger=_Logger(), read_only=True)
         cfg_mgr.load_all()
-        _ = cfg_mgr.get()
+        cfg_obj = cfg_mgr.get()
 
         # ---- Instantiate CapabilityEngine + PolicyEngine ----
         from jarvis.core.capabilities.audit import CapabilityAuditLogger
@@ -105,6 +105,8 @@ def main() -> int:
                 capability_engine=cap_engine,
                 policy_engine=pol_engine,
                 secure_store=store,
+                inline_intent_allowlist=["music.play"],
+                execution_config=cfg_obj.execution.model_dump(),
             )
 
             res = dispatcher.dispatch(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from tests.helpers.fakes import FakeDispatcher
+
 
 def test_startup_fails_when_capability_engine_missing(tmp_path, monkeypatch):
     import jarvis.core.startup.checks as checks
@@ -52,6 +54,8 @@ def test_startup_fails_when_capability_engine_missing(tmp_path, monkeypatch):
     ops = OpsLogger(path=str(tmp_path / "ops.jsonl"))
     runner = StartupSelfCheckRunner(ops=ops)
     cfg = FakeConfig().get()
+    privacy_store = object()
+    dispatcher = FakeDispatcher(capability_engine=None, privacy_store=privacy_store)
     res = runner.run(
         flags=StartupFlags(),
         root_dir=str(tmp_path),
@@ -62,10 +66,10 @@ def test_startup_fails_when_capability_engine_missing(tmp_path, monkeypatch):
         cfg_obj=cfg,
         capabilities_cfg_raw={"capabilities": {}},
         core_ready={"capability_ok": True, "event_bus_ok": True, "telemetry_ok": True, "job_manager_ok": True, "error_policy_ok": True, "runtime_ok": True},
-        dispatcher=SimpleNamespace(capability_engine=None),
+        dispatcher=dispatcher,
         capability_engine=None,
         policy_engine=None,
-        privacy_store=object(),
+        privacy_store=privacy_store,
         modules_root=str(tmp_path / "jarvis" / "modules"),
     )
     assert res.overall_status.value == "BLOCKED"
@@ -122,7 +126,8 @@ def test_startup_fails_when_web_enabled_without_secure_store(tmp_path, monkeypat
 
     caps = validate_and_normalize(default_config_dict())
     cap_engine = CapabilityEngine(cfg=caps, audit=CapabilityAuditLogger(path=str(tmp_path / "security.jsonl")), logger=None)
-    dispatcher = SimpleNamespace(capability_engine=cap_engine)
+    privacy_store = object()
+    dispatcher = FakeDispatcher(capability_engine=cap_engine, privacy_store=privacy_store)
 
     ops = OpsLogger(path=str(tmp_path / "ops.jsonl"))
     runner = StartupSelfCheckRunner(ops=ops)
@@ -140,7 +145,7 @@ def test_startup_fails_when_web_enabled_without_secure_store(tmp_path, monkeypat
         dispatcher=dispatcher,
         capability_engine=cap_engine,
         policy_engine=None,
-        privacy_store=object(),
+        privacy_store=privacy_store,
         modules_root=str(tmp_path / "jarvis" / "modules"),
     )
     assert res.overall_status.value == "BLOCKED"

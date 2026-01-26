@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from tests.helpers.fakes import FakeDispatcher
+
 
 def test_dirty_shutdown_triggers_degraded(tmp_path, monkeypatch):
     import jarvis.core.startup.checks as checks
@@ -45,7 +47,8 @@ def test_dirty_shutdown_triggers_degraded(tmp_path, monkeypatch):
     cfg = FakeConfig().get()
     caps = validate_and_normalize(default_config_dict())
     cap_engine = CapabilityEngine(cfg=caps, audit=CapabilityAuditLogger(path=str(tmp_path / "security.jsonl")), logger=None)
-    dispatcher = SimpleNamespace(capability_engine=cap_engine)
+    privacy_store = object()
+    dispatcher = FakeDispatcher(capability_engine=cap_engine, privacy_store=privacy_store)
     res = runner.run(
         flags=StartupFlags(),
         root_dir=str(tmp_path),
@@ -59,7 +62,7 @@ def test_dirty_shutdown_triggers_degraded(tmp_path, monkeypatch):
         dispatcher=dispatcher,
         capability_engine=cap_engine,
         policy_engine=None,
-        privacy_store=object(),
+        privacy_store=privacy_store,
         modules_root=str(tmp_path / "jarvis" / "modules"),
     )
     assert res.overall_status.value in {"DEGRADED", "OK"}

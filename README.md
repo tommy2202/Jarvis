@@ -101,9 +101,84 @@ CLI commands:
 - `/audit export json|csv <path>`
 - `/audit purge` (admin-only; compacts to retention window)
 
+## Security enforcement chain (single enforcement point)
+
+Jarvis enforces a **single execution gate** for all actions:
+
+- **Dispatcher is the single enforcement point** (no side doors).
+- **Capabilities are authoritative**: `config/capabilities.json` is the source of truth, and module manifests must match intent requirements.
+- **Policy engine only restricts**: it can deny/require confirmation but cannot allow actions that capabilities deny.
+- **Privacy gate controls persistence**: when denied, execution is forced **ephemeral** and the Write API refuses persistent writes.
+- **Audit timeline is append-only** with hash chaining (tamper-evident).
+
+## Sandbox execution (Docker / WSL2)
+
+Jarvis can route risky executions to a **Docker sandbox**. This is optional but recommended for high-risk capabilities.
+
+### Install Docker Desktop + enable WSL2
+
+1) Install **Docker Desktop for Windows**.
+2) Enable WSL2 on Windows (PowerShell, admin):
+
+```powershell
+wsl --install
+```
+
+3) In Docker Desktop:
+   - Settings → General → **Use the WSL2 based engine**
+   - Settings → Resources → WSL Integration → enable your distro
+
+### Build the sandbox image
+
+```powershell
+docker build -f docker/sandbox/Dockerfile.sandbox -t jarvis-sandbox:latest .
+```
+
+### Configure execution.json (sandbox + fallback)
+
+`config/execution.json` controls execution routing:
+
+- `default_backend`: `sandbox` (recommended)
+- `fallback_backend`: `local_process` or `local_thread`
+- `sandbox.require_available`:
+  - `true`: **deny** risky execution if Docker is unavailable
+  - `false`: **fallback** to local runner with a loud audit event
+
+Example:
+
+```json
+{
+  "enabled": true,
+  "default_backend": "sandbox",
+  "fallback_backend": "local_process",
+  "sandbox": {
+    "require_available": true,
+    "image": "jarvis-sandbox:latest"
+  }
+}
+```
+
+### Security defaults (sandbox)
+
+- **Network disabled** (`--network none`)
+- **Input mounted read-only** (`/input`)
+- **Output mounted read-write** (`/output`)
+- **Work directory** is ephemeral (`/work`)
+- **No secure store / USB keys / secrets** are mounted into the container
+- Broker IPC (when used) is **localhost-only** with a short-lived token
+
+### Optional integration tests (Docker required)
+
+```powershell
+pytest -q tests/test_sandbox_fallback_behavior.py -k integration
+```
+
+See `docs/sandbox.md` for threat model and limitations.
+
 ## Policy engine (config-driven constraints)
 
-Jarvis enforces an additional **config-driven policy layer** (`config/policy.json`) inside the authorization chain:
+Jarvis enforces an additional **config-driven policy layer** (`config/policy.json`) inside the authorization chain.
+This layer is **restriction-only**: it can deny or require confirmation, but it never grants access that capabilities deny.
 
 `Intent router → Dispatcher → CapabilityEngine → PolicyEngine → (ResourceGovernor) → allow/deny`
 
@@ -145,6 +220,31 @@ Standalone scripts:
 
 ## Windows setup
 
+## Dependency lock (pip-tools)
+
+Jarvis uses a deterministic dependency lock for offline installs:
+
+- Source: `requirements.in`
+- Lock: `requirements.txt` (pinned + hashes)
+
+Generate/refresh the lock file:
+
+```powershell
+.\scripts\lock_deps.ps1
+```
+
+Verify the lock file (offline, no network required):
+
+```powershell
+.\scripts\verify_deps.ps1
+```
+
+Install from the lock file (offline-ready if wheels are pre-downloaded):
+
+```powershell
+pip install --require-hashes -r requirements.txt
+```
+
 ### 1) Create a venv + install dependencies
 
 ```bash
@@ -152,6 +252,20 @@ py -3.11 -m venv .venv
 .venv\Scripts\activate
 python -m pip install -U pip
 pip install -e ".[dev]"
+```
+
+### Dev check (Windows)
+
+Run unit tests + core smoke checks (no web/UI launch):
+
+```powershell
+.\scripts\dev_check.ps1
+```
+
+Or run unit tests directly:
+
+```powershell
+pytest -q
 ```
 
 ### 2) Create the USB key (required for admin + secure store + web API key)
@@ -324,7 +438,7 @@ Config:
 
 ## Capabilities (unified policy enforcement)
 
-Jarvis uses a **central capability model** as the source of truth for permissions. Capabilities are **independent of intents/modules** and are enforced **only in the dispatcher**.
+Jarvis uses a **central capability model** as the source of truth for permissions. Capabilities are **independent of intents/modules** and are enforced **only in the dispatcher**. Module manifests must match `intent_requirements` in `config/capabilities.json`.
 
 Config:
 - `config/capabilities.json` defines:
@@ -426,40 +540,31 @@ Lockout state is persisted in the encrypted secure store.
 Security events are written to:
 - `logs/security.jsonl` (JSONL)
 
-## Adding a module (setup wizard workflow)
+## How to safely add a module (checklist)
 
-Module discovery never imports modules; it reads manifest files or static `MODULE_META` literals.
+Jarvis discovers modules **without importing code** by reading `module.json` under `jarvis/modules/<module_id>/`.
 
-1) Drop a new module file in `jarvis/modules/` with:
-- `MODULE_META = {"id": "...", ...}`
-- `handle(intent_id, args, context) -> dict`
+Checklist:
 
-2) Add it to `config/modules_registry.json` (or let the wizard detect it):
+1) Create `jarvis/modules/<module_id>/module.json` (or generate a template):
+   - CLI: `/modules repair <module_id>` (safe; no imports)
+2) Fill in the manifest contract:
+   - `intents[].required_capabilities`
+   - `intents[].resource_class`
+   - `intents[].execution_mode` (default is `process` for non-core)
+3) Update capability mappings:
+   - `config/capabilities.json` → `intent_requirements` **must match the manifest**
+4) Update routing:
+   - `config/modules.json` → keywords/required_args
+5) Run discovery and verify status:
+   - `/modules scan`
+   - `/modules` should show `INSTALLED_DISABLED` or `INSTALLED_ENABLED` (not `BLOCKED` / `PENDING_INSTALL`)
+6) Admin unlock then enable if appropriate:
+   - `/modules enable <module_id>`
+7) Test and inspect denials:
+   - Use `/why <trace_id>` for standardized denial breakdowns
 
-```json
-{
-  "modules": [
-    {"module":"jarvis.modules.my_new_module","enabled": false}
-  ]
-}
-```
-
-3) Restart `python app.py`.
-If the module is missing routing/permissions/confirmation config, Jarvis will prompt you through setup:
-- admin-only?
-- resource-intensive? (forces admin-only)
-- needs network?
-- keywords for routing
-- confirmation template
-
-Non-sensitive values go to `config/*.json`.
-Secrets (if the module declares them) go into the **encrypted secure store** (USB required).
-
-To run the wizard manually:
-
-```bash
-python scripts/jarvis_setup.py
-```
+Secrets (if a module declares them) go into the **encrypted secure store** (USB required).
 
 ## Local model server (optional)
 

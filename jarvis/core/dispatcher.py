@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import multiprocessing
 import traceback
-import contextvars
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,9 +17,11 @@ from jarvis.core.privacy.gates import PrivacyGate, persistence_context
 from jarvis.core.limits.limiter import Limiter
 from jarvis.core.trace import reset_trace_id, set_trace_id
 from jarvis.core.ux.primitives import acknowledge, completed, failed
+from jarvis.core.execution.models import ExecutionBackend, ExecutionPlan, ExecutionRequest
+from jarvis.core.execution.local_runner import LocalExecutionRunner
+from jarvis.core.execution.sandbox_runner import SandboxExecutionRunner
+from jarvis.core.execution.router import select_backend
 
-
-INLINE_SAFE_CAPS = {"CAP_AUDIO_OUTPUT", "CAP_READ_FILES"}
 
 
 def _dispatcher_subprocess_worker(q, module_path: str, intent_id: str, args: Dict[str, Any], context: Dict[str, Any]) -> None:  # noqa: ANN001
@@ -28,6 +29,8 @@ def _dispatcher_subprocess_worker(q, module_path: str, intent_id: str, args: Dic
     Top-level worker for multiprocessing spawn (Windows-safe).
     """
     try:
+        if not bool((context or {}).get("_dispatcher_execute", False)):
+            raise RuntimeError("Unsafe subprocess handler call detected. Use Dispatcher.dispatch().")
         import importlib
 
         m = importlib.import_module(module_path)
@@ -62,6 +65,7 @@ class JobSubmitResult:
     denied_reason: Optional[str] = None
     remediation: str = ""
     required_capabilities: List[str] | None = None
+    decision_breakdown: Optional[Dict[str, Any]] = None
 
 
 class Dispatcher:
@@ -94,6 +98,9 @@ class Dispatcher:
         limiter: Limiter | None = None,
         feature_flags: Any = None,
         lockdown_manager: Any = None,
+        inline_intent_allowlist: Optional[List[str]] = None,
+        tool_broker: Any = None,
+        execution_config: Optional[Dict[str, Any]] = None,
     ):
         self.registry = registry
         self.policy = policy
@@ -115,6 +122,36 @@ class Dispatcher:
         self.limiter = limiter
         self.feature_flags = feature_flags
         self.lockdown_manager = lockdown_manager
+        self.inline_intent_allowlist = {str(x).strip() for x in (inline_intent_allowlist or []) if str(x or "").strip()}
+        self.tool_broker = tool_broker
+        self.execution_config = execution_config or {}
+        self.local_runner = LocalExecutionRunner()
+        self.sandbox_runner = None
+
+    def _get_sandbox_runner(self) -> SandboxExecutionRunner:
+        if self.sandbox_runner is None:
+            self.sandbox_runner = SandboxExecutionRunner(
+                config=self._execution_cfg(),
+                logger=self.logger,
+                capability_engine=self.capability_engine,
+                policy_engine=self._policy_engine(),
+                security_manager=self.security,
+                event_logger=self.event_logger,
+                event_bus=self.event_bus,
+            )
+        else:
+            try:
+                self.sandbox_runner.update_config(self._execution_cfg())
+            except Exception:
+                pass
+        return self.sandbox_runner
+
+    def _sandbox_available(self) -> bool:
+        try:
+            runner = self._get_sandbox_runner()
+            return bool(runner.is_available())
+        except Exception:
+            return False
 
     @staticmethod
     def _ux_action_label(intent_id: str, module_id: str) -> str:
@@ -151,6 +188,8 @@ class Dispatcher:
         denied_caps: Optional[List[str]] = None,
         reason: str = "",
         remediation: str = "",
+        denied_by: str = "",
+        decision_breakdown: Optional[Dict[str, Any]] = None,
     ) -> None:
         payload = {
             "trace_id": trace_id,
@@ -160,9 +199,14 @@ class Dispatcher:
             "args": redact(args or {}),
         }
         if not allowed:
+            denied_reason = str(reason or "")[:200]
             payload["denied_caps"] = list(denied_caps or [])
-            payload["reason"] = str(reason or "")[:200]
+            payload["reason"] = denied_reason
+            payload["denied_reason"] = denied_reason
             payload["remediation"] = str(remediation or "")[:200]
+            payload["denied_by"] = str(denied_by or "capabilities")
+            if isinstance(decision_breakdown, dict):
+                payload["decision_breakdown"] = decision_breakdown
         self.event_logger.log(trace_id, "job.submit.allowed" if allowed else "job.submit.denied", payload)
         if self.event_bus is None:
             return
@@ -447,9 +491,18 @@ class Dispatcher:
         denied_reason: str,
         reply: str,
         remediation: str = "",
+        denied_by: str = "",
         denied_caps: Optional[List[str]] = None,
         args: Optional[Dict[str, Any]] = None,
     ) -> JobSubmitResult:
+        denied_by = str(denied_by or "capabilities")
+        remediation = remediation or "Review logs for details."
+        breakdown = {
+            "denied_by": denied_by,
+            "reason_code": str(denied_reason or ""),
+            "remediation": str(remediation or "")[:300],
+            "trace_id": trace_id,
+        }
         self._emit_job_submit_event(
             trace_id,
             allowed=False,
@@ -460,6 +513,8 @@ class Dispatcher:
             denied_caps=list(denied_caps or []),
             reason=denied_reason,
             remediation=remediation,
+            denied_by=denied_by,
+            decision_breakdown=breakdown,
         )
         return JobSubmitResult(
             ok=False,
@@ -468,6 +523,7 @@ class Dispatcher:
             denied_reason=denied_reason,
             remediation=str(remediation or "")[:300],
             required_capabilities=list(required_caps or []),
+            decision_breakdown=breakdown,
         )
 
     def submit_job(
@@ -497,6 +553,7 @@ class Dispatcher:
                     denied_reason="lockdown_active",
                     reply="Lockdown mode active. Job submission is restricted.",
                     remediation="Admin can exit lockdown explicitly.",
+                    denied_by="lockdown",
                     args=args,
                 )
 
@@ -509,6 +566,7 @@ class Dispatcher:
                     denied_reason="job_manager_unavailable",
                     reply="Job system unavailable.",
                     remediation="Start the job manager before submitting jobs.",
+                    denied_by="system",
                     args=args,
                 )
 
@@ -522,6 +580,7 @@ class Dispatcher:
                     denied_reason="unknown_job_kind",
                     reply="Unknown job kind.",
                     remediation="Check the job kind allowlist.",
+                    denied_by="job_registry",
                     args=args,
                 )
 
@@ -540,6 +599,7 @@ class Dispatcher:
                     denied_reason="capability_engine_missing",
                     reply="I can’t submit jobs because enforcement is not configured.",
                     remediation="Initialize the capability engine (config/capabilities.json).",
+                    denied_by="capabilities",
                     args=args,
                 )
 
@@ -568,6 +628,7 @@ class Dispatcher:
                             denied_reason="rate_limited",
                             reply="I’m throttling requests to prevent overload.",
                             remediation=remediation,
+                            denied_by="limits",
                             denied_caps=[],
                             args=args,
                         )
@@ -581,6 +642,7 @@ class Dispatcher:
                 {"allowed": dec.allowed, "required": dec.required_capabilities, "denied": dec.denied_capabilities, "reasons": dec.reasons, "remediation": dec.remediation[:200]},
             )
             if not bool(dec.allowed):
+                denied_by = self._capability_denied_by(ctx, dec)
                 return self._job_submit_denied(
                     trace_id,
                     source=source,
@@ -589,6 +651,7 @@ class Dispatcher:
                     denied_reason="capability_denied",
                     reply="Job submission denied.",
                     remediation=str(dec.remediation or "")[:200],
+                    denied_by=denied_by,
                     denied_caps=list(dec.denied_capabilities or []),
                     args=args,
                 )
@@ -633,6 +696,7 @@ class Dispatcher:
                                 denied_reason="confirmation_required",
                                 reply=str(pdec.remediation or "Confirmation required.")[:300],
                                 remediation="Reply 'confirm' to proceed or 'cancel' to abort.",
+                                denied_by="policy",
                                 args=args,
                             )
                         return self._job_submit_denied(
@@ -643,6 +707,7 @@ class Dispatcher:
                             denied_reason="policy_denied",
                             reply="Job submission denied.",
                             remediation=str(pdec.remediation or pdec.final_reason or "Denied by policy.")[:200],
+                            denied_by="policy",
                             args=args,
                         )
                 except Exception:
@@ -673,6 +738,7 @@ class Dispatcher:
                     denied_reason="job_submit_invalid",
                     reply=str(e),
                     remediation="Validate job arguments and try again.",
+                    denied_by="validation",
                     args=args,
                 )
             self._emit_job_submit_event(
@@ -728,6 +794,42 @@ class Dispatcher:
             return "inline"
         return ""
 
+    def _inline_allowed(self, *, intent_id: str, required_caps: List[str]) -> bool:
+        if intent_id not in self.inline_intent_allowlist:
+            return False
+        try:
+            from jarvis.core.modules.manager import DISALLOWED_CAPS
+
+            risky_caps = set(DISALLOWED_CAPS)
+        except Exception:
+            risky_caps = set()
+        if any(c in risky_caps for c in (required_caps or [])):
+            return False
+        return True
+
+    def _execution_cfg(self) -> Dict[str, Any]:
+        cfg = dict(self.execution_config or {})
+        cfg.setdefault("enabled", True)
+        if not str(cfg.get("default_backend") or "").strip():
+            cfg["default_backend"] = "local_process"
+        if not str(cfg.get("fallback_backend") or "").strip():
+            cfg["fallback_backend"] = "local_process"
+        sandbox = cfg.get("sandbox")
+        if not isinstance(sandbox, dict):
+            sandbox = {}
+        sandbox.setdefault("require_available", True)
+        cfg["sandbox"] = sandbox
+
+        allow_inline = cfg.get("allow_inline_intents")
+        if allow_inline is None:
+            allow_inline = list(self.inline_intent_allowlist or [])
+        if isinstance(allow_inline, str):
+            allow_inline = [allow_inline]
+        if not isinstance(allow_inline, list):
+            allow_inline = []
+        cfg["allow_inline_intents"] = [str(x).strip() for x in allow_inline if str(x or "").strip()]
+        return cfg
+
     @staticmethod
     def _capability_denied_by(ctx: RequestContext, dec) -> str:  # noqa: ANN001
         reasons = [str(r or "").lower() for r in (getattr(dec, "reasons", None) or [])]
@@ -747,11 +849,14 @@ class Dispatcher:
         args: Dict[str, Any],
         context: Dict[str, Any],
         persist_allowed: bool,
+        internal_call: bool = False,
     ) -> Dict[str, Any]:
         """
         Safe execution facade for module handlers.
         Use this instead of accessing LoadedModule.handler directly.
         """
+        if not bool(internal_call):
+            raise RuntimeError("Dispatcher.execute_loaded_module is internal; use Dispatcher.dispatch().")
         handler = getattr(loaded, "_unsafe_handler", None)
         if not callable(handler):
             raise RuntimeError("Loaded module missing handler.")
@@ -759,13 +864,17 @@ class Dispatcher:
         ctx = dict(context or {})
         ctx["_dispatcher_execute"] = True
         with persistence_context(persist_allowed=persist_allowed):
-            return loaded._call_unsafe(intent_id=intent_id, args=args, context=ctx)
+            return loaded._call_unsafe(intent_id=intent_id, args=args, context=ctx, internal_call=True)
 
     @staticmethod
-    def _run_in_subprocess(module_path: str, intent_id: str, args: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    def _run_in_subprocess(module_path: str, intent_id: str, args: Dict[str, Any], context: Dict[str, Any], *, internal_call: bool = False) -> Dict[str, Any]:
         """
         Windows-safe subprocess execution helper (spawn-friendly).
         """
+        if not bool(internal_call):
+            raise RuntimeError("Dispatcher._run_in_subprocess is internal; use Dispatcher.dispatch().")
+        if not bool((context or {}).get("_dispatcher_execute", False)):
+            raise RuntimeError("Unsafe subprocess handler call detected. Use Dispatcher.dispatch().")
 
         mp = multiprocessing.get_context("spawn")
         q: Any = mp.Queue()
@@ -1026,10 +1135,6 @@ class Dispatcher:
                 )
             if not exec_mode_norm:
                 exec_mode_norm = "process"
-            inline_allowed = bool(is_core) or set(required_caps).issubset(INLINE_SAFE_CAPS)
-            exec_mode_effective = exec_mode_norm
-            if exec_mode_norm in {"inline", "thread"} and not inline_allowed:
-                exec_mode_effective = "process"
 
             # Build context (includes source/is_admin/safe_mode/shutting_down/trace_id)
             ctx = self._build_request_context(trace_id, intent_id=intent_id, mod_meta=(mod.meta or {}), context=(context or {}))
@@ -1178,9 +1283,64 @@ class Dispatcher:
                 except Exception:
                     pmods = {}
 
+            exec_cfg = self._execution_cfg()
+            sandbox_available = self._sandbox_available()
+            base_request = ExecutionRequest(
+                trace_id=trace_id,
+                intent_id=intent_id,
+                module_id=module_id,
+                args=dict(args or {}),
+                context=dict(context or {}),
+                required_capabilities=list(dec.required_capabilities or required_caps),
+                execution_mode=exec_mode_norm,
+                is_core=bool(is_core),
+                allow_inline_intents=list(exec_cfg.get("allow_inline_intents") or []),
+                default_backend=str(exec_cfg.get("default_backend") or "local_process"),
+                fallback_backend=str(exec_cfg.get("fallback_backend") or "local_process"),
+                sandbox_require_available=bool((exec_cfg.get("sandbox") or {}).get("require_available", True)),
+                sandbox_available=sandbox_available,
+                module_path=str(getattr(mod, "module_path", "") or ""),
+                loaded_module=mod,
+                persist_allowed=True,
+                tool_broker=self.tool_broker,
+            )
+            if not bool(exec_cfg.get("enabled", True)):
+                plan = ExecutionPlan(backend=ExecutionBackend.local_process, mode="process", reason="execution_disabled", fallback_used=False)
+            else:
+                plan = select_backend(base_request)
+            if plan.backend == ExecutionBackend.sandbox and bool((exec_cfg.get("sandbox") or {}).get("require_available", True)) and not sandbox_available:
+                return self._deny(
+                    trace_id,
+                    intent_id=intent_id,
+                    module_id=module_id,
+                    denied_by="execution",
+                    denied_reason="sandbox_unavailable",
+                    reply="Sandbox backend unavailable.",
+                    remediation="Install/start Docker or set execution.sandbox.require_available=false to allow local fallback.",
+                    details={"backend": plan.backend.value, "reason": plan.reason},
+                    ux_events=ux_events,
+                    ux_action=ux_action,
+                )
+            if plan.fallback_used:
+                fallback_payload = {"intent_id": intent_id, "module_id": module_id, "backend": plan.backend.value, "reason": plan.reason}
+                self.event_logger.log(trace_id, "execution.sandbox_fallback", fallback_payload)
+                if self.event_bus is not None:
+                    try:
+                        self.event_bus.publish_nowait(
+                            BaseEvent(
+                                event_type="execution.sandbox_fallback",
+                                trace_id=trace_id,
+                                source_subsystem=SourceSubsystem.dispatcher,
+                                severity=EventSeverity.WARN,
+                                payload=fallback_payload,
+                            )
+                        )
+                    except Exception:
+                        pass
+
             admitted_heavy_slot = False
             rg = None
-            if exec_mode_effective == "process":
+            if plan.backend == ExecutionBackend.local_process:
                 rg = getattr(self.capability_engine, "resource_governor", None)
                 if rg is not None:
                     try:
@@ -1264,27 +1424,38 @@ class Dispatcher:
                             )
                         except Exception:
                             pass
+                exec_request = base_request.model_copy(update={"context": context, "persist_allowed": bool(persist_allowed), "execution_plan": plan})
                 self.event_logger.log(trace_id, "dispatch.execute", {"module_id": module_id, "intent_id": intent_id})
-                exec_mode = exec_mode_effective
-                if exec_mode == "thread":
-                    from concurrent.futures import ThreadPoolExecutor
-
-                    with ThreadPoolExecutor(max_workers=1) as ex:
-                        # Ensure persistence context propagates into thread execution.
-                        cv = contextvars.copy_context()
-
-                        def _run():  # noqa: ANN001
-                            return self.execute_loaded_module(mod, intent_id=intent_id, args=args, context=context, persist_allowed=persist_allowed)
-
-                        fut = ex.submit(cv.run, _run)
-                        out = fut.result(timeout=30.0)
-                elif exec_mode == "process":
-                    # process isolation: pass ephemeral flag via context (best effort)
-                    ctx = dict(context or {})
-                    ctx["_dispatcher_execute"] = True
-                    out = self._run_in_subprocess(getattr(mod, "module_path", ""), intent_id, args or {}, ctx)
+                if plan.backend == ExecutionBackend.sandbox:
+                    result = self._get_sandbox_runner().run(request=exec_request, plan=plan)
                 else:
-                    out = self.execute_loaded_module(mod, intent_id=intent_id, args=args, context=context, persist_allowed=persist_allowed)
+                    result = self.local_runner.run(request=exec_request, plan=plan, dispatcher=self)
+                payload = {
+                    "intent_id": intent_id,
+                    "module_id": module_id,
+                    "backend": plan.backend.value,
+                    "mode": plan.mode,
+                    "ok": bool(result.ok),
+                }
+                if not result.ok:
+                    payload["error"] = str(result.error or "")[:200]
+                self.event_logger.log(trace_id, "execution.result", payload)
+                if self.event_bus is not None:
+                    try:
+                        self.event_bus.publish_nowait(
+                            BaseEvent(
+                                event_type="execution.result",
+                                trace_id=trace_id,
+                                source_subsystem=SourceSubsystem.dispatcher,
+                                severity=EventSeverity.INFO if result.ok else EventSeverity.WARN,
+                                payload=payload,
+                            )
+                        )
+                    except Exception:
+                        pass
+                if not result.ok:
+                    raise RuntimeError(str(result.error or "Execution failed."))
+                out = result.output or {}
                 summary = ""
                 if isinstance(out, dict):
                     summary = str(out.get("summary") or out.get("message") or "")

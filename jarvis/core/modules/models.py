@@ -185,9 +185,27 @@ class ModuleTrustConfigFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     allow_unsigned_modules: bool = False
+    trusted_module_ids: List[str] = Field(default_factory=list)
     dev_mode_override: bool = False
     dev_mode: bool = False
     scan_mode: str = "startup_only"
+
+    @field_validator("trusted_module_ids", mode="before")
+    @classmethod
+    def _normalize_trusted_module_ids(cls, v: Any) -> List[str]:
+        if v is None:
+            return []
+        if isinstance(v, str):
+            v = [v]
+        if isinstance(v, list):
+            out: List[str] = []
+            for item in v:
+                s = str(item or "").strip()
+                if not s:
+                    continue
+                out.append(s)
+            return sorted(set(out))
+        return []
 
 
 def default_module_trust_config_dict() -> Dict[str, Any]:

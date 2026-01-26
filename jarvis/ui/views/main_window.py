@@ -61,7 +61,14 @@ class MainWindow(ttk.Frame):
         bottom.grid(row=5, column=0, sticky="nsew", padx=8, pady=(6, 8))
 
         self.jobs = JobsPanel(bottom, on_cancel=self._on_cancel_job, on_view=self._on_view_job)
-        self.logs = LogsPanel(bottom, on_refresh=self._refresh_logs, on_export=self._export_logs, on_modules_scan=self._on_modules_scan, on_modules_toggle=self._on_modules_toggle)
+        self.logs = LogsPanel(
+            bottom,
+            on_refresh=self._refresh_logs,
+            on_export=self._export_logs,
+            on_modules_scan=self._on_modules_scan,
+            on_modules_toggle=self._on_modules_toggle,
+            on_modules_repair=self._on_modules_repair,
+        )
         bottom.add(self.jobs, weight=1)
         bottom.add(self.logs, weight=2)
 
@@ -166,7 +173,7 @@ class MainWindow(ttk.Frame):
             self.logs.set_errors(self.core.get_recent_errors(n=n))
             self.logs.set_security(self.core.get_recent_security_events(n=n))
             self.logs.set_system_lines(self.core.get_recent_system_logs(n=n))
-            denies = getattr(self.core, "get_recent_denials", lambda n=30: [])(n=min(200, n))
+            denies = getattr(self.core, "get_recent_denials", lambda n=30: [])(n=50)
             if denies is not None:
                 self.logs.set_denials(denies)
             audit_lines = getattr(self.core, "get_audit_tail", lambda n=30: [])(n=min(200, n))
@@ -190,6 +197,16 @@ class MainWindow(ttk.Frame):
             if callable(fn):
                 _ = fn()
                 self.convo.append(role="system", message="Modules scan started.")
+        except Exception as e:  # noqa: BLE001
+            self._ui_error(e)
+
+    def _on_modules_repair(self, module_id: str) -> None:
+        try:
+            fn = getattr(self.core, "modules_repair", None)
+            if callable(fn):
+                res = fn(module_id)
+                msg = "Manifest repair completed." if bool((res or {}).get("ok")) else "Manifest repair failed."
+                self.convo.append(role="system", message=msg)
         except Exception as e:  # noqa: BLE001
             self._ui_error(e)
 

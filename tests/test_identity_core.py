@@ -77,7 +77,17 @@ def test_active_user_in_request_context(tmp_path):
 
     reg = ModuleRegistry()
     reg.register_handler(module_id="m", module_path="test.m", meta={"resource_class": "light", "execution_mode": "inline", "required_capabilities": []}, handler=lambda **_k: {"ok": True})
-    disp = Dispatcher(registry=reg, policy=PermissionPolicy(intents={}), security=sec, event_logger=EventLogger(str(tmp_path / "e.jsonl")), logger=_L(), capability_engine=eng, secure_store=sec.secure_store, identity_manager=im)
+    disp = Dispatcher(
+        registry=reg,
+        policy=PermissionPolicy(intents={}),
+        security=sec,
+        event_logger=EventLogger(str(tmp_path / "e.jsonl")),
+        logger=_L(),
+        capability_engine=eng,
+        secure_store=sec.secure_store,
+        identity_manager=im,
+        inline_intent_allowlist=["x.intent"],
+    )
 
     _ = disp.dispatch("t", "x.intent", "m", {}, {"source": "cli"})
     assert seen["user_id"] == im.get_active_user().user_id

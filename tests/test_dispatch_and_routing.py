@@ -39,7 +39,16 @@ def test_stage_a_match_and_confirmation(tmp_path):
     policy = PermissionPolicy(intents={"music.play": {"requires_admin": False, "resource_intensive": False}})
     caps_cfg = validate_and_normalize(default_config_dict())
     eng = CapabilityEngine(cfg=caps_cfg, audit=CapabilityAuditLogger(path=str(tmp_path / "security.jsonl")), logger=None)
-    dispatcher = Dispatcher(registry=registry, policy=policy, security=sec, event_logger=EventLogger(str(tmp_path / "e.jsonl")), logger=DummyLogger(), capability_engine=eng, secure_store=sec.secure_store)
+    dispatcher = Dispatcher(
+        registry=registry,
+        policy=policy,
+        security=sec,
+        event_logger=EventLogger(str(tmp_path / "e.jsonl")),
+        logger=DummyLogger(),
+        capability_engine=eng,
+        secure_store=sec.secure_store,
+        inline_intent_allowlist=["music.play"],
+    )
 
     jarvis = JarvisApp(
         stage_a=stage_a,
@@ -68,7 +77,16 @@ def test_admin_gating_denies_without_admin(tmp_path):
     policy = PermissionPolicy(intents={"anime_dubbing.run": {"requires_admin": True, "resource_intensive": True}})
     caps_cfg = validate_and_normalize(default_config_dict())
     eng = CapabilityEngine(cfg=caps_cfg, audit=CapabilityAuditLogger(path=str(tmp_path / "security.jsonl")), logger=None)
-    dispatcher = Dispatcher(registry=registry, policy=policy, security=sec, event_logger=EventLogger(str(tmp_path / "e.jsonl")), logger=DummyLogger(), capability_engine=eng, secure_store=sec.secure_store)
+    dispatcher = Dispatcher(
+        registry=registry,
+        policy=policy,
+        security=sec,
+        event_logger=EventLogger(str(tmp_path / "e.jsonl")),
+        logger=DummyLogger(),
+        capability_engine=eng,
+        secure_store=sec.secure_store,
+        inline_intent_allowlist=["anime_dubbing.run"],
+    )
 
     jarvis = JarvisApp(
         stage_a=stage_a,
@@ -95,7 +113,16 @@ def test_llm_unknown_intent_refused(tmp_path):
     policy = PermissionPolicy(intents={"music.play": {"requires_admin": False, "resource_intensive": False}})
     caps_cfg = validate_and_normalize(default_config_dict())
     eng = CapabilityEngine(cfg=caps_cfg, audit=CapabilityAuditLogger(path=str(tmp_path / "security.jsonl")), logger=None)
-    dispatcher = Dispatcher(registry=registry, policy=policy, security=sec, event_logger=EventLogger(str(tmp_path / "e.jsonl")), logger=DummyLogger(), capability_engine=eng, secure_store=sec.secure_store)
+    dispatcher = Dispatcher(
+        registry=registry,
+        policy=policy,
+        security=sec,
+        event_logger=EventLogger(str(tmp_path / "e.jsonl")),
+        logger=DummyLogger(),
+        capability_engine=eng,
+        secure_store=sec.secure_store,
+        inline_intent_allowlist=["music.play"],
+    )
 
     jarvis = JarvisApp(
         stage_a=stage_a,

@@ -244,6 +244,23 @@ class ModulesRegistryConfig(BaseModel):
     modules: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+def _default_inline_intent_allowlist() -> List[str]:
+    try:
+        from jarvis.core.core_intents import CoreIntentRegistry
+
+        return CoreIntentRegistry().get_fact_intents()
+    except Exception:
+        return [
+            "core.time.now",
+            "core.date.today",
+            "core.status.listening",
+            "core.status.admin",
+            "core.status.busy",
+            "core.status.health",
+            "core.identity.version",
+        ]
+
+
 class ModulesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # NOTE:
@@ -252,6 +269,7 @@ class ModulesConfig(BaseModel):
     # while keeping backwards compatibility with existing `intents` consumers.
     schema_version: int = 1
     intents: List[Dict[str, Any]] = Field(default_factory=list)
+    inline_intent_allowlist: List[str] = Field(default_factory=lambda: _default_inline_intent_allowlist())
     # Installed registry: module_id -> record (see jarvis.core.modules.models)
     modules: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
@@ -283,6 +301,60 @@ class ModulesConfig(BaseModel):
                 out2[str(mid)] = dict(item)
             return out2
         return {}
+
+    @field_validator("inline_intent_allowlist", mode="before")
+    @classmethod
+    def _coerce_inline_allowlist(cls, v: Any) -> List[str]:
+        if v is None:
+            return _default_inline_intent_allowlist()
+        if isinstance(v, str):
+            v = [v]
+        if isinstance(v, list):
+            out: List[str] = []
+            for item in v:
+                s = str(item or "").strip()
+                if not s:
+                    continue
+                out.append(s)
+            return sorted(set(out))
+        return _default_inline_intent_allowlist()
+
+
+class ExecutionConfigFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    default_backend: str = "sandbox"
+    fallback_backend: str = "local_process"
+    sandbox: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "require_available": True,
+            "image": "jarvis-sandbox:latest",
+            "cpus": 1,
+            "memory_mb": 512,
+            "pids_limit": 256,
+            "timeout_seconds": 30,
+            "work_root": "runtime/sandbox",
+        }
+    )
+    allow_inline_intents: List[str] = Field(default_factory=lambda: _default_inline_intent_allowlist())
+
+    @field_validator("allow_inline_intents", mode="before")
+    @classmethod
+    def _coerce_inline_allowlist(cls, v: Any) -> List[str]:
+        if v is None:
+            return _default_inline_intent_allowlist()
+        if isinstance(v, str):
+            v = [v]
+        if isinstance(v, list):
+            out: List[str] = []
+            for item in v:
+                s = str(item or "").strip()
+                if not s:
+                    continue
+                out.append(s)
+            return sorted(set(out))
+        return _default_inline_intent_allowlist()
 
 
 class PermissionsConfig(BaseModel):
@@ -328,6 +400,7 @@ class AppConfigV2(BaseModel):
     ui: UiConfig
     telemetry: TelemetryConfigFile
     resources: ResourcesConfigFile
+    execution: ExecutionConfigFile
     audit: AuditConfigFile
     policy: PolicyConfigFile
     backup: BackupConfigFile

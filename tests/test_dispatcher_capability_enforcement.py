@@ -44,7 +44,16 @@ def test_dispatcher_blocks_execution_when_capability_denied(tmp_path, monkeypatc
     cfg.intent_requirements["music.play"] = ["CAP_ADMIN_ACTION"]
     eng = CapabilityEngine(cfg=cfg, audit=CapabilityAuditLogger(path=str(tmp_path / "security.jsonl")), logger=None)
 
-    disp = Dispatcher(registry=reg, policy=policy, security=sec, event_logger=EventLogger(str(tmp_path / "events.jsonl")), logger=type("L", (), {"error": lambda *_a, **_k: None})(), capability_engine=eng, secure_store=store)
+    disp = Dispatcher(
+        registry=reg,
+        policy=policy,
+        security=sec,
+        event_logger=EventLogger(str(tmp_path / "events.jsonl")),
+        logger=type("L", (), {"error": lambda *_a, **_k: None})(),
+        capability_engine=eng,
+        secure_store=store,
+        inline_intent_allowlist=["music.play"],
+    )
 
     r = disp.dispatch("t1", "music.play", "music", {"song": "x", "service": "y"}, {"client": {"source": "cli"}})
     assert r.ok is False
@@ -80,7 +89,16 @@ def test_dispatcher_allows_when_capability_allows(tmp_path, monkeypatch):
     cfg = validate_and_normalize(default_config_dict())
     eng = CapabilityEngine(cfg=cfg, audit=CapabilityAuditLogger(path=str(tmp_path / "security.jsonl")), logger=None)
 
-    disp = Dispatcher(registry=reg, policy=policy, security=sec, event_logger=EventLogger(str(tmp_path / "events.jsonl")), logger=type("L", (), {"error": lambda *_a, **_k: None})(), capability_engine=eng, secure_store=store)
+    disp = Dispatcher(
+        registry=reg,
+        policy=policy,
+        security=sec,
+        event_logger=EventLogger(str(tmp_path / "events.jsonl")),
+        logger=type("L", (), {"error": lambda *_a, **_k: None})(),
+        capability_engine=eng,
+        secure_store=store,
+        inline_intent_allowlist=["music.play"],
+    )
     r = disp.dispatch("t2", "music.play", "music", {"song": "x", "service": "y"}, {"client": {"source": "cli"}})
     assert r.ok is True
     assert called["n"] == 1

@@ -28,6 +28,7 @@ class DataCategory(str, Enum):
     MODULES = "MODULES"
     JOB_ARTIFACT = "JOB_ARTIFACT"
     TRANSCRIPT = "TRANSCRIPT"
+    MEMORY = "MEMORY"
 
 
 class Sensitivity(str, Enum):
@@ -233,6 +234,7 @@ class PrivacyConfigFile(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    enabled: bool = True
     schema_version: int = Field(default=1, ge=1, le=10)
     default_user_id: str = Field(default="default", min_length=1, max_length=64)
     data_minimization: Dict[str, Any] = Field(
@@ -262,6 +264,7 @@ class PrivacyConfigFile(BaseModel):
             {"data_category": "MODULES", "sensitivity": "LOW", "ttl_days": 90, "deletion_action": "delete", "review_required": False},
             {"data_category": "JOB_ARTIFACT", "sensitivity": "MEDIUM", "ttl_days": 30, "deletion_action": "delete", "review_required": True},
             {"data_category": "TRANSCRIPT", "sensitivity": "HIGH", "ttl_days": 7, "deletion_action": "delete", "review_required": False},
+            {"data_category": "MEMORY", "sensitivity": "HIGH", "ttl_days": 30, "deletion_action": "delete", "review_required": True},
         ]
     )
 
