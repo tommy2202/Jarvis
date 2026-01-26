@@ -111,6 +111,70 @@ Jarvis enforces a **single execution gate** for all actions:
 - **Privacy gate controls persistence**: when denied, execution is forced **ephemeral** and the Write API refuses persistent writes.
 - **Audit timeline is append-only** with hash chaining (tamper-evident).
 
+## Sandbox execution (Docker / WSL2)
+
+Jarvis can route risky executions to a **Docker sandbox**. This is optional but recommended for high-risk capabilities.
+
+### Install Docker Desktop + enable WSL2
+
+1) Install **Docker Desktop for Windows**.
+2) Enable WSL2 on Windows (PowerShell, admin):
+
+```powershell
+wsl --install
+```
+
+3) In Docker Desktop:
+   - Settings → General → **Use the WSL2 based engine**
+   - Settings → Resources → WSL Integration → enable your distro
+
+### Build the sandbox image
+
+```powershell
+docker build -f docker/sandbox/Dockerfile.sandbox -t jarvis-sandbox:latest .
+```
+
+### Configure execution.json (sandbox + fallback)
+
+`config/execution.json` controls execution routing:
+
+- `default_backend`: `sandbox` (recommended)
+- `fallback_backend`: `local_process` or `local_thread`
+- `sandbox.require_available`:
+  - `true`: **deny** risky execution if Docker is unavailable
+  - `false`: **fallback** to local runner with a loud audit event
+
+Example:
+
+```json
+{
+  "enabled": true,
+  "default_backend": "sandbox",
+  "fallback_backend": "local_process",
+  "sandbox": {
+    "require_available": true,
+    "image": "jarvis-sandbox:latest"
+  }
+}
+```
+
+### Security defaults (sandbox)
+
+- **Network disabled** (`--network none`)
+- **Input mounted read-only** (`/input`)
+- **Output mounted read-write** (`/output`)
+- **Work directory** is ephemeral (`/work`)
+- **No secure store / USB keys / secrets** are mounted into the container
+- Broker IPC (when used) is **localhost-only** with a short-lived token
+
+### Optional integration tests (Docker required)
+
+```powershell
+pytest -q tests/test_sandbox_fallback_behavior.py -k integration
+```
+
+See `docs/sandbox.md` for threat model and limitations.
+
 ## Policy engine (config-driven constraints)
 
 Jarvis enforces an additional **config-driven policy layer** (`config/policy.json`) inside the authorization chain.
