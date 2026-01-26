@@ -74,7 +74,7 @@ def test_unknown_tool_denied(tmp_path):
             },
         )
         assert res.get("allowed") is False
-        assert res.get("reason_code") == "unknown_tool"
+        assert res.get("reason_code") == "TOOL_UNKNOWN"
     finally:
         server.stop()
 
@@ -105,7 +105,7 @@ def test_token_required_and_expires(tmp_path):
             },
         )
         assert res.get("allowed") is False
-        assert res.get("reason_code") == "invalid_token"
+        assert res.get("reason_code") == "TOKEN_INVALID"
 
         time.sleep(0.1)
         res2 = _call_broker(
@@ -121,7 +121,7 @@ def test_token_required_and_expires(tmp_path):
             },
         )
         assert res2.get("allowed") is False
-        assert res2.get("reason_code") == "token_expired"
+        assert res2.get("reason_code") == "TOKEN_EXPIRED"
     finally:
         server.stop()
 

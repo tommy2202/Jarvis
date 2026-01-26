@@ -10,8 +10,11 @@ from typing import Any, Dict, Optional
 
 from jarvis.core.events import redact
 from jarvis.core.execution.models import ExecutionPlan, ExecutionRequest, ExecutionResult
+from jarvis.core.broker.interface import ToolResult
 from jarvis.core.broker.registry import ToolRegistry
 from jarvis.core.broker.server import BrokerServer
+from jarvis.core.broker.write_broker import WriteBroker
+from jarvis.core.security_events import SecurityAuditLogger
 
 
 def _json_safe(obj: Any) -> Any:
@@ -38,6 +41,8 @@ class SandboxExecutionRunner:
         security_manager: Any = None,
         event_logger: Any = None,
         event_bus: Any = None,
+        privacy_store: Any = None,
+        secure_store: Any = None,
     ):
         self._config = dict(config or {})
         self._logger = logger
@@ -46,6 +51,37 @@ class SandboxExecutionRunner:
         self._security = security_manager
         self._event_logger = event_logger
         self._event_bus = event_bus
+        self._privacy_store = privacy_store
+        self._secure_store = secure_store
+
+    def _resolve_secure_store(self):  # noqa: ANN001
+        if self._secure_store is not None:
+            return self._secure_store
+        if self._security is None:
+            return None
+        return getattr(self._security, "secure_store", None)
+
+    def _default_tool_registry(self) -> ToolRegistry:
+        audit_logger = SecurityAuditLogger()
+        registry = ToolRegistry(audit_logger=audit_logger)
+        write_broker = WriteBroker(
+            privacy_store=self._privacy_store,
+            secure_store=self._resolve_secure_store(),
+            audit_logger=audit_logger,
+        )
+
+        def _wrap_write(tool_name: str):  # noqa: ANN001
+            return lambda args, ctx: write_broker.run(tool_name, args, ctx)
+
+        for tool_name in ("write.memory", "write.transcript", "write.artifact_metadata"):
+            registry.register(tool_name, _wrap_write(tool_name))
+
+        def _echo(args: Dict[str, Any], context: Dict[str, Any]) -> ToolResult:
+            trace_id = str((context or {}).get("trace_id") or "tool")
+            return ToolResult(allowed=True, reason_code="ALLOWED", trace_id=trace_id, output={"echo": dict(args or {})})
+
+        registry.register("core.echo", _echo)
+        return registry
 
     def update_config(self, config: Dict[str, Any]) -> None:
         self._config = dict(config or {})
@@ -97,7 +133,10 @@ class SandboxExecutionRunner:
             "module_path": request.module_path,
             "args": redact(request.args or {}),
             "context": redact(req_ctx),
+            "required_capabilities": list(request.required_capabilities or []),
         }
+        if request.execution_plan is not None:
+            payload["execution_plan"] = request.execution_plan.model_dump(mode="json")
         payload = _json_safe(payload)
         req_path = os.path.join(work_dir, "request.json")
         res_path = os.path.join(work_dir, "result.json")
@@ -111,8 +150,6 @@ class SandboxExecutionRunner:
             "--rm",
             "--name",
             container_name,
-            "--network",
-            "none",
             "--workdir",
             "/work",
             "--mount",
@@ -130,7 +167,10 @@ class SandboxExecutionRunner:
             cmd += ["--pids-limit", str(int(pids_limit))]
         broker_server: Optional[BrokerServer] = None
         if request.tool_broker is not None or (request.execution_plan and request.execution_plan.tool_calls):
-            tool_broker = request.tool_broker or ToolRegistry()
+            tool_broker = request.tool_broker or self._default_tool_registry()
+            broker_host = str((sandbox_cfg or {}).get("broker_host") or "host.docker.internal")
+            bind_host = str((sandbox_cfg or {}).get("broker_bind_host") or ("127.0.0.1" if broker_host in {"127.0.0.1", "localhost"} else "0.0.0.0"))
+            allow_private_clients = bool((sandbox_cfg or {}).get("broker_allow_private_clients", bind_host != "127.0.0.1"))
             broker_server = BrokerServer(
                 tool_broker=tool_broker,
                 capability_engine=self._capability_engine,
@@ -140,10 +180,26 @@ class SandboxExecutionRunner:
                 event_bus=self._event_bus,
                 logger=self._logger,
                 token_ttl_seconds=broker_token_ttl,
+                bind_host=bind_host,
+                allow_private_clients=allow_private_clients,
             )
             info = broker_server.start()
-            endpoint = f"{info.get('host')}:{info.get('port')}"
-            cmd += ["-e", f"JARVIS_BROKER_ENDPOINT={endpoint}", "-e", f"JARVIS_BROKER_TOKEN={info.get('token')}"]
+            endpoint = f"{broker_host}:{info.get('port')}"
+            cmd += [
+                "-e",
+                f"BROKER_URL={endpoint}",
+                "-e",
+                f"BROKER_TOKEN={info.get('token')}",
+                "-e",
+                f"JARVIS_BROKER_ENDPOINT={endpoint}",
+                "-e",
+                f"JARVIS_BROKER_TOKEN={info.get('token')}",
+            ]
+            if broker_host == "host.docker.internal":
+                cmd += ["--add-host", "host.docker.internal:host-gateway"]
+            cmd += ["--network", str((sandbox_cfg or {}).get("broker_network_mode") or "bridge")]
+        else:
+            cmd += ["--network", "none"]
 
         cmd.append(image)
 

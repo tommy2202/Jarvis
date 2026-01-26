@@ -138,6 +138,8 @@ class Dispatcher:
                 security_manager=self.security,
                 event_logger=self.event_logger,
                 event_bus=self.event_bus,
+                privacy_store=self.privacy_store,
+                secure_store=getattr(self.security, "secure_store", None),
             )
         else:
             try:
@@ -1392,7 +1394,13 @@ class Dispatcher:
 
             try:
                 context = dict(context or {})
-                context.setdefault("trace_id", trace_id)
+                context["trace_id"] = trace_id
+                context["is_admin"] = bool(self.security.is_admin())
+                context["safe_mode"] = bool(getattr(ctx, "safe_mode", False))
+                context["shutting_down"] = bool(getattr(ctx, "shutting_down", False))
+                context["user_id"] = str(getattr(ctx, "user_id", "default"))
+                context["source"] = str(getattr(ctx, "source").value if getattr(ctx, "source", None) is not None else "system")
+                context["confirmed"] = bool(getattr(ctx, "confirmed", False))
                 # Apply policy modifications into execution context (restrictions only).
                 if pmods:
                     context["policy"] = redact(pmods)

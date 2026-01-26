@@ -82,6 +82,6 @@ class WriteBroker(ToolBroker):
             if name == "write.artifact_metadata":
                 dec = self.write_artifact_metadata(record=(args or {}).get("record") or {}, trace_id=trace_id)
                 return ToolResult(allowed=bool(dec.allowed), reason_code=str(dec.reason_code), trace_id=trace_id, output={"record_id": dec.record_id})
-            return ToolResult(allowed=False, reason_code="unknown_tool", trace_id=trace_id)
+            return ToolResult(allowed=False, reason_code="TOOL_UNKNOWN", trace_id=trace_id, denied_by="registry")
         except Exception as e:  # noqa: BLE001
-            return ToolResult(allowed=False, reason_code="tool_error", trace_id=trace_id, error=str(e))
+            return ToolResult(allowed=False, reason_code="TOOL_ERROR", trace_id=trace_id, error=str(e), denied_by="registry")
