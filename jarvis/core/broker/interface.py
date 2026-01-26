@@ -23,6 +23,17 @@ class ToolResult(BaseModel):
     trace_id: str
     output: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    ok: Optional[bool] = None
+    denied_by: Optional[str] = None
+    remediation: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
+    artifacts: Optional[list[dict]] = None
+
+    def model_post_init(self, __context: Any) -> None:  # noqa: ANN001
+        if self.ok is None:
+            self.ok = bool(self.allowed)
+        if self.result is None and self.output is not None:
+            self.result = self.output
 
 
 class ToolBroker(ABC):

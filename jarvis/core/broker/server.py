@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import secrets
 import socketserver
@@ -13,6 +14,8 @@ from jarvis.core.events import EventLogger, redact
 from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
 from jarvis.core.policy.models import PolicyContext
 from jarvis.core.privacy.gates import persistence_context
+from jarvis.core.privacy.redaction import privacy_redact
+from jarvis.core.security_events import SecurityAuditLogger
 
 
 class _BrokerTCPServer(socketserver.ThreadingTCPServer):
@@ -27,11 +30,11 @@ class _BrokerHandler(socketserver.StreamRequestHandler):
         try:
             payload = json.loads(raw.decode("utf-8"))
         except Exception:
-            self._send(ToolResult(allowed=False, reason_code="invalid_payload", trace_id="tool", error="invalid_payload"))
+            self._send(ToolResult(allowed=False, reason_code="INVALID_PAYLOAD", trace_id="tool", error="invalid_payload", denied_by="broker"))
             return
         broker = getattr(self.server, "broker", None)
         if broker is None:
-            self._send(ToolResult(allowed=False, reason_code="broker_unavailable", trace_id="tool", error="broker_unavailable"))
+            self._send(ToolResult(allowed=False, reason_code="BROKER_UNAVAILABLE", trace_id="tool", error="broker_unavailable", denied_by="broker"))
             return
         res = broker.handle_call(payload, client_host=str(self.client_address[0]))
         self._send(res)
@@ -56,6 +59,10 @@ class BrokerServer:
         event_bus: Any = None,
         logger: Any = None,
         token_ttl_seconds: float = 30.0,
+        bind_host: str = "127.0.0.1",
+        allow_private_clients: bool = False,
+        allowed_client_hosts: Optional[set[str]] = None,
+        audit_logger: Optional[SecurityAuditLogger] = None,
     ):
         self._tool_broker = tool_broker
         self._capability_engine = capability_engine
@@ -65,6 +72,11 @@ class BrokerServer:
         self._event_bus = event_bus
         self._logger = logger
         self._token_ttl = float(token_ttl_seconds)
+        self._bind_host = str(bind_host or "127.0.0.1")
+        self._allow_private_clients = bool(allow_private_clients)
+        self._allowed_client_hosts = set(allowed_client_hosts or set())
+        self._allowed_client_hosts.update({"127.0.0.1", "::1"})
+        self._audit_logger = audit_logger or SecurityAuditLogger()
         self._server: Optional[_BrokerTCPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._token: str = ""
@@ -72,14 +84,14 @@ class BrokerServer:
 
     def start(self) -> Dict[str, Any]:
         if self._server is not None:
-            return {"host": "127.0.0.1", "port": int(self._server.server_address[1]), "token": self._token, "expires_at": self._expires_at}
+            return {"host": self._bind_host, "port": int(self._server.server_address[1]), "token": self._token, "expires_at": self._expires_at}
         self._token = secrets.token_urlsafe(24)
         self._expires_at = time.time() + max(1.0, self._token_ttl)
-        self._server = _BrokerTCPServer(("127.0.0.1", 0), _BrokerHandler)
+        self._server = _BrokerTCPServer((self._bind_host, 0), _BrokerHandler)
         self._server.broker = self  # type: ignore[attr-defined]
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
-        return {"host": "127.0.0.1", "port": int(self._server.server_address[1]), "token": self._token, "expires_at": self._expires_at}
+        return {"host": self._bind_host, "port": int(self._server.server_address[1]), "token": self._token, "expires_at": self._expires_at}
 
     def stop(self) -> None:
         if self._server is None:
@@ -90,6 +102,8 @@ class BrokerServer:
         except Exception:
             pass
         self._server = None
+        self._token = ""
+        self._expires_at = 0.0
         if self._thread is not None:
             try:
                 self._thread.join(timeout=1.0)
@@ -100,19 +114,13 @@ class BrokerServer:
     def handle_call(self, payload: Dict[str, Any], *, client_host: str) -> ToolResult:
         trace_id = str(payload.get("trace_id") or "")
         token = str(payload.get("token") or "")
-        if client_host not in {"127.0.0.1", "::1"}:
-            return ToolResult(allowed=False, reason_code="non_local_client", trace_id=trace_id or "tool", error="non_local_client")
-        if not token or token != self._token:
-            return ToolResult(allowed=False, reason_code="invalid_token", trace_id=trace_id or "tool", error="invalid_token")
-        if time.time() > self._expires_at:
-            return ToolResult(allowed=False, reason_code="token_expired", trace_id=trace_id or "tool", error="token_expired")
-
         tool_name = str(payload.get("tool_name") or "")
         tool_args = payload.get("tool_args")
         if tool_args is None:
             tool_args = payload.get("args") or {}
         if not isinstance(tool_args, dict):
             tool_args = {}
+        args_keys = sorted(list(tool_args.keys()))[:50]
         requested_caps = payload.get("requested_caps") or []
         if not isinstance(requested_caps, list):
             requested_caps = []
@@ -120,12 +128,26 @@ class BrokerServer:
         context = payload.get("context") or {}
         if not isinstance(context, dict):
             context = {}
+        context_keys = sorted(list(context.keys()))[:50]
         if not trace_id:
             trace_id = str(context.get("trace_id") or "tool")
 
+        if not self._is_allowed_client(client_host):
+            res = ToolResult(allowed=False, reason_code="CLIENT_NOT_LOCAL", trace_id=trace_id or "tool", error="client_not_local", denied_by="auth")
+            self._audit(trace_id or "tool", tool_name, requested_caps, res, args_keys=args_keys, context_keys=context_keys)
+            return res
+        if not token or token != self._token:
+            res = ToolResult(allowed=False, reason_code="TOKEN_INVALID", trace_id=trace_id or "tool", error="token_invalid", denied_by="auth")
+            self._audit(trace_id or "tool", tool_name, requested_caps, res, args_keys=args_keys, context_keys=context_keys)
+            return res
+        if time.time() > self._expires_at:
+            res = ToolResult(allowed=False, reason_code="TOKEN_EXPIRED", trace_id=trace_id or "tool", error="token_expired", denied_by="auth")
+            self._audit(trace_id or "tool", tool_name, requested_caps, res, args_keys=args_keys, context_keys=context_keys)
+            return res
+
         auth_res = self._authorize(trace_id, requested_caps, context)
         if not auth_res.allowed:
-            self._audit(trace_id, tool_name, requested_caps, auth_res)
+            self._audit(trace_id, tool_name, requested_caps, auth_res, args_keys=args_keys, context_keys=context_keys)
             return auth_res
 
         ctx = dict(context or {})
@@ -140,22 +162,17 @@ class BrokerServer:
             else:
                 res = self._tool_broker.run(tool_name, tool_args, ctx)
         except Exception as e:  # noqa: BLE001
-            res = ToolResult(allowed=False, reason_code="tool_error", trace_id=trace_id, error=str(e)[:200])
-        self._audit(trace_id, tool_name, requested_caps, res)
+            res = ToolResult(allowed=False, reason_code="TOOL_ERROR", trace_id=trace_id, error=str(e)[:200], denied_by="broker")
+        self._audit(trace_id, tool_name, requested_caps, res, args_keys=args_keys, context_keys=context_keys)
         return res
 
     def _authorize(self, trace_id: str, requested_caps: list[str], context: Dict[str, Any]) -> ToolResult:
         if self._capability_engine is None:
-            return ToolResult(allowed=False, reason_code="capability_engine_missing", trace_id=trace_id, error="capability_engine_missing")
+            return ToolResult(allowed=False, reason_code="CAPABILITY_ENGINE_MISSING", trace_id=trace_id, error="capability_engine_missing", denied_by="capabilities")
         safe_mode = bool(context.get("safe_mode", False))
         shutting_down = bool(context.get("shutting_down", False))
         user_id = str(context.get("user_id") or "default")
-        is_admin = False
-        try:
-            if self._security is not None:
-                is_admin = bool(getattr(self._security, "is_admin", lambda: False)())
-        except Exception:
-            is_admin = False
+        is_admin = bool(context.get("is_admin", False))
         secure_mode = None
         try:
             if self._security is not None and getattr(self._security, "secure_store", None) is not None:
@@ -163,10 +180,15 @@ class BrokerServer:
                 secure_mode = str(getattr(st, "mode").value if hasattr(getattr(st, "mode"), "value") else getattr(st, "mode"))
         except Exception:
             secure_mode = None
+        source_s = str(context.get("source") or "system").lower()
+        try:
+            source = RequestSource(source_s) if source_s in {s.value for s in RequestSource} else RequestSource.system
+        except Exception:
+            source = RequestSource.system
 
         ctx = RequestContext(
             trace_id=trace_id,
-            source=RequestSource.system,
+            source=source,
             user_id=user_id,
             is_admin=bool(is_admin),
             safe_mode=bool(safe_mode),
@@ -181,7 +203,14 @@ class BrokerServer:
         )
         dec = self._capability_engine.evaluate(ctx)
         if not bool(dec.allowed):
-            return ToolResult(allowed=False, reason_code="capability_denied", trace_id=trace_id, error=str(dec.remediation or "capability_denied")[:200])
+            return ToolResult(
+                allowed=False,
+                reason_code="CAPABILITY_DENIED",
+                trace_id=trace_id,
+                error=str(dec.remediation or "capability_denied")[:200],
+                denied_by="capabilities",
+                remediation=str(dec.remediation or "")[:200],
+            )
 
         if self._policy_engine is not None:
             try:
@@ -202,20 +231,53 @@ class BrokerServer:
                 )
                 pdec = self._policy_engine.evaluate(pctx)
                 if not bool(pdec.allowed):
-                    return ToolResult(allowed=False, reason_code="policy_denied", trace_id=trace_id, error=str(pdec.remediation or pdec.final_reason or "policy_denied")[:200])
+                    return ToolResult(
+                        allowed=False,
+                        reason_code="POLICY_DENIED",
+                        trace_id=trace_id,
+                        error=str(pdec.remediation or pdec.final_reason or "policy_denied")[:200],
+                        denied_by="policy",
+                        remediation=str(pdec.remediation or "")[:200],
+                    )
             except Exception:
-                return ToolResult(allowed=False, reason_code="policy_engine_error", trace_id=trace_id, error="policy_engine_error")
-        return ToolResult(allowed=True, reason_code="allowed", trace_id=trace_id)
+                return ToolResult(allowed=False, reason_code="POLICY_ENGINE_ERROR", trace_id=trace_id, error="policy_engine_error", denied_by="policy")
+        return ToolResult(allowed=True, reason_code="ALLOWED", trace_id=trace_id)
 
-    def _audit(self, trace_id: str, tool_name: str, requested_caps: list[str], res: ToolResult) -> None:
+    def _audit(
+        self,
+        trace_id: str,
+        tool_name: str,
+        requested_caps: list[str],
+        res: ToolResult,
+        *,
+        args_keys: Optional[list[str]] = None,
+        context_keys: Optional[list[str]] = None,
+    ) -> None:
         details = {
             "tool_name": str(tool_name or ""),
             "allowed": bool(res.allowed),
             "reason_code": str(res.reason_code or ""),
             "requested_caps": list(requested_caps or []),
+            "args_keys": list(args_keys or []),
+            "context_keys": list(context_keys or []),
+            "denied_by": str(res.denied_by or ""),
         }
+        safe_details = privacy_redact(details)
         if self._event_logger is not None:
-            self._event_logger.log(trace_id, "broker.tool.call", redact(details))
+            self._event_logger.log(trace_id, "broker.tool.call", redact(safe_details))
+        if self._audit_logger is not None:
+            try:
+                self._audit_logger.log(
+                    trace_id=trace_id,
+                    severity="INFO" if res.allowed else "WARN",
+                    event="broker.tool.call",
+                    ip=None,
+                    endpoint=str(tool_name or "tool"),
+                    outcome="allowed" if res.allowed else "denied",
+                    details=safe_details,
+                )
+            except Exception:
+                pass
         if self._event_bus is not None:
             try:
                 self._event_bus.publish_nowait(
@@ -224,8 +286,19 @@ class BrokerServer:
                         trace_id=trace_id,
                         source_subsystem=SourceSubsystem.dispatcher,
                         severity=EventSeverity.INFO if res.allowed else EventSeverity.WARN,
-                        payload=details,
+                        payload=safe_details,
                     )
                 )
             except Exception:
                 pass
+
+    def _is_allowed_client(self, client_host: str) -> bool:
+        if client_host in self._allowed_client_hosts:
+            return True
+        if not self._allow_private_clients:
+            return False
+        try:
+            ip = ipaddress.ip_address(client_host)
+        except ValueError:
+            return False
+        return bool(ip.is_loopback or ip.is_private or ip.is_link_local)

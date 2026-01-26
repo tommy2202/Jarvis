@@ -11,6 +11,7 @@ from jarvis.core.dispatcher import Dispatcher
 from jarvis.core.events import EventLogger
 from jarvis.core.intent_router import IntentResult, StageAIntentRouter
 from jarvis.core.llm_router import StageBLLMRouter
+from jarvis.core.errors import AdminRequiredError
 from jarvis.core.trace import reset_trace_id, resolve_trace_id, set_trace_id
 from jarvis.core.ux.primitives import acknowledge, completed, failed
 
@@ -243,8 +244,7 @@ class JarvisApp:
                 normalized = str(message or "").strip().lower()
                 cancel_job_id = self._parse_cancel_job_id(normalized)
                 if cancel_job_id:
-                    jm = getattr(self.dispatcher, "job_manager", None)
-                    if jm is None:
+                    if getattr(self.dispatcher, "job_manager", None) is None:
                         return MessageResponse(
                             trace_id=trace_id,
                             reply="Job system unavailable.",
@@ -255,7 +255,9 @@ class JarvisApp:
                             followup_question=None,
                             modifications={},
                         )
-                    if not bool(self.dispatcher.security.is_admin()):
+                    try:
+                        ok = bool(self.dispatcher.cancel_job(trace_id, cancel_job_id, {"source": request_source, "client": client or {}}))
+                    except AdminRequiredError:
                         return MessageResponse(
                             trace_id=trace_id,
                             reply="Admin required to cancel jobs.",
@@ -266,7 +268,6 @@ class JarvisApp:
                             followup_question=None,
                             modifications={},
                         )
-                    ok = bool(jm.cancel_job(cancel_job_id))
                     return MessageResponse(
                         trace_id=trace_id,
                         reply=("Job canceled." if ok else "Unable to cancel job."),

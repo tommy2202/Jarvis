@@ -138,6 +138,8 @@ class Dispatcher:
                 security_manager=self.security,
                 event_logger=self.event_logger,
                 event_bus=self.event_bus,
+                privacy_store=self.privacy_store,
+                secure_store=getattr(self.security, "secure_store", None),
             )
         else:
             try:
@@ -750,6 +752,68 @@ class Dispatcher:
                 args=args,
             )
             return JobSubmitResult(ok=True, job_id=str(job_id), reply="", denied_reason=None, remediation="", required_capabilities=list(dec.required_capabilities or required_caps))
+        finally:
+            reset_trace_id(token)
+
+    def cancel_job(self, trace_id: str, job_id: str, context: Dict[str, Any]) -> bool:
+        token = set_trace_id(trace_id)
+        try:
+            if self.job_manager is None:
+                raise RuntimeError("Job manager unavailable.")
+            if not bool(self.security.is_admin()):
+                raise AdminRequiredError()
+            return bool(self.job_manager.cancel_job(str(job_id)))
+        finally:
+            reset_trace_id(token)
+
+    def resume_job(self, trace_id: str, job_id: str, context: Dict[str, Any]) -> bool:
+        token = set_trace_id(trace_id)
+        try:
+            if self.job_manager is None:
+                raise RuntimeError("Job manager unavailable.")
+            if not bool(self.security.is_admin()):
+                raise AdminRequiredError()
+            return bool(self.job_manager.resume_job(str(job_id), is_admin=True, trace_id=trace_id))
+        finally:
+            reset_trace_id(token)
+
+    def modules_scan(self, trace_id: str, *, trigger: str = "manual") -> Dict[str, Any]:
+        token = set_trace_id(trace_id)
+        try:
+            if self.module_manager is None:
+                return {"ok": False, "error": "module_manager_unavailable"}
+            return self.module_manager.scan(trace_id=trace_id, trigger=trigger)
+        finally:
+            reset_trace_id(token)
+
+    def modules_enable(self, trace_id: str, module_id: str) -> bool:
+        token = set_trace_id(trace_id)
+        try:
+            if self.module_manager is None:
+                return False
+            if not bool(self.security.is_admin()):
+                raise AdminRequiredError()
+            return bool(self.module_manager.enable(str(module_id), trace_id=trace_id))
+        finally:
+            reset_trace_id(token)
+
+    def modules_disable(self, trace_id: str, module_id: str) -> bool:
+        token = set_trace_id(trace_id)
+        try:
+            if self.module_manager is None:
+                return False
+            if not bool(self.security.is_admin()):
+                raise AdminRequiredError()
+            return bool(self.module_manager.disable(str(module_id), trace_id=trace_id))
+        finally:
+            reset_trace_id(token)
+
+    def modules_repair(self, trace_id: str, module_id: str) -> Dict[str, Any]:
+        token = set_trace_id(trace_id)
+        try:
+            if self.module_manager is None:
+                return {"ok": False, "error": "module_manager_unavailable"}
+            return self.module_manager.repair_manifest(str(module_id), trace_id=trace_id)
         finally:
             reset_trace_id(token)
 
@@ -1392,7 +1456,13 @@ class Dispatcher:
 
             try:
                 context = dict(context or {})
-                context.setdefault("trace_id", trace_id)
+                context["trace_id"] = trace_id
+                context["is_admin"] = bool(self.security.is_admin())
+                context["safe_mode"] = bool(getattr(ctx, "safe_mode", False))
+                context["shutting_down"] = bool(getattr(ctx, "shutting_down", False))
+                context["user_id"] = str(getattr(ctx, "user_id", "default"))
+                context["source"] = str(getattr(ctx, "source").value if getattr(ctx, "source", None) is not None else "system")
+                context["confirmed"] = bool(getattr(ctx, "confirmed", False))
                 # Apply policy modifications into execution context (restrictions only).
                 if pmods:
                     context["policy"] = redact(pmods)

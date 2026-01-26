@@ -43,7 +43,7 @@ def test_unknown_tool_denied_and_audited(tmp_path):
     registry = ToolRegistry(audit_logger=SecurityAuditLogger(path=str(audit_path)))
     res = registry.run("unknown.tool", {"token": "secret"}, {"trace_id": "t"})
     assert res.allowed is False
-    assert res.reason_code == "unknown_tool"
+    assert res.reason_code == "TOOL_UNKNOWN"
     data = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert data
     assert all("secret" not in json.dumps(row) for row in data)

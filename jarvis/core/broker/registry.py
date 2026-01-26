@@ -19,15 +19,15 @@ class ToolRegistry(ToolBroker):
         name = str(tool_name or "")
         trace_id = str((context or {}).get("trace_id") or "tool")
         if name not in self._tools:
-            res = ToolResult(allowed=False, reason_code="unknown_tool", trace_id=trace_id, output=None)
+            res = ToolResult(allowed=False, reason_code="TOOL_UNKNOWN", trace_id=trace_id, output=None, denied_by="registry")
             self._audit_call(name, args, context, res)
             return res
         try:
             res = self._tools[name](args or {}, context or {})
             if not isinstance(res, ToolResult):
-                res = ToolResult(allowed=True, reason_code="allowed", trace_id=trace_id, output={"result": res})
+                res = ToolResult(allowed=True, reason_code="ALLOWED", trace_id=trace_id, output={"result": res})
         except Exception as e:  # noqa: BLE001
-            res = ToolResult(allowed=False, reason_code="tool_error", trace_id=trace_id, error=str(e))
+            res = ToolResult(allowed=False, reason_code="TOOL_ERROR", trace_id=trace_id, error=str(e), denied_by="registry")
         self._audit_call(name, args, context, res)
         return res
 

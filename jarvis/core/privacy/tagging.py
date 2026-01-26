@@ -64,7 +64,8 @@ def data_record_for_sqlite(
     producer: str = "core",
     tags: Optional[Dict[str, str]] = None,
 ) -> DataRecord:
-    storage_ref = f"{str(db_path).replace('\\', '/') }#{table}"
+    normalized_path = str(db_path).replace("\\", "/")
+    storage_ref = f"{normalized_path}#{table}"
     rec = DataRecord(
         user_id=str(user_id or "default"),
         data_category=category,

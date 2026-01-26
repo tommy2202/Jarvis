@@ -36,6 +36,7 @@ from jarvis.core.job_manager import (
 )
 from jarvis.core.runtime import JarvisRuntime, RuntimeConfig, TTSAdapter, VoiceAdapter
 from jarvis.core.error_reporter import ErrorReporter, ErrorReporterConfig
+from jarvis.core.errors import AdminRequiredError
 from jarvis.core.recovery import RecoveryPolicy, RecoveryConfig
 from jarvis.core.circuit_breaker import CircuitBreaker, BreakerConfig, BreakerRegistry
 from jarvis.core.llm_lifecycle import LLMPolicy, LLMLifecycleController
@@ -128,6 +129,141 @@ class WebServerHandle:
                 self.telemetry.set_web_server_info(enabled=True, bind_host=self.host, port=self.port, allow_remote=self.allow_remote, thread_alive=False)
             except Exception:
                 pass
+
+
+def handle_cli_jobs_command(
+    text: str,
+    *,
+    dispatcher: Dispatcher,
+    job_manager: JobManager | None,
+    safe_mode: bool,
+    shutting_down: bool,
+) -> bool:
+    if not text.startswith("/jobs"):
+        return False
+    parts = text.split()
+    if len(parts) == 1 or (len(parts) >= 2 and parts[1] == "list"):
+        if job_manager is None:
+            print("Job manager unavailable.")
+            return True
+        status = parts[2] if len(parts) >= 3 else None
+        jobs = job_manager.list_jobs(status=status)
+        for j in jobs[:50]:
+            print(f"{j.id} | {j.status.value:10s} | {j.kind} | {j.progress:3d}% | {j.message}")
+        return True
+    if len(parts) >= 3 and parts[1] == "show":
+        if job_manager is None:
+            print("Job manager unavailable.")
+            return True
+        jid = parts[2]
+        try:
+            j = job_manager.get_job(jid)
+        except KeyError:
+            print("Job not found.")
+        else:
+            print(j.model_dump())
+        return True
+    if len(parts) >= 3 and parts[1] == "cancel":
+        jid = parts[2]
+        try:
+            ok = dispatcher.cancel_job("cli", jid, {"source": "cli", "client": {"name": "cli", "id": "stdin"}})
+            print("Canceled." if ok else "Unable to cancel.")
+        except AdminRequiredError:
+            print("Admin required.")
+        except Exception as e:  # noqa: BLE001
+            print(f"Unable to cancel job: {str(e)[:120]}")
+        return True
+    if len(parts) >= 3 and parts[1] == "resume":
+        jid = parts[2]
+        try:
+            ok = dispatcher.resume_job("cli", jid, {"source": "cli", "client": {"name": "cli", "id": "stdin"}})
+            print("Resumed." if ok else "Unable to resume.")
+        except AdminRequiredError:
+            print("Admin required.")
+        except Exception as e:  # noqa: BLE001
+            print(f"Unable to resume job: {str(e)[:120]}")
+        return True
+    if len(parts) >= 3 and parts[1] == "tail":
+        if job_manager is None:
+            print("Job manager unavailable.")
+            return True
+        jid = parts[2]
+        n = int(parts[3]) if len(parts) >= 4 else 20
+        evs = job_manager.tail_job_events(jid, last_n=n)
+        for e in evs:
+            print(e)
+        return True
+    if len(parts) >= 3 and parts[1] == "run":
+        name = parts[2]
+        dispatch_ctx = {
+            "source": "cli",
+            "client": {"name": "cli", "id": "stdin"},
+            "safe_mode": bool(safe_mode),
+            "shutting_down": bool(shutting_down),
+        }
+        if name == "health_check":
+            res = dispatcher.submit_job("cli", "system.health_check", {}, dispatch_ctx)
+            print(f"Submitted: {res.job_id}" if res.ok else res.reply)
+            return True
+        if name == "cleanup":
+            res = dispatcher.submit_job("cli", "system.cleanup_jobs", {}, dispatch_ctx)
+            print(f"Submitted: {res.job_id}" if res.ok else res.reply)
+            return True
+        print("Unknown run target. Use: health_check | cleanup")
+        return True
+    print("Usage: /jobs list [STATUS] | /jobs show <id> | /jobs cancel <id> | /jobs resume <id> | /jobs tail <id> [n] | /jobs run health_check|cleanup")
+    return True
+
+
+def handle_cli_modules_command(
+    text: str,
+    *,
+    dispatcher: Dispatcher,
+    module_manager: ModuleManager,
+) -> bool:
+    if not text.startswith("/modules"):
+        return False
+    parts = text.split()
+    cmd = parts[1] if len(parts) >= 2 else "status"
+    if cmd == "list":
+        from jarvis.core.modules.cli import modules_list_lines
+
+        for line in modules_list_lines(module_manager=module_manager, trace_id="cli"):
+            print(line)
+        return True
+    if cmd == "status":
+        from jarvis.core.modules.cli import modules_status_lines
+
+        for line in modules_status_lines(module_manager=module_manager, trace_id="cli"):
+            print(line)
+        return True
+    if cmd == "scan":
+        print(dispatcher.modules_scan("cli", trigger="manual"))
+        return True
+    if cmd == "repair" and len(parts) >= 3:
+        mid = parts[2]
+        print(dispatcher.modules_repair("cli", mid))
+        return True
+    if cmd == "show" and len(parts) >= 3:
+        mid = parts[2]
+        from jarvis.core.modules.cli import modules_show_payload
+
+        print(modules_show_payload(module_manager=module_manager, module_id=mid, trace_id="cli"))
+        return True
+    if cmd in {"enable", "disable"} and len(parts) >= 3:
+        mid = parts[2]
+        try:
+            ok = dispatcher.modules_enable("cli", mid) if cmd == "enable" else dispatcher.modules_disable("cli", mid)
+            print("OK" if ok else "Failed")
+        except AdminRequiredError:
+            print("Admin required.")
+        return True
+    if cmd == "export" and len(parts) >= 3:
+        out_path = parts[2]
+        print({"exported": module_manager.export(out_path)})
+        return True
+    print("Usage: /modules list | /modules status | /modules scan | /modules repair <id> | /modules show <id> | /modules enable <id> | /modules disable <id> | /modules export <path>")
+    return True
 
 
 def _start_web_thread(
@@ -877,68 +1013,13 @@ def main() -> None:
             except Exception as e:
                 print(f"Unable to list microphones: {e}")
             continue
-        if text.startswith("/jobs"):
-            parts = text.split()
-            if len(parts) == 1 or (len(parts) >= 2 and parts[1] == "list"):
-                status = parts[2] if len(parts) >= 3 else None
-                jobs = job_manager.list_jobs(status=status)
-                for j in jobs[:50]:
-                    print(f"{j.id} | {j.status.value:10s} | {j.kind} | {j.progress:3d}% | {j.message}")
-                continue
-            if len(parts) >= 3 and parts[1] == "show":
-                jid = parts[2]
-                try:
-                    j = job_manager.get_job(jid)
-                except KeyError:
-                    print("Job not found.")
-                else:
-                    print(j.model_dump())
-                continue
-            if len(parts) >= 3 and parts[1] == "cancel":
-                jid = parts[2]
-                ok = job_manager.cancel_job(jid)
-                print("Canceled." if ok else "Unable to cancel.")
-                continue
-            if len(parts) >= 3 and parts[1] == "resume":
-                if not security.is_admin():
-                    print("Admin required.")
-                    continue
-                jid = parts[2]
-                ok = job_manager.resume_job(jid, is_admin=True, trace_id="cli")
-                print("Resumed." if ok else "Unable to resume.")
-                continue
-            if len(parts) >= 3 and parts[1] == "tail":
-                jid = parts[2]
-                n = int(parts[3]) if len(parts) >= 4 else 20
-                evs = job_manager.tail_job_events(jid, last_n=n)
-                for e in evs:
-                    print(e)
-                continue
-            if len(parts) >= 3 and parts[1] == "run":
-                name = parts[2]
-                if name == "health_check":
-                    dispatch_ctx = {
-                        "source": "cli",
-                        "client": {"name": "cli", "id": "stdin"},
-                        "safe_mode": bool(getattr(runtime, "safe_mode", False)),
-                        "shutting_down": bool(controller.get_shutdown_status().get("in_progress")) if controller else False,
-                    }
-                    res = dispatcher.submit_job("cli", "system.health_check", {}, dispatch_ctx)
-                    print(f"Submitted: {res.job_id}" if res.ok else res.reply)
-                    continue
-                if name == "cleanup":
-                    dispatch_ctx = {
-                        "source": "cli",
-                        "client": {"name": "cli", "id": "stdin"},
-                        "safe_mode": bool(getattr(runtime, "safe_mode", False)),
-                        "shutting_down": bool(controller.get_shutdown_status().get("in_progress")) if controller else False,
-                    }
-                    res = dispatcher.submit_job("cli", "system.cleanup_jobs", {}, dispatch_ctx)
-                    print(f"Submitted: {res.job_id}" if res.ok else res.reply)
-                    continue
-                print("Unknown run target. Use: health_check | cleanup")
-                continue
-            print("Usage: /jobs list [STATUS] | /jobs show <id> | /jobs cancel <id> | /jobs resume <id> | /jobs tail <id> [n] | /jobs run health_check|cleanup")
+        if handle_cli_jobs_command(
+            text,
+            dispatcher=dispatcher,
+            job_manager=job_manager,
+            safe_mode=bool(getattr(runtime, "safe_mode", False)),
+            shutting_down=bool(controller.get_shutdown_status().get("in_progress")) if controller else False,
+        ):
             continue
         if text.startswith("/resources"):
             parts = text.split()
@@ -1233,47 +1314,7 @@ def main() -> None:
                 continue
             print("Usage: /caps list | /caps show <cap_id> | /caps intent <intent_id> | /caps eval <intent_id> --source=cli|web|voice|ui --admin=true|false --safe_mode=true|false --shutting_down=true|false | /caps export <path>")
             continue
-        if text.startswith("/modules"):
-            parts = text.split()
-            cmd = parts[1] if len(parts) >= 2 else "status"
-            if cmd == "list":
-                from jarvis.core.modules.cli import modules_list_lines
-
-                for line in modules_list_lines(module_manager=module_manager, trace_id="cli"):
-                    print(line)
-                continue
-            if cmd == "status":
-                from jarvis.core.modules.cli import modules_status_lines
-
-                for line in modules_status_lines(module_manager=module_manager, trace_id="cli"):
-                    print(line)
-                continue
-            if cmd == "scan":
-                print(module_manager.scan(trace_id="cli", trigger="manual"))
-                continue
-            if cmd == "repair" and len(parts) >= 3:
-                mid = parts[2]
-                print(module_manager.repair_manifest(mid, trace_id="cli"))
-                continue
-            if cmd == "show" and len(parts) >= 3:
-                mid = parts[2]
-                from jarvis.core.modules.cli import modules_show_payload
-
-                print(modules_show_payload(module_manager=module_manager, module_id=mid, trace_id="cli"))
-                continue
-            if cmd in {"enable", "disable"} and len(parts) >= 3:
-                mid = parts[2]
-                if not security.is_admin():
-                    print("Admin required.")
-                    continue
-                ok = module_manager.enable(mid, trace_id="cli") if cmd == "enable" else module_manager.disable(mid, trace_id="cli")
-                print("OK" if ok else "Failed")
-                continue
-            if cmd == "export" and len(parts) >= 3:
-                out_path = parts[2]
-                print({"exported": module_manager.export(out_path)})
-                continue
-            print("Usage: /modules list | /modules status | /modules scan | /modules repair <id> | /modules show <id> | /modules enable <id> | /modules disable <id> | /modules export <path>")
+        if handle_cli_modules_command(text, dispatcher=dispatcher, module_manager=module_manager):
             continue
         if text.startswith("/privacy"):
             parts = text.split()
