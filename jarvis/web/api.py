@@ -23,7 +23,7 @@ from jarvis.web.models import (
 from jarvis.web.middleware import WebSecurityMiddleware
 from jarvis.core.errors import JarvisError
 from jarvis.core.error_reporter import ErrorReporter
-from jarvis.core.errors import PermissionDeniedError
+from jarvis.core.errors import AdminRequiredError, PermissionDeniedError
 from jarvis.core.capabilities.models import RequestContext, RequestSource
 from jarvis.core.policy.models import PolicyContext
 
@@ -395,7 +395,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="module_id required")
         try:
             ok = runtime.modules_enable(mid)
-        except PermissionDeniedError:
+        except AdminRequiredError:
             raise HTTPException(status_code=403, detail="Admin required.")
         return {"ok": bool(ok)}
 
@@ -409,7 +409,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="module_id required")
         try:
             ok = runtime.modules_disable(mid)
-        except PermissionDeniedError:
+        except AdminRequiredError:
             raise HTTPException(status_code=403, detail="Admin required.")
         return {"ok": bool(ok)}
 
@@ -571,8 +571,22 @@ def create_app(
         async def cancel_job(job_id: str, request: Request):
             if draining_event is not None and getattr(draining_event, "is_set", lambda: False)():
                 raise HTTPException(status_code=503, detail="Shutting down")
-            ok = job_manager.cancel_job(job_id)
-            return {"ok": ok}
+            dispatcher = getattr(jarvis_app, "dispatcher", None)
+            if dispatcher is None:
+                raise HTTPException(status_code=503, detail="Dispatcher unavailable.")
+            trace_id = getattr(getattr(request, "state", None), "trace_id", "web")
+            client_id = getattr(getattr(request, "client", None), "host", None)
+            ctx = {
+                "source": "web",
+                "client": {"name": "web", "id": client_id},
+                "safe_mode": bool(getattr(runtime, "safe_mode", False)) if runtime is not None else False,
+                "shutting_down": bool(draining_event.is_set()) if draining_event is not None else False,
+            }
+            try:
+                ok = dispatcher.cancel_job(trace_id, job_id, ctx)
+            except AdminRequiredError as e:
+                raise HTTPException(status_code=403, detail=str(e.user_message or "Admin required.")) from e
+            return {"ok": bool(ok)}
 
     return app
 

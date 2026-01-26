@@ -755,6 +755,68 @@ class Dispatcher:
         finally:
             reset_trace_id(token)
 
+    def cancel_job(self, trace_id: str, job_id: str, context: Dict[str, Any]) -> bool:
+        token = set_trace_id(trace_id)
+        try:
+            if self.job_manager is None:
+                raise RuntimeError("Job manager unavailable.")
+            if not bool(self.security.is_admin()):
+                raise AdminRequiredError()
+            return bool(self.job_manager.cancel_job(str(job_id)))
+        finally:
+            reset_trace_id(token)
+
+    def resume_job(self, trace_id: str, job_id: str, context: Dict[str, Any]) -> bool:
+        token = set_trace_id(trace_id)
+        try:
+            if self.job_manager is None:
+                raise RuntimeError("Job manager unavailable.")
+            if not bool(self.security.is_admin()):
+                raise AdminRequiredError()
+            return bool(self.job_manager.resume_job(str(job_id), is_admin=True, trace_id=trace_id))
+        finally:
+            reset_trace_id(token)
+
+    def modules_scan(self, trace_id: str, *, trigger: str = "manual") -> Dict[str, Any]:
+        token = set_trace_id(trace_id)
+        try:
+            if self.module_manager is None:
+                return {"ok": False, "error": "module_manager_unavailable"}
+            return self.module_manager.scan(trace_id=trace_id, trigger=trigger)
+        finally:
+            reset_trace_id(token)
+
+    def modules_enable(self, trace_id: str, module_id: str) -> bool:
+        token = set_trace_id(trace_id)
+        try:
+            if self.module_manager is None:
+                return False
+            if not bool(self.security.is_admin()):
+                raise AdminRequiredError()
+            return bool(self.module_manager.enable(str(module_id), trace_id=trace_id))
+        finally:
+            reset_trace_id(token)
+
+    def modules_disable(self, trace_id: str, module_id: str) -> bool:
+        token = set_trace_id(trace_id)
+        try:
+            if self.module_manager is None:
+                return False
+            if not bool(self.security.is_admin()):
+                raise AdminRequiredError()
+            return bool(self.module_manager.disable(str(module_id), trace_id=trace_id))
+        finally:
+            reset_trace_id(token)
+
+    def modules_repair(self, trace_id: str, module_id: str) -> Dict[str, Any]:
+        token = set_trace_id(trace_id)
+        try:
+            if self.module_manager is None:
+                return {"ok": False, "error": "module_manager_unavailable"}
+            return self.module_manager.repair_manifest(str(module_id), trace_id=trace_id)
+        finally:
+            reset_trace_id(token)
+
     @staticmethod
     def _resolve_intent_contract(mod_meta: Dict[str, Any], intent_id: str) -> Dict[str, Any]:
         # Allow either module-level contract fields or per-intent overrides.

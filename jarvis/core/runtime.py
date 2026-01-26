@@ -16,7 +16,6 @@ from pydantic import BaseModel, Field
 
 from jarvis.core.events import EventLogger, redact
 from jarvis.core.error_reporter import ErrorReporter
-from jarvis.core.errors import AdminRequiredError
 from jarvis.core.recovery import RecoveryPolicy, RecoveryConfig
 from jarvis.core.circuit_breaker import BreakerRegistry
 from jarvis.core.events.models import BaseEvent, EventSeverity, SourceSubsystem
@@ -353,28 +352,28 @@ class JarvisRuntime:
             return {"enabled": True, "error": "status_failed"}
 
     def modules_scan(self) -> Dict[str, Any]:
-        if self.module_manager is None:
-            return {"ok": False, "error": "unavailable"}
-        return self.module_manager.scan(trace_id="runtime", trigger="manual")
+        dispatcher = getattr(self.jarvis_app, "dispatcher", None)
+        if dispatcher is None:
+            return {"ok": False, "error": "dispatcher_unavailable"}
+        return dispatcher.modules_scan("runtime", trigger="manual")
 
     def modules_enable(self, module_id: str) -> bool:
-        if self.module_manager is None:
+        dispatcher = getattr(self.jarvis_app, "dispatcher", None)
+        if dispatcher is None:
             return False
-        if self.security_manager is not None and not bool(self.security_manager.is_admin()):
-            raise AdminRequiredError()
-        return bool(self.module_manager.enable(str(module_id), trace_id="runtime"))
+        return bool(dispatcher.modules_enable("runtime", str(module_id)))
 
     def modules_disable(self, module_id: str) -> bool:
-        if self.module_manager is None:
+        dispatcher = getattr(self.jarvis_app, "dispatcher", None)
+        if dispatcher is None:
             return False
-        if self.security_manager is not None and not bool(self.security_manager.is_admin()):
-            raise AdminRequiredError()
-        return bool(self.module_manager.disable(str(module_id), trace_id="runtime"))
+        return bool(dispatcher.modules_disable("runtime", str(module_id)))
 
     def modules_repair(self, module_id: str) -> Dict[str, Any]:
-        if self.module_manager is None:
-            return {"ok": False, "error": "unavailable"}
-        return self.module_manager.repair_manifest(str(module_id), trace_id="runtime")
+        dispatcher = getattr(self.jarvis_app, "dispatcher", None)
+        if dispatcher is None:
+            return {"ok": False, "error": "dispatcher_unavailable"}
+        return dispatcher.modules_repair("runtime", str(module_id))
 
     def get_audit_status(self) -> Dict[str, Any]:
         if self.audit_timeline is None:
@@ -596,11 +595,10 @@ class JarvisRuntime:
         return out
 
     def cancel_job(self, job_id: str) -> bool:
-        if self.job_manager is None:
+        dispatcher = getattr(self.jarvis_app, "dispatcher", None)
+        if dispatcher is None:
             return False
-        if self.security_manager is not None and not bool(self.security_manager.is_admin()):
-            raise AdminRequiredError()
-        return bool(self.job_manager.cancel_job(job_id))
+        return bool(dispatcher.cancel_job("runtime", str(job_id), {"source": "ui"}))
 
     def get_recent_errors(self, n: int = 50) -> list[Dict[str, Any]]:
         try:
