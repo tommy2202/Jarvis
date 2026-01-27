@@ -170,7 +170,18 @@ class SandboxExecutionRunner:
             tool_broker = request.tool_broker or self._default_tool_registry()
             broker_host = str((sandbox_cfg or {}).get("broker_host") or "host.docker.internal")
             bind_host = str((sandbox_cfg or {}).get("broker_bind_host") or ("127.0.0.1" if broker_host in {"127.0.0.1", "localhost"} else "0.0.0.0"))
-            allow_private_clients = bool((sandbox_cfg or {}).get("broker_allow_private_clients", bind_host != "127.0.0.1"))
+            broker_cfg = sandbox_cfg.get("broker") if isinstance(sandbox_cfg.get("broker"), dict) else {}
+            override_present = isinstance(broker_cfg, dict) and "allowed_client_cidrs" in broker_cfg
+            if override_present:
+                allowed_client_cidrs = broker_cfg.get("allowed_client_cidrs")
+                if allowed_client_cidrs is None:
+                    allowed_client_cidrs = []
+            else:
+                allowed_client_cidrs = ["127.0.0.1/32", "::1/128"]
+                if broker_host not in {"127.0.0.1", "localhost", "::1"} and (
+                    broker_host == "host.docker.internal" or bind_host == "0.0.0.0"
+                ):
+                    allowed_client_cidrs = ["127.0.0.1/32", "::1/128", "172.16.0.0/12"]
             broker_server = BrokerServer(
                 tool_broker=tool_broker,
                 capability_engine=self._capability_engine,
@@ -181,7 +192,7 @@ class SandboxExecutionRunner:
                 logger=self._logger,
                 token_ttl_seconds=broker_token_ttl,
                 bind_host=bind_host,
-                allow_private_clients=allow_private_clients,
+                allowed_client_cidrs=allowed_client_cidrs,
             )
             info = broker_server.start()
             endpoint = f"{broker_host}:{info.get('port')}"
