@@ -8,7 +8,7 @@ import tempfile
 import time
 from typing import Any, Dict, Optional
 
-from jarvis.core.events import redact
+from jarvis.core.events import BaseEvent, EventSeverity, SourceSubsystem, redact
 from jarvis.core.execution.models import ExecutionPlan, ExecutionRequest, ExecutionResult
 from jarvis.core.broker.interface import ToolResult
 from jarvis.core.broker.registry import ToolRegistry
@@ -101,8 +101,16 @@ class SandboxExecutionRunner:
             return False
 
     def run(self, *, request: ExecutionRequest, plan: ExecutionPlan) -> ExecutionResult:
+        metadata: Dict[str, Any] = {}
         if not self.is_available():
-            return ExecutionResult(ok=False, backend=plan.backend, exec_mode=plan.mode, trace_id=request.trace_id, error="sandbox_unavailable")
+            return ExecutionResult(
+                ok=False,
+                backend=plan.backend,
+                exec_mode=plan.mode,
+                trace_id=request.trace_id,
+                error="sandbox_unavailable",
+                metadata=metadata,
+            )
 
         cfg = dict(self._config or {})
         sandbox_cfg = cfg.get("sandbox") if isinstance(cfg.get("sandbox"), dict) else {}
@@ -166,11 +174,24 @@ class SandboxExecutionRunner:
         if pids_limit:
             cmd += ["--pids-limit", str(int(pids_limit))]
         broker_server: Optional[BrokerServer] = None
-        if request.tool_broker is not None or (request.execution_plan and request.execution_plan.tool_calls):
+        plan_obj = request.execution_plan or plan
+        plan_requires_broker = bool(plan_obj and plan_obj.tool_calls)
+        if plan_requires_broker:
             tool_broker = request.tool_broker or self._default_tool_registry()
             broker_host = str((sandbox_cfg or {}).get("broker_host") or "host.docker.internal")
             bind_host = str((sandbox_cfg or {}).get("broker_bind_host") or ("127.0.0.1" if broker_host in {"127.0.0.1", "localhost"} else "0.0.0.0"))
-            allow_private_clients = bool((sandbox_cfg or {}).get("broker_allow_private_clients", bind_host != "127.0.0.1"))
+            broker_cfg = sandbox_cfg.get("broker") if isinstance(sandbox_cfg.get("broker"), dict) else {}
+            override_present = isinstance(broker_cfg, dict) and "allowed_client_cidrs" in broker_cfg
+            if override_present:
+                allowed_client_cidrs = broker_cfg.get("allowed_client_cidrs")
+                if allowed_client_cidrs is None:
+                    allowed_client_cidrs = []
+            else:
+                allowed_client_cidrs = ["127.0.0.1/32", "::1/128"]
+                if broker_host not in {"127.0.0.1", "localhost", "::1"} and (
+                    broker_host == "host.docker.internal" or bind_host == "0.0.0.0"
+                ):
+                    allowed_client_cidrs = ["127.0.0.1/32", "::1/128", "172.16.0.0/12"]
             broker_server = BrokerServer(
                 tool_broker=tool_broker,
                 capability_engine=self._capability_engine,
@@ -181,23 +202,58 @@ class SandboxExecutionRunner:
                 logger=self._logger,
                 token_ttl_seconds=broker_token_ttl,
                 bind_host=bind_host,
-                allow_private_clients=allow_private_clients,
+                allowed_client_cidrs=allowed_client_cidrs,
             )
             info = broker_server.start()
-            endpoint = f"{broker_host}:{info.get('port')}"
+            token = str(info.get("token") or "")
+            port = info.get("port")
+            if not token or not port:
+                broker_server.stop()
+                shutil.rmtree(temp_root, ignore_errors=True)
+                return ExecutionResult(
+                    ok=False,
+                    backend=plan.backend,
+                    exec_mode=plan.mode,
+                    trace_id=request.trace_id,
+                    error="broker_unavailable",
+                    metadata=metadata,
+                )
+            endpoint = f"{broker_host}:{int(port)}"
             cmd += [
                 "-e",
                 f"BROKER_URL={endpoint}",
                 "-e",
-                f"BROKER_TOKEN={info.get('token')}",
+                f"BROKER_TOKEN={token}",
                 "-e",
                 f"JARVIS_BROKER_ENDPOINT={endpoint}",
                 "-e",
-                f"JARVIS_BROKER_TOKEN={info.get('token')}",
+                f"JARVIS_BROKER_TOKEN={token}",
             ]
             if broker_host == "host.docker.internal":
                 cmd += ["--add-host", "host.docker.internal:host-gateway"]
-            cmd += ["--network", str((sandbox_cfg or {}).get("broker_network_mode") or "bridge")]
+            network_mode = str((sandbox_cfg or {}).get("broker_network_mode") or "bridge")
+            cmd += ["--network", network_mode]
+            if network_mode != "none":
+                exception_details = {"reason_code": "BROKER_REQUIRED", "network_mode": network_mode}
+                if self._event_logger is not None:
+                    self._event_logger.log(request.trace_id, "sandbox.network_exception", exception_details)
+                if self._event_bus is not None:
+                    try:
+                        self._event_bus.publish_nowait(
+                            BaseEvent(
+                                event_type="sandbox.network_exception",
+                                trace_id=request.trace_id,
+                                source_subsystem=SourceSubsystem.dispatcher,
+                                severity=EventSeverity.WARN,
+                                payload=exception_details,
+                            )
+                        )
+                    except Exception:
+                        pass
+                metadata = {
+                    "warnings": ["Sandbox network exception enabled for broker connectivity."],
+                    "network_exception": exception_details,
+                }
         else:
             cmd += ["--network", "none"]
 
@@ -210,7 +266,14 @@ class SandboxExecutionRunner:
                 subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, text=True, timeout=5)
             except Exception:
                 pass
-            return ExecutionResult(ok=False, backend=plan.backend, exec_mode=plan.mode, trace_id=request.trace_id, error="sandbox_timeout")
+            return ExecutionResult(
+                ok=False,
+                backend=plan.backend,
+                exec_mode=plan.mode,
+                trace_id=request.trace_id,
+                error="sandbox_timeout",
+                metadata=metadata,
+            )
         finally:
             # allow slight flush time for container to write result.json
             time.sleep(0.05)
@@ -219,19 +282,47 @@ class SandboxExecutionRunner:
 
         if not os.path.exists(res_path):
             shutil.rmtree(temp_root, ignore_errors=True)
-            return ExecutionResult(ok=False, backend=plan.backend, exec_mode=plan.mode, trace_id=request.trace_id, error="sandbox_result_missing")
+            return ExecutionResult(
+                ok=False,
+                backend=plan.backend,
+                exec_mode=plan.mode,
+                trace_id=request.trace_id,
+                error="sandbox_result_missing",
+                metadata=metadata,
+            )
 
         try:
             with open(res_path, "r", encoding="utf-8") as f:
                 res = json.load(f)
         except Exception:
             shutil.rmtree(temp_root, ignore_errors=True)
-            return ExecutionResult(ok=False, backend=plan.backend, exec_mode=plan.mode, trace_id=request.trace_id, error="sandbox_result_invalid")
+            return ExecutionResult(
+                ok=False,
+                backend=plan.backend,
+                exec_mode=plan.mode,
+                trace_id=request.trace_id,
+                error="sandbox_result_invalid",
+                metadata=metadata,
+            )
 
         ok = bool(res.get("ok", False))
         output = res.get("output") if isinstance(res.get("output"), dict) else None
         err = str(res.get("error") or "")
         shutil.rmtree(temp_root, ignore_errors=True)
         if ok:
-            return ExecutionResult(ok=True, backend=plan.backend, exec_mode=plan.mode, trace_id=request.trace_id, output=output or {})
-        return ExecutionResult(ok=False, backend=plan.backend, exec_mode=plan.mode, trace_id=request.trace_id, error=err[:300])
+            return ExecutionResult(
+                ok=True,
+                backend=plan.backend,
+                exec_mode=plan.mode,
+                trace_id=request.trace_id,
+                output=output or {},
+                metadata=metadata,
+            )
+        return ExecutionResult(
+            ok=False,
+            backend=plan.backend,
+            exec_mode=plan.mode,
+            trace_id=request.trace_id,
+            error=err[:300],
+            metadata=metadata,
+        )

@@ -18,6 +18,9 @@ from jarvis.core.privacy.redaction import privacy_redact
 from jarvis.core.security_events import SecurityAuditLogger
 
 
+DEFAULT_ALLOWED_CLIENT_CIDRS = ["127.0.0.1/32", "::1/128"]
+
+
 class _BrokerTCPServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
@@ -60,8 +63,7 @@ class BrokerServer:
         logger: Any = None,
         token_ttl_seconds: float = 30.0,
         bind_host: str = "127.0.0.1",
-        allow_private_clients: bool = False,
-        allowed_client_hosts: Optional[set[str]] = None,
+        allowed_client_cidrs: Optional[list[str]] = None,
         audit_logger: Optional[SecurityAuditLogger] = None,
     ):
         self._tool_broker = tool_broker
@@ -73,9 +75,9 @@ class BrokerServer:
         self._logger = logger
         self._token_ttl = float(token_ttl_seconds)
         self._bind_host = str(bind_host or "127.0.0.1")
-        self._allow_private_clients = bool(allow_private_clients)
-        self._allowed_client_hosts = set(allowed_client_hosts or set())
-        self._allowed_client_hosts.update({"127.0.0.1", "::1"})
+        self._allowed_client_cidrs = self._coerce_allowed_client_cidrs(allowed_client_cidrs)
+        self._allowed_client_networks: list[ipaddress._BaseNetwork] = []
+        self._cidrs_validated = False
         self._audit_logger = audit_logger or SecurityAuditLogger()
         self._server: Optional[_BrokerTCPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -85,6 +87,7 @@ class BrokerServer:
     def start(self) -> Dict[str, Any]:
         if self._server is not None:
             return {"host": self._bind_host, "port": int(self._server.server_address[1]), "token": self._token, "expires_at": self._expires_at}
+        self._ensure_allowed_client_networks()
         self._token = secrets.token_urlsafe(24)
         self._expires_at = time.time() + max(1.0, self._token_ttl)
         self._server = _BrokerTCPServer((self._bind_host, 0), _BrokerHandler)
@@ -132,8 +135,9 @@ class BrokerServer:
         if not trace_id:
             trace_id = str(context.get("trace_id") or "tool")
 
-        if not self._is_allowed_client(client_host):
-            res = ToolResult(allowed=False, reason_code="CLIENT_NOT_LOCAL", trace_id=trace_id or "tool", error="client_not_local", denied_by="auth")
+        allowed, reason_code = self._check_client_allowed(client_host)
+        if not allowed:
+            res = ToolResult(allowed=False, reason_code=reason_code, trace_id=trace_id or "tool", error="client_not_allowed", denied_by="auth")
             self._audit(trace_id or "tool", tool_name, requested_caps, res, args_keys=args_keys, context_keys=context_keys)
             return res
         if not token or token != self._token:
@@ -292,13 +296,41 @@ class BrokerServer:
             except Exception:
                 pass
 
+    def _coerce_allowed_client_cidrs(self, cidrs: Optional[list[str]]) -> list[str]:
+        if cidrs is None:
+            return list(DEFAULT_ALLOWED_CLIENT_CIDRS)
+        if isinstance(cidrs, str):
+            return [cidrs]
+        if isinstance(cidrs, (list, tuple, set)):
+            return [str(item) for item in cidrs]
+        raise ValueError("allowed_client_cidrs must be a list of CIDR strings")
+
+    def _ensure_allowed_client_networks(self) -> None:
+        if self._cidrs_validated:
+            return
+        networks: list[ipaddress._BaseNetwork] = []
+        for raw in self._allowed_client_cidrs:
+            cidr = str(raw or "").strip()
+            if not cidr:
+                raise ValueError("allowed_client_cidrs contains an empty CIDR")
+            try:
+                networks.append(ipaddress.ip_network(cidr, strict=False))
+            except ValueError as exc:
+                raise ValueError(f"Invalid CIDR: {cidr}") from exc
+        self._allowed_client_networks = networks
+        self._cidrs_validated = True
+
+    def _check_client_allowed(self, client_host: str) -> tuple[bool, str]:
+        allowed = self._is_allowed_client(client_host)
+        return allowed, "ALLOWED" if allowed else "CLIENT_NOT_ALLOWED"
+
     def _is_allowed_client(self, client_host: str) -> bool:
-        if client_host in self._allowed_client_hosts:
-            return True
-        if not self._allow_private_clients:
-            return False
+        self._ensure_allowed_client_networks()
         try:
-            ip = ipaddress.ip_address(client_host)
+            ip = ipaddress.ip_address(str(client_host))
         except ValueError:
             return False
-        return bool(ip.is_loopback or ip.is_private or ip.is_link_local)
+        for network in self._allowed_client_networks:
+            if ip in network:
+                return True
+        return False
