@@ -64,3 +64,4 @@ class ExecutionResult(BaseModel):
     trace_id: str = ""
     output: Optional[Dict[str, Any]] = None
     error: str = ""
+    metadata: Dict[str, Any] = Field(default_factory=dict)
