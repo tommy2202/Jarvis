@@ -199,7 +199,11 @@ def test_sandbox_runner_broker_env_and_stop(monkeypatch, tmp_path):
     assert broker_state["instance"].started is True
     assert broker_state["instance"].stopped is True
     assert cmds
-    env_vars = {cmd[i + 1] for i, val in enumerate(cmds[0]) if val == "-e"}
+    cmd = cmds[0]
+    env_vars: set[str] = set()
+    for idx, val in enumerate(cmd):
+        if val == "-e" and idx + 1 < len(cmd):
+            env_vars.add(cmd[idx + 1])
     assert any(val.startswith("BROKER_URL=") for val in env_vars)
     assert any(val.startswith("BROKER_TOKEN=") for val in env_vars)
 

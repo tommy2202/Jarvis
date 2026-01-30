@@ -1,13 +1,11 @@
 import ast
 import io
-import re
 import tokenize
 from pathlib import Path
 
 import pytest
 
 
-FSTRING_BACKSLASH_RE = re.compile(r"\{\s*[^}]*\\[^}]*\}")
 SKIP_DIRS = {".git", "venv", ".venv"}
 
 
@@ -19,33 +17,94 @@ def _iter_python_files(root: Path) -> list[Path]:
     ]
 
 
-def _is_fstring_token(token_text: str) -> bool:
-    prefix = []
-    for ch in token_text:
-        if ch in "rRuUbBfF":
-            prefix.append(ch.lower())
-        else:
-            break
-    return "f" in prefix
+def _slice_source_segment(
+    source: str,
+    start_line: int,
+    start_col: int,
+    end_line: int,
+    end_col: int,
+) -> str | None:
+    lines = source.splitlines(keepends=True)
+    if (
+        start_line < 1
+        or end_line < start_line
+        or start_line > len(lines)
+        or end_line > len(lines)
+    ):
+        return None
+    if start_line == end_line:
+        return lines[start_line - 1][start_col:end_col]
+    parts = [lines[start_line - 1][start_col:]]
+    parts.extend(lines[start_line:end_line - 1])
+    parts.append(lines[end_line - 1][:end_col])
+    return "".join(parts)
 
 
-def _fallback_find_violations(source: str) -> list[int]:
-    violations: list[int] = []
-    tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+def _slice_node_segment(source: str, node: ast.AST) -> str | None:
+    if not all(
+        hasattr(node, attr)
+        for attr in ("lineno", "col_offset", "end_lineno", "end_col_offset")
+    ):
+        return None
+    if (
+        node.lineno is None
+        or node.col_offset is None
+        or node.end_lineno is None
+        or node.end_col_offset is None
+    ):
+        return None
+    return _slice_source_segment(
+        source,
+        node.lineno,
+        node.col_offset,
+        node.end_lineno,
+        node.end_col_offset,
+    )
+
+
+def _line_col_to_index(lines: list[str], line: int, col: int) -> int:
+    return sum(len(lines[i]) for i in range(line - 1)) + col
+
+
+def _strip_format_spec(expr: str) -> str:
+    depth = 0
+    lines = expr.splitlines(keepends=True)
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(expr).readline)
+    except tokenize.TokenError:
+        return expr
     for token in tokens:
-        if token.type != tokenize.STRING:
+        if token.type != tokenize.OP:
             continue
-        if not _is_fstring_token(token.string):
+        if token.string in "([{":
+            depth += 1
             continue
-        for match in FSTRING_BACKSLASH_RE.finditer(token.string):
-            line_offset = token.string[: match.start()].count("\n")
-            violations.append(token.start[0] + line_offset)
-    return violations
+        if token.string in ")]}":
+            depth = max(depth - 1, 0)
+            continue
+        if depth == 0 and token.string in {"!", ":"}:
+            cut_index = _line_col_to_index(lines, token.start[0], token.start[1])
+            return expr[:cut_index]
+    return expr
 
 
-def _find_backslash_in_fstring_expr(source: str, path: Path) -> list[int]:
-    violations: set[int] = set()
-    needs_fallback = False
+def _extract_formatted_expression(source: str, node: ast.FormattedValue) -> str | None:
+    expr_segment = ast.get_source_segment(source, node.value)
+    if expr_segment is not None:
+        return expr_segment
+    fallback_segment = _slice_node_segment(source, node)
+    if fallback_segment is None:
+        return None
+    open_brace = fallback_segment.find("{")
+    close_brace = fallback_segment.rfind("}")
+    if open_brace == -1 or close_brace == -1 or close_brace <= open_brace:
+        return None
+    inner = fallback_segment[open_brace + 1 : close_brace]
+    return _strip_format_spec(inner)
+
+
+def _find_backslash_in_fstring_expr(source: str, path: Path) -> list[tuple[int, str]]:
+    violations: list[tuple[int, str]] = []
     try:
         tree = ast.parse(source, filename=str(path))
     except SyntaxError as exc:
@@ -56,20 +115,18 @@ def _find_backslash_in_fstring_expr(source: str, path: Path) -> list[int]:
         for value in node.values:
             if not isinstance(value, ast.FormattedValue):
                 continue
-            segment = ast.get_source_segment(source, value)
+            segment = _extract_formatted_expression(source, value)
             if segment is None:
-                needs_fallback = True
                 continue
             if "\\" in segment:
-                violations.add(value.lineno)
-    if needs_fallback:
-        violations.update(_fallback_find_violations(source))
-    return sorted(violations)
+                snippet = segment.strip().replace("\n", "\\n")
+                violations.append((value.lineno, snippet))
+    return sorted(violations, key=lambda item: item[0])
 
 
 def test_no_backslash_in_fstring_expressions() -> None:
     root = Path(__file__).resolve().parents[1]
-    failures: dict[str, list[int]] = {}
+    failures: dict[str, list[tuple[int, str]]] = {}
     for path in _iter_python_files(root):
         source = path.read_text(encoding="utf-8", errors="ignore")
         lines = _find_backslash_in_fstring_expr(source, path)
@@ -77,7 +134,8 @@ def test_no_backslash_in_fstring_expressions() -> None:
             failures[str(path)] = lines
     if failures:
         details = "\n".join(
-            f"{path}: {', '.join(str(line) for line in lines)}"
+            f"{path}:{line}: {snippet}"
             for path, lines in sorted(failures.items())
+            for line, snippet in lines
         )
         pytest.fail(f"Found backslash in f-string expressions:\n{details}")
