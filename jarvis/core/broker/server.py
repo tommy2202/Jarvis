@@ -87,9 +87,11 @@ class BrokerServer:
     def start(self) -> Dict[str, Any]:
         if self._server is not None:
             return {"host": self._bind_host, "port": int(self._server.server_address[1]), "token": self._token, "expires_at": self._expires_at}
+        if self._token_ttl <= 0:
+            raise ValueError("token_ttl_seconds must be > 0")
         self._ensure_allowed_client_networks()
         self._token = secrets.token_urlsafe(24)
-        self._expires_at = time.time() + max(1.0, self._token_ttl)
+        self._expires_at = time.time() + self._token_ttl
         self._server = _BrokerTCPServer((self._bind_host, 0), _BrokerHandler)
         self._server.broker = self  # type: ignore[attr-defined]
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -119,6 +121,32 @@ class BrokerServer:
     def handle_call(self, payload: Dict[str, Any], *, client_host: str) -> ToolResult:
         trace_id = str(payload.get("trace_id") or "")
         token = str(payload.get("token") or "")
+        tool_name = ""
+        requested_caps: list[str] = []
+        args_keys: list[str] = []
+        context_keys: list[str] = []
+        context: Dict[str, Any] = {}
+        if not trace_id:
+            raw_context = payload.get("context")
+            if isinstance(raw_context, dict):
+                trace_id = str(raw_context.get("trace_id") or "")
+        if not trace_id:
+            trace_id = "tool"
+
+        allowed, reason_code = self._check_client_allowed(client_host)
+        if not allowed:
+            res = ToolResult(allowed=False, reason_code=reason_code, trace_id=trace_id or "tool", error="client_not_allowed", denied_by="auth")
+            self._audit(trace_id or "tool", tool_name, requested_caps, res, args_keys=args_keys, context_keys=context_keys)
+            return res
+        if not token or token != self._token:
+            res = ToolResult(allowed=False, reason_code="TOKEN_INVALID", trace_id=trace_id or "tool", error="token_invalid", denied_by="auth")
+            self._audit(trace_id or "tool", tool_name, requested_caps, res, args_keys=args_keys, context_keys=context_keys)
+            return res
+        if time.time() >= self._expires_at:
+            res = ToolResult(allowed=False, reason_code="TOKEN_EXPIRED", trace_id=trace_id or "tool", error="token_expired", denied_by="auth")
+            self._audit(trace_id or "tool", tool_name, requested_caps, res, args_keys=args_keys, context_keys=context_keys)
+            return res
+
         tool_name = str(payload.get("tool_name") or "")
         tool_args = payload.get("tool_args")
         if tool_args is None:
@@ -136,20 +164,6 @@ class BrokerServer:
         context_keys = sorted(list(context.keys()))[:50]
         if not trace_id:
             trace_id = str(context.get("trace_id") or "tool")
-
-        allowed, reason_code = self._check_client_allowed(client_host)
-        if not allowed:
-            res = ToolResult(allowed=False, reason_code=reason_code, trace_id=trace_id or "tool", error="client_not_allowed", denied_by="auth")
-            self._audit(trace_id or "tool", tool_name, requested_caps, res, args_keys=args_keys, context_keys=context_keys)
-            return res
-        if not token or token != self._token:
-            res = ToolResult(allowed=False, reason_code="TOKEN_INVALID", trace_id=trace_id or "tool", error="token_invalid", denied_by="auth")
-            self._audit(trace_id or "tool", tool_name, requested_caps, res, args_keys=args_keys, context_keys=context_keys)
-            return res
-        if time.time() > self._expires_at:
-            res = ToolResult(allowed=False, reason_code="TOKEN_EXPIRED", trace_id=trace_id or "tool", error="token_expired", denied_by="auth")
-            self._audit(trace_id or "tool", tool_name, requested_caps, res, args_keys=args_keys, context_keys=context_keys)
-            return res
 
         auth_res = self._authorize(trace_id, requested_caps, context)
         if not auth_res.allowed:
