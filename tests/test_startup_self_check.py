@@ -4,7 +4,7 @@ import os
 from types import SimpleNamespace
 
 import pytest
-from tests.helpers.fakes import FakeDispatcher
+from .helpers.fakes import FakeDispatcher
 
 
 def test_secure_store_key_missing_allows_degraded(tmp_path, monkeypatch):

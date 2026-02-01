@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from tests.helpers.fakes import FakeDispatcher
+from .helpers.fakes import FakeDispatcher
 
 
 def test_startup_fails_when_capability_engine_missing(tmp_path, monkeypatch):

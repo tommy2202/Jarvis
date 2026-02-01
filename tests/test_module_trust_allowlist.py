@@ -3,7 +3,7 @@ from __future__ import annotations
 from jarvis.core.modules.manager import ModuleManager
 from jarvis.core.security import AdminSession, SecurityManager
 from jarvis.core.secure_store import SecureStore
-from tests.helpers.module_trust import DummyLogger, EventBusCapture, make_cfg, write_module_json
+from .helpers.module_trust import DummyLogger, EventBusCapture, make_cfg, write_module_json
 
 
 def test_allowlist_blocks_non_allowlisted_module(tmp_path):

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from tests.test_startup_enforcement_chain import (
+from .test_startup_enforcement_chain import (
     test_startup_fails_on_remote_web_when_secure_store_locked as test_startup_enforcement_chain_completeness_web_secure_store_locked,
 )
-from tests.test_startup_enforcement_chain import (
+from .test_startup_enforcement_chain import (
     test_startup_fails_when_capability_engine_missing_audited as test_startup_enforcement_chain_completeness_capability_engine_missing,
 )
