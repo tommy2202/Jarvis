@@ -207,8 +207,8 @@ class Dispatcher:
             payload["denied_reason"] = denied_reason
             payload["remediation"] = str(remediation or "")[:200]
             payload["denied_by"] = str(denied_by or "capabilities")
-            if isinstance(decision_breakdown, dict):
-                payload["decision_breakdown"] = decision_breakdown
+        if isinstance(decision_breakdown, dict):
+            payload["decision_breakdown"] = decision_breakdown
         self.event_logger.log(trace_id, "job.submit.allowed" if allowed else "job.submit.denied", payload)
         if self.event_bus is None:
             return
@@ -301,8 +301,9 @@ class Dispatcher:
         ux_events: Optional[List[Dict[str, Any]]] = None,
         ux_action: str = "",
     ) -> DispatchResult:
+        denied_by_norm = self._normalize_denied_by(denied_by)
         breakdown = {
-            "denied_by": str(denied_by or "capabilities"),
+            "denied_by": denied_by_norm,
             "reason_code": str(denied_reason or ""),
             "remediation": str(remediation or "")[:300],
             "trace_id": trace_id,
@@ -316,6 +317,7 @@ class Dispatcher:
             "decision_breakdown": breakdown,
             **(details or {}),
         }
+        payload["denied_by"] = denied_by_norm
         self.event_logger.log(trace_id, "dispatch.denied", payload)
         if self.event_bus is not None:
             try:
@@ -371,6 +373,39 @@ class Dispatcher:
             ux_events=ux_events,
             decision_breakdown=breakdown,
         )
+
+    @staticmethod
+    def _normalize_denied_by(value: str) -> str:
+        allowed = {
+            "capabilities",
+            "policy",
+            "privacy",
+            "limits",
+            "safe_mode",
+            "shutdown",
+            "module_state",
+            "trust",
+            "execution",
+        }
+        mapping = {
+            "lockdown": "safe_mode",
+            "system": "execution",
+            "job_registry": "execution",
+            "validation": "execution",
+        }
+        v = str(value or "").strip().lower()
+        v = mapping.get(v, v)
+        if v in allowed:
+            return v
+        return "execution"
+
+    def _decision_breakdown(self, *, trace_id: str, reason_code: str, remediation: str, denied_by: str) -> Dict[str, Any]:
+        return {
+            "denied_by": self._normalize_denied_by(denied_by),
+            "reason_code": str(reason_code or ""),
+            "remediation": str(remediation or "")[:300],
+            "trace_id": str(trace_id or ""),
+        }
 
     def _build_request_context(self, trace_id: str, *, intent_id: str, mod_meta: Dict[str, Any], context: Dict[str, Any]) -> RequestContext:
         perms = self.policy.for_intent(intent_id) if self.policy is not None else {}
@@ -497,14 +532,14 @@ class Dispatcher:
         denied_caps: Optional[List[str]] = None,
         args: Optional[Dict[str, Any]] = None,
     ) -> JobSubmitResult:
-        denied_by = str(denied_by or "capabilities")
+        denied_by_norm = self._normalize_denied_by(denied_by or "capabilities")
         remediation = remediation or "Review logs for details."
-        breakdown = {
-            "denied_by": denied_by,
-            "reason_code": str(denied_reason or ""),
-            "remediation": str(remediation or "")[:300],
-            "trace_id": trace_id,
-        }
+        breakdown = self._decision_breakdown(
+            trace_id=trace_id,
+            reason_code=str(denied_reason or ""),
+            remediation=remediation,
+            denied_by=denied_by_norm,
+        )
         self._emit_job_submit_event(
             trace_id,
             allowed=False,
@@ -515,7 +550,7 @@ class Dispatcher:
             denied_caps=list(denied_caps or []),
             reason=denied_reason,
             remediation=remediation,
-            denied_by=denied_by,
+            denied_by=denied_by_norm,
             decision_breakdown=breakdown,
         )
         return JobSubmitResult(
@@ -743,15 +778,30 @@ class Dispatcher:
                     denied_by="validation",
                     args=args,
                 )
+            breakdown = self._decision_breakdown(
+                trace_id=trace_id,
+                reason_code="ALLOWED",
+                remediation="",
+                denied_by="execution",
+            )
             self._emit_job_submit_event(
                 trace_id,
                 allowed=True,
                 source=source,
                 kind=str(kind),
                 required_caps=list(dec.required_capabilities or required_caps),
-                args=args,
+                args=dict(args or {}),
+                decision_breakdown=breakdown,
             )
-            return JobSubmitResult(ok=True, job_id=str(job_id), reply="", denied_reason=None, remediation="", required_capabilities=list(dec.required_capabilities or required_caps))
+            return JobSubmitResult(
+                ok=True,
+                job_id=str(job_id),
+                reply="",
+                denied_reason=None,
+                remediation="",
+                required_capabilities=list(dec.required_capabilities or required_caps),
+                decision_breakdown=breakdown,
+            )
         finally:
             reset_trace_id(token)
 
@@ -1029,7 +1079,12 @@ class Dispatcher:
                         pass
                 reason = "I can’t execute that module."
                 remediation = "Check that the module is installed and enabled."
-                breakdown = {"denied_by": "module_state", "reason_code": "unknown_module", "remediation": remediation, "trace_id": trace_id}
+                breakdown = self._decision_breakdown(
+                    trace_id=trace_id,
+                    reason_code="unknown_module",
+                    remediation=remediation,
+                    denied_by="module_state",
+                )
                 self._append_ux_failed(
                     ux_events,
                     trace_id=trace_id,
@@ -1298,12 +1353,12 @@ class Dispatcher:
                         if bool(getattr(pdec, "require_confirmation", False)):
                             reply = str(pdec.remediation or "Confirmation required. Reply 'confirm' to proceed or 'cancel' to abort.")[:300]
                             remediation = "Reply 'confirm' to proceed or 'cancel' to abort."
-                            breakdown = {
-                                "denied_by": "policy",
-                                "reason_code": "confirmation_required",
-                                "remediation": remediation,
-                                "trace_id": trace_id,
-                            }
+                            breakdown = self._decision_breakdown(
+                                trace_id=trace_id,
+                                reason_code="confirmation_required",
+                                remediation=remediation,
+                                denied_by="policy",
+                            )
                             self._append_ux_failed(
                                 ux_events,
                                 trace_id=trace_id,
@@ -1539,7 +1594,13 @@ class Dispatcher:
                     action=ux_action,
                     summary=summary,
                 )
-                return DispatchResult(ok=True, reply="", module_output=out, modifications=pmods or {}, ux_events=ux_events)
+                breakdown = self._decision_breakdown(
+                    trace_id=trace_id,
+                    reason_code="ALLOWED",
+                    remediation="",
+                    denied_by="execution",
+                )
+                return DispatchResult(ok=True, reply="", module_output=out, modifications=pmods or {}, ux_events=ux_events, decision_breakdown=breakdown)
             except Exception as e:  # noqa: BLE001
                 je = self.error_reporter.report_exception(e, trace_id=trace_id, subsystem="dispatcher", context={"intent_id": intent_id, "module_id": module_id})
                 self.logger.error(f"[{trace_id}] Module error: {je.code}")
@@ -1556,12 +1617,19 @@ class Dispatcher:
                     denied_reason=je.code,
                     severity=EventSeverity.ERROR,
                 )
+                breakdown = self._decision_breakdown(
+                    trace_id=trace_id,
+                    reason_code=str(je.code or "execution_error"),
+                    remediation=remediation,
+                    denied_by="execution",
+                )
                 return DispatchResult(
                     ok=False,
                     reply=je.user_message,
                     denied_reason=je.code,
                     remediation=remediation,
                     ux_events=ux_events,
+                    decision_breakdown=breakdown,
                 )
             finally:
                 if admitted_heavy_slot and rg is not None:
