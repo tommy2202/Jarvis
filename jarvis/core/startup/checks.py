@@ -89,7 +89,7 @@ def check_dispatcher_capability_engine(dispatcher: Any) -> CheckResult:
     return CheckResult(check_id="dispatcher.capability_engine", status=CheckStatus.OK, message="Dispatcher capability engine wired.")
 
 
-def check_capability_engine_ready(capability_engine: Any) -> CheckResult:
+def check_capability_engine_ready(capability_engine: Any, *, capabilities_cfg_raw: Optional[Dict[str, Any]] = None) -> CheckResult:
     if capability_engine is None:
         return CheckResult(
             check_id="capability_engine.ready",
@@ -98,6 +98,19 @@ def check_capability_engine_ready(capability_engine: Any) -> CheckResult:
             remediation="Initialize capability engine before startup.",
             severity=Severity.CRITICAL,
         )
+    if isinstance(capabilities_cfg_raw, dict):
+        try:
+            from jarvis.core.capabilities.loader import validate_and_normalize
+
+            _ = validate_and_normalize(dict(capabilities_cfg_raw))
+        except Exception as e:  # noqa: BLE001
+            return CheckResult(
+                check_id="capability_engine.config",
+                status=CheckStatus.FAILED,
+                message="Capability config schema invalid.",
+                remediation=str(e),
+                severity=Severity.CRITICAL,
+            )
     cfg = getattr(capability_engine, "cfg", None)
     caps = getattr(cfg, "capabilities", None) if cfg is not None else None
     if not isinstance(caps, dict) or not caps:
