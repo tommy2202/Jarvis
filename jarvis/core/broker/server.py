@@ -94,7 +94,9 @@ class BrokerServer:
         self._server.broker = self  # type: ignore[attr-defined]
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
-        return {"host": self._bind_host, "port": int(self._server.server_address[1]), "token": self._token, "expires_at": self._expires_at}
+        port = int(self._server.server_address[1])
+        self._audit_bind(port=port)
+        return {"host": self._bind_host, "port": port, "token": self._token, "expires_at": self._expires_at}
 
     def stop(self) -> None:
         if self._server is None:
@@ -290,6 +292,42 @@ class BrokerServer:
                         trace_id=trace_id,
                         source_subsystem=SourceSubsystem.dispatcher,
                         severity=EventSeverity.INFO if res.allowed else EventSeverity.WARN,
+                        payload=safe_details,
+                    )
+                )
+            except Exception:
+                pass
+
+    def _audit_bind(self, *, port: int) -> None:
+        details = {
+            "bind_host": str(self._bind_host),
+            "port": int(port),
+            "allowed_client_cidrs": list(self._allowed_client_cidrs or []),
+        }
+        safe_details = privacy_redact(details)
+        if self._event_logger is not None:
+            self._event_logger.log("broker", "broker.bind", redact(safe_details))
+        if self._audit_logger is not None:
+            try:
+                self._audit_logger.log(
+                    trace_id="broker",
+                    severity="INFO",
+                    event="broker.bind",
+                    ip=None,
+                    endpoint=f"{self._bind_host}:{int(port)}",
+                    outcome="bound",
+                    details=safe_details,
+                )
+            except Exception:
+                pass
+        if self._event_bus is not None:
+            try:
+                self._event_bus.publish_nowait(
+                    BaseEvent(
+                        event_type="broker.bind",
+                        trace_id="broker",
+                        source_subsystem=SourceSubsystem.dispatcher,
+                        severity=EventSeverity.INFO,
                         payload=safe_details,
                     )
                 )

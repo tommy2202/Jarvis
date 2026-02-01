@@ -186,12 +186,21 @@ class SandboxExecutionRunner:
                 allowed_client_cidrs = broker_cfg.get("allowed_client_cidrs")
                 if allowed_client_cidrs is None:
                     allowed_client_cidrs = []
+                elif isinstance(allowed_client_cidrs, str):
+                    allowed_client_cidrs = [allowed_client_cidrs]
+                elif isinstance(allowed_client_cidrs, (list, tuple, set)):
+                    allowed_client_cidrs = [str(item) for item in allowed_client_cidrs]
+                else:
+                    raise ValueError("execution.sandbox.broker.allowed_client_cidrs must be a list of CIDR strings")
             else:
-                allowed_client_cidrs = ["127.0.0.1/32", "::1/128"]
-                if broker_host not in {"127.0.0.1", "localhost", "::1"} and (
-                    broker_host == "host.docker.internal" or bind_host == "0.0.0.0"
-                ):
-                    allowed_client_cidrs = ["127.0.0.1/32", "::1/128", "172.16.0.0/12"]
+                loopback_cidrs = ["127.0.0.1/32", "::1/128"]
+                bind_host_norm = bind_host.strip().lower()
+                if bind_host_norm in {"127.0.0.1", "localhost", "::1"}:
+                    allowed_client_cidrs = list(loopback_cidrs)
+                elif bind_host_norm == "0.0.0.0":
+                    allowed_client_cidrs = list(loopback_cidrs) + ["172.16.0.0/12"]
+                else:
+                    allowed_client_cidrs = list(loopback_cidrs)
             broker_server = BrokerServer(
                 tool_broker=tool_broker,
                 capability_engine=self._capability_engine,
