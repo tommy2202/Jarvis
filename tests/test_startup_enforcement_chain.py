@@ -10,7 +10,7 @@ from jarvis.core.capabilities.loader import default_config_dict, validate_and_no
 from jarvis.core.events.bus import EventBus, EventBusConfig, OverflowPolicy
 from jarvis.core.ops_log import OpsLogger
 from jarvis.core.startup.runner import StartupFlags, StartupSelfCheckRunner
-from tests.helpers.fakes import FakeDispatcher
+from .helpers.fakes import FakeDispatcher
 
 
 def _mk_audit_mgr(tmp_path, event_bus):

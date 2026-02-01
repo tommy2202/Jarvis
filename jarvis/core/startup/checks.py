@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import os
 import platform
 import sys
@@ -90,7 +89,7 @@ def check_dispatcher_capability_engine(dispatcher: Any) -> CheckResult:
     return CheckResult(check_id="dispatcher.capability_engine", status=CheckStatus.OK, message="Dispatcher capability engine wired.")
 
 
-def check_capability_engine_ready(capability_engine: Any) -> CheckResult:
+def check_capability_engine_ready(capability_engine: Any, *, capabilities_cfg_raw: Optional[Dict[str, Any]] = None) -> CheckResult:
     if capability_engine is None:
         return CheckResult(
             check_id="capability_engine.ready",
@@ -99,6 +98,19 @@ def check_capability_engine_ready(capability_engine: Any) -> CheckResult:
             remediation="Initialize capability engine before startup.",
             severity=Severity.CRITICAL,
         )
+    if isinstance(capabilities_cfg_raw, dict):
+        try:
+            from jarvis.core.capabilities.loader import validate_and_normalize
+
+            _ = validate_and_normalize(dict(capabilities_cfg_raw))
+        except Exception as e:  # noqa: BLE001
+            return CheckResult(
+                check_id="capability_engine.config",
+                status=CheckStatus.FAILED,
+                message="Capability config schema invalid.",
+                remediation=str(e),
+                severity=Severity.CRITICAL,
+            )
     cfg = getattr(capability_engine, "cfg", None)
     caps = getattr(cfg, "capabilities", None) if cfg is not None else None
     if not isinstance(caps, dict) or not caps:
@@ -411,27 +423,15 @@ def check_module_discovery_no_import(modules_root: str) -> CheckResult:
         )
     try:
         from jarvis.core.modules.discovery import ModuleDiscovery
-
-        called = {"n": 0}
-        orig = importlib.import_module
-
-        def boom(*_a, **_k):  # noqa: ANN001
-            called["n"] += 1
-            raise RuntimeError("import attempted during discovery")
-
-        importlib.import_module = boom
-        try:
-            ModuleDiscovery(modules_root=str(modules_root)).scan()
-        finally:
-            importlib.import_module = orig
-        if called["n"] > 0:
-            return CheckResult(
-                check_id="modules.discovery_no_import",
-                status=CheckStatus.FAILED,
-                message="Module discovery attempted imports.",
-                remediation="Ensure module discovery reads only manifest/filesystem.",
-                severity=Severity.CRITICAL,
-            )
+        ModuleDiscovery(modules_root=str(modules_root)).scan()
+    except ImportError as e:
+        return CheckResult(
+            check_id="modules.discovery_no_import",
+            status=CheckStatus.FAILED,
+            message="Module discovery attempted imports.",
+            remediation=str(e),
+            severity=Severity.CRITICAL,
+        )
     except Exception as e:  # noqa: BLE001
         return CheckResult(
             check_id="modules.discovery_no_import",

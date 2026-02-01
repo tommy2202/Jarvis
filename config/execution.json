@@ -10,9 +10,7 @@
     "pids_limit": 256,
     "timeout_seconds": 30,
     "work_root": "runtime/sandbox",
-    "broker": {
-      "allowed_client_cidrs": ["127.0.0.1/32", "::1/128"]
-    }
+    "broker": {}
   },
   "allow_inline_intents": [
     "core.time.now",

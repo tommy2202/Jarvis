@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import time
 
-from tests.helpers.fakes import FakeJarvisApp
-from tests.helpers.harness import JarvisRuntimeHarness
+from .helpers.fakes import FakeJarvisApp
+from .helpers.harness import JarvisRuntimeHarness
 
 
 def test_runtime_result_ttl_expires(tmp_path):

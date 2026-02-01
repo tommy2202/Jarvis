@@ -241,7 +241,7 @@ def phase7_enforcement_chain(
 
     if capabilities_enabled:
         checks.append(check_dispatcher_capability_engine(dispatcher))
-        checks.append(check_capability_engine_ready(capability_engine))
+        checks.append(check_capability_engine_ready(capability_engine, capabilities_cfg_raw=capabilities_cfg_raw))
     checks.append(check_policy_engine_presence(policy_engine, policy_enabled=policy_enabled))
     checks.append(check_dispatcher_policy_engine(dispatcher, policy_enabled=policy_enabled))
     checks.append(check_policy_engine_config(policy_engine, policy_enabled=policy_enabled))

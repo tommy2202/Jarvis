@@ -3,7 +3,7 @@ from __future__ import annotations
 from jarvis.core.llm_contracts import LLMRequest, LLMRole, Message, OutputSchema
 from jarvis.core.llm_lifecycle import LLMPolicy, LLMLifecycleController
 from jarvis.core.events import EventLogger
-from tests.helpers.fakes import FakeLLMBackend
+from .helpers.fakes import FakeLLMBackend
 
 
 class DummyLogger:
