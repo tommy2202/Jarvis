@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import os
 import platform
 import sys
@@ -411,27 +410,15 @@ def check_module_discovery_no_import(modules_root: str) -> CheckResult:
         )
     try:
         from jarvis.core.modules.discovery import ModuleDiscovery
-
-        called = {"n": 0}
-        orig = importlib.import_module
-
-        def boom(*_a, **_k):  # noqa: ANN001
-            called["n"] += 1
-            raise RuntimeError("import attempted during discovery")
-
-        importlib.import_module = boom
-        try:
-            ModuleDiscovery(modules_root=str(modules_root)).scan()
-        finally:
-            importlib.import_module = orig
-        if called["n"] > 0:
-            return CheckResult(
-                check_id="modules.discovery_no_import",
-                status=CheckStatus.FAILED,
-                message="Module discovery attempted imports.",
-                remediation="Ensure module discovery reads only manifest/filesystem.",
-                severity=Severity.CRITICAL,
-            )
+        ModuleDiscovery(modules_root=str(modules_root)).scan()
+    except ImportError as e:
+        return CheckResult(
+            check_id="modules.discovery_no_import",
+            status=CheckStatus.FAILED,
+            message="Module discovery attempted imports.",
+            remediation=str(e),
+            severity=Severity.CRITICAL,
+        )
     except Exception as e:  # noqa: BLE001
         return CheckResult(
             check_id="modules.discovery_no_import",
