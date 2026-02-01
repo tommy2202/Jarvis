@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "capabilities": {
     "CAP_ADMIN_ACTION": {
       "audit": true,

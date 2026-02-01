@@ -184,6 +184,7 @@ class ModuleTrustConfigFile(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: int = Field(default=1, ge=1, le=10)
     allow_unsigned_modules: bool = False
     trusted_module_ids: List[str] = Field(default_factory=list)
     dev_mode_override: bool = False

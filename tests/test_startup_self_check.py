@@ -4,7 +4,7 @@ import os
 from types import SimpleNamespace
 
 import pytest
-from tests.helpers.fakes import FakeDispatcher
+from .helpers.fakes import FakeDispatcher
 
 
 def test_secure_store_key_missing_allows_degraded(tmp_path, monkeypatch):
@@ -64,7 +64,7 @@ def test_secure_store_key_missing_allows_degraded(tmp_path, monkeypatch):
         secure_store=FakeSecureStore(),
         runtime_state=FakeRuntimeState(),
         cfg_obj=cfg,
-        capabilities_cfg_raw={"capabilities": {}},
+        capabilities_cfg_raw=default_config_dict(),
         core_ready={"capability_ok": True, "event_bus_ok": True, "telemetry_ok": True, "job_manager_ok": True, "error_policy_ok": True, "runtime_ok": True},
         dispatcher=dispatcher,
         capability_engine=cap_engine,
@@ -128,7 +128,7 @@ def test_secure_store_key_mismatch_blocks(tmp_path, monkeypatch):
         secure_store=FakeSecureStore(),
         runtime_state=FakeRuntimeState(),
         cfg_obj=cfg,
-        capabilities_cfg_raw={"capabilities": {}},
+        capabilities_cfg_raw=default_config_dict(),
         core_ready={"capability_ok": True, "event_bus_ok": True, "telemetry_ok": True, "job_manager_ok": True, "error_policy_ok": True, "runtime_ok": True},
         dispatcher=dispatcher,
         capability_engine=cap_engine,

@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+CAPABILITIES_SCHEMA_VERSION = 1
+
 
 class CapabilitySensitivity(str, Enum):
     normal = "normal"
@@ -49,6 +51,7 @@ class CapabilitiesConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: int = Field(default=CAPABILITIES_SCHEMA_VERSION, ge=1, le=10)
     enabled: bool = True
     capabilities: Dict[str, CapabilityDefinition]
     intent_requirements: Dict[str, List[str]] = Field(default_factory=dict)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -323,6 +324,7 @@ class ModulesConfig(BaseModel):
 class ExecutionConfigFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: int = Field(default=1, ge=1, le=10)
     enabled: bool = True
     default_backend: str = "sandbox"
     fallback_backend: str = "local_process"
@@ -338,6 +340,45 @@ class ExecutionConfigFile(BaseModel):
         }
     )
     allow_inline_intents: List[str] = Field(default_factory=lambda: _default_inline_intent_allowlist())
+
+    @field_validator("sandbox", mode="before")
+    @classmethod
+    def _validate_sandbox_broker(cls, v: Any) -> Dict[str, Any]:
+        if v is None:
+            return {}
+        if not isinstance(v, dict):
+            return {}
+        broker_cfg = v.get("broker")
+        if broker_cfg is None:
+            return v
+        if not isinstance(broker_cfg, dict):
+            raise ValueError("execution.sandbox.broker must be an object")
+        if "allowed_client_cidrs" not in broker_cfg:
+            return v
+        raw = broker_cfg.get("allowed_client_cidrs")
+        if raw is None:
+            cidrs: List[str] = []
+        elif isinstance(raw, str):
+            cidrs = [raw]
+        elif isinstance(raw, list):
+            cidrs = [str(item) for item in raw]
+        else:
+            raise ValueError("execution.sandbox.broker.allowed_client_cidrs must be a list of CIDR strings")
+        cleaned: List[str] = []
+        for item in cidrs:
+            cidr = str(item or "").strip()
+            if not cidr:
+                raise ValueError("execution.sandbox.broker.allowed_client_cidrs contains an empty CIDR")
+            try:
+                ipaddress.ip_network(cidr, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"Invalid CIDR in execution.sandbox.broker.allowed_client_cidrs: {cidr}") from exc
+            cleaned.append(cidr)
+        broker_cfg = dict(broker_cfg)
+        broker_cfg["allowed_client_cidrs"] = cleaned
+        out = dict(v)
+        out["broker"] = broker_cfg
+        return out
 
     @field_validator("allow_inline_intents", mode="before")
     @classmethod

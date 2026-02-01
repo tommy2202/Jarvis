@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from tests.helpers.fakes import FakeDispatcher
+from jarvis.core.capabilities.loader import default_config_dict
+from .helpers.fakes import FakeDispatcher
 
 
 def test_startup_fails_when_capability_engine_missing(tmp_path, monkeypatch):
@@ -64,7 +65,7 @@ def test_startup_fails_when_capability_engine_missing(tmp_path, monkeypatch):
         secure_store=FakeSecureStore(),
         runtime_state=FakeRuntimeState(),
         cfg_obj=cfg,
-        capabilities_cfg_raw={"capabilities": {}},
+        capabilities_cfg_raw=default_config_dict(),
         core_ready={"capability_ok": True, "event_bus_ok": True, "telemetry_ok": True, "job_manager_ok": True, "error_policy_ok": True, "runtime_ok": True},
         dispatcher=dispatcher,
         capability_engine=None,
@@ -140,7 +141,7 @@ def test_startup_fails_when_web_enabled_without_secure_store(tmp_path, monkeypat
         secure_store=FakeSecureStore(),
         runtime_state=FakeRuntimeState(),
         cfg_obj=cfg,
-        capabilities_cfg_raw={"capabilities": {}},
+        capabilities_cfg_raw=default_config_dict(),
         core_ready={"capability_ok": True, "event_bus_ok": True, "telemetry_ok": True, "job_manager_ok": True, "error_policy_ok": True, "runtime_ok": True},
         dispatcher=dispatcher,
         capability_engine=cap_engine,

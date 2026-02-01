@@ -10,7 +10,7 @@ from jarvis.core.capabilities.loader import default_config_dict, validate_and_no
 from jarvis.core.events.bus import EventBus, EventBusConfig, OverflowPolicy
 from jarvis.core.ops_log import OpsLogger
 from jarvis.core.startup.runner import StartupFlags, StartupSelfCheckRunner
-from tests.helpers.fakes import FakeDispatcher
+from .helpers.fakes import FakeDispatcher
 
 
 def _mk_audit_mgr(tmp_path, event_bus):
@@ -98,7 +98,7 @@ def test_startup_fails_when_capability_engine_missing_audited(tmp_path, monkeypa
             secure_store=FakeSecureStore(),
             runtime_state=FakeRuntimeState(),
             cfg_obj=cfg,
-            capabilities_cfg_raw={"capabilities": {}},
+            capabilities_cfg_raw=default_config_dict(),
             core_ready={"capability_ok": True, "event_bus_ok": True, "telemetry_ok": True, "job_manager_ok": True, "error_policy_ok": True, "runtime_ok": True},
             dispatcher=dispatcher,
             capability_engine=None,
@@ -174,7 +174,7 @@ def test_startup_fails_on_remote_web_when_secure_store_locked(tmp_path, monkeypa
         secure_store=FakeSecureStore(),
         runtime_state=FakeRuntimeState(),
         cfg_obj=cfg,
-        capabilities_cfg_raw={"capabilities": {}},
+        capabilities_cfg_raw=default_config_dict(),
         core_ready={"capability_ok": True, "event_bus_ok": True, "telemetry_ok": True, "job_manager_ok": True, "error_policy_ok": True, "runtime_ok": True},
         dispatcher=dispatcher,
         capability_engine=cap_engine,

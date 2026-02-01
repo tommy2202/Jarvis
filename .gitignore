@@ -24,6 +24,7 @@ logs/
 runtime/
 state/
 cache/
+.lkg/
 
 # --- Secure material (never commit) ---
 secure/

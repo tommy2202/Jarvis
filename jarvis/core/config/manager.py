@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -53,6 +54,15 @@ class ConfigError(RuntimeError):
 
 class SecretUnavailable(ConfigError, _SecureStoreSecretUnavailable):
     pass
+
+
+SECURITY_CRITICAL_CONFIGS: Dict[str, int] = {
+    "capabilities.json": 1,
+    "policy.json": 1,
+    "execution.json": 1,
+    "privacy.json": 1,
+    "module_trust.json": 1,
+}
 
 
 @dataclass
@@ -243,6 +253,92 @@ class ConfigManager:
             "schema_dir": self.fs.schema_dir,
         }
 
+    # ---- security-critical config controls ----
+    def _security_config_versions(self) -> Dict[str, int]:
+        return dict(SECURITY_CRITICAL_CONFIGS)
+
+    def _security_config_names(self) -> list[str]:
+        return list(self._security_config_versions().keys())
+
+    def _validate_security_schema_version(self, name: str, raw: Dict[str, Any]) -> None:
+        expected = self._security_config_versions().get(name)
+        if expected is None:
+            return
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{name} invalid (not an object).")
+        if raw.get("_invalid_config"):
+            raise ConfigError(f"{name} invalid: {raw.get('_invalid_config')}")
+        if "schema_version" not in raw:
+            raise ConfigError(f"{name} missing schema_version (expected {expected}).")
+        try:
+            schema_version = int(raw.get("schema_version"))
+        except Exception as e:  # noqa: BLE001
+            raise ConfigError(f"{name} schema_version must be an integer (expected {expected}).") from e
+        if schema_version != expected:
+            raise ConfigError(
+                f"{name} schema_version mismatch (expected {expected}). Run the config migration tool before starting."
+            )
+
+    def _validate_security_schema_versions(self, files: Dict[str, Dict[str, Any]]) -> None:
+        for name in self._security_config_names():
+            raw = files.get(name) or {}
+            self._validate_security_schema_version(name, raw)
+
+    def snapshot_security_lkg(self, *, root_dir: Optional[str] = None, ops: Any = None) -> list[str]:
+        root = str(root_dir or self.fs.root or ".")
+        lkg_dir = os.path.join(root, ".lkg")
+        os.makedirs(lkg_dir, exist_ok=True)
+        copied: list[str] = []
+        for name in self._security_config_names():
+            src = os.path.join(self.fs.config_dir, name)
+            if not os.path.isfile(src):
+                continue
+            dst = os.path.join(lkg_dir, name)
+            try:
+                shutil.copy2(src, dst)
+                copied.append(name)
+            except Exception as e:  # noqa: BLE001
+                if self.logger:
+                    self.logger.warning(f"Unable to snapshot {name} to .lkg: {e}")
+        if ops is not None:
+            try:
+                ops.log(trace_id="startup", event="config.lkg.snapshot", outcome="ok", details={"files": copied})
+            except Exception:
+                pass
+        return copied
+
+    def restore_security_lkg(self, *, root_dir: Optional[str] = None, security_manager: Any = None, ops: Any = None) -> list[str]:
+        if security_manager is None or not bool(getattr(security_manager, "is_admin", lambda: False)()):
+            raise PermissionError("Admin required to restore security configs from LKG.")
+        root = str(root_dir or self.fs.root or ".")
+        lkg_dir = os.path.join(root, ".lkg")
+        if not os.path.isdir(lkg_dir):
+            raise FileNotFoundError("No LKG directory found.")
+        restored: list[str] = []
+        max_backups = 10
+        try:
+            if self._cfg is not None:
+                max_backups = int((self._cfg.app.backups or {}).get("max_backups_per_file", 10))
+        except Exception:
+            max_backups = 10
+        for name in self._security_config_names():
+            src = os.path.join(lkg_dir, name)
+            if not os.path.isfile(src):
+                continue
+            rr = read_json_file(src)
+            if not rr.ok:
+                raise ConfigError(f"LKG file invalid: {name} ({rr.error})")
+            self._validate_security_schema_version(name, rr.data)
+            dst = os.path.join(self.fs.config_dir, name)
+            atomic_write_json(dst, rr.data, self.fs.backups_dir, max_backups=max_backups)
+            restored.append(name)
+        if ops is not None:
+            try:
+                ops.log(trace_id="config", event="config.lkg.restore", outcome="ok", details={"files": restored})
+            except Exception:
+                pass
+        return restored
+
     # Secrets unified API
     def get_secret(self, key: str) -> Any:
         if self._secure_store is None:
@@ -297,6 +393,14 @@ class ConfigManager:
             rr: ReadResult = read_json_file(path)
             if rr.ok:
                 out[name] = rr.data
+                continue
+            if name in SECURITY_CRITICAL_CONFIGS and rr.error:
+                if rr.error == "missing":
+                    out[name] = {}
+                else:
+                    if self.logger:
+                        self.logger.warning(f"Invalid security config {name}: {rr.error}")
+                    out[name] = {"_invalid_config": rr.error}
                 continue
             if rr.error and rr.error.startswith("corrupt_json"):
                 data, recovered = recover_from_corrupt(path, self.fs.backups_dir, self.fs.last_known_good_dir, max_backups=10)
@@ -354,6 +458,7 @@ class ConfigManager:
 
     def _validate_all(self, files: Dict[str, Dict[str, Any]]) -> AppConfigV2:
         try:
+            self._validate_security_schema_versions(files)
             # Capabilities config is validated separately (outside AppConfigV2) to avoid bloating the core config schema.
             # Still strict schema validated at load time via capabilities.models.
             try:

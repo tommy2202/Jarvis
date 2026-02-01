@@ -102,6 +102,7 @@ class SandboxExecutionRunner:
 
     def run(self, *, request: ExecutionRequest, plan: ExecutionPlan) -> ExecutionResult:
         metadata: Dict[str, Any] = {}
+        warning: Dict[str, Any] | None = None
         if not self.is_available():
             return ExecutionResult(
                 ok=False,
@@ -109,6 +110,7 @@ class SandboxExecutionRunner:
                 exec_mode=plan.mode,
                 trace_id=request.trace_id,
                 error="sandbox_unavailable",
+                warning=warning,
                 metadata=metadata,
             )
 
@@ -186,12 +188,21 @@ class SandboxExecutionRunner:
                 allowed_client_cidrs = broker_cfg.get("allowed_client_cidrs")
                 if allowed_client_cidrs is None:
                     allowed_client_cidrs = []
+                elif isinstance(allowed_client_cidrs, str):
+                    allowed_client_cidrs = [allowed_client_cidrs]
+                elif isinstance(allowed_client_cidrs, (list, tuple, set)):
+                    allowed_client_cidrs = [str(item) for item in allowed_client_cidrs]
+                else:
+                    raise ValueError("execution.sandbox.broker.allowed_client_cidrs must be a list of CIDR strings")
             else:
-                allowed_client_cidrs = ["127.0.0.1/32", "::1/128"]
-                if broker_host not in {"127.0.0.1", "localhost", "::1"} and (
-                    broker_host == "host.docker.internal" or bind_host == "0.0.0.0"
-                ):
-                    allowed_client_cidrs = ["127.0.0.1/32", "::1/128", "172.16.0.0/12"]
+                loopback_cidrs = ["127.0.0.1/32", "::1/128"]
+                bind_host_norm = bind_host.strip().lower()
+                if bind_host_norm in {"127.0.0.1", "localhost", "::1"}:
+                    allowed_client_cidrs = list(loopback_cidrs)
+                elif bind_host_norm == "0.0.0.0":
+                    allowed_client_cidrs = list(loopback_cidrs) + ["172.16.0.0/12"]
+                else:
+                    allowed_client_cidrs = list(loopback_cidrs)
             broker_server = BrokerServer(
                 tool_broker=tool_broker,
                 capability_engine=self._capability_engine,
@@ -216,6 +227,19 @@ class SandboxExecutionRunner:
                     exec_mode=plan.mode,
                     trace_id=request.trace_id,
                     error="broker_unavailable",
+                    warning=warning,
+                    metadata=metadata,
+                )
+            if not str(broker_host or "").strip():
+                broker_server.stop()
+                shutil.rmtree(temp_root, ignore_errors=True)
+                return ExecutionResult(
+                    ok=False,
+                    backend=plan.backend,
+                    exec_mode=plan.mode,
+                    trace_id=request.trace_id,
+                    error="broker_unavailable",
+                    warning=warning,
                     metadata=metadata,
                 )
             endpoint = f"{broker_host}:{int(port)}"
@@ -234,7 +258,8 @@ class SandboxExecutionRunner:
             network_mode = str((sandbox_cfg or {}).get("broker_network_mode") or "bridge")
             cmd += ["--network", network_mode]
             if network_mode != "none":
-                exception_details = {"reason_code": "BROKER_REQUIRED", "network_mode": network_mode}
+                exception_details = {"reason_code": "BROKER_REQUIRED", "network_mode": network_mode, "trace_id": request.trace_id}
+                warning = {"reason_code": "BROKER_REQUIRED", "network_mode": network_mode}
                 if self._event_logger is not None:
                     self._event_logger.log(request.trace_id, "sandbox.network_exception", exception_details)
                 if self._event_bus is not None:
@@ -272,6 +297,7 @@ class SandboxExecutionRunner:
                 exec_mode=plan.mode,
                 trace_id=request.trace_id,
                 error="sandbox_timeout",
+                warning=warning,
                 metadata=metadata,
             )
         finally:
@@ -288,6 +314,7 @@ class SandboxExecutionRunner:
                 exec_mode=plan.mode,
                 trace_id=request.trace_id,
                 error="sandbox_result_missing",
+                warning=warning,
                 metadata=metadata,
             )
 
@@ -302,6 +329,7 @@ class SandboxExecutionRunner:
                 exec_mode=plan.mode,
                 trace_id=request.trace_id,
                 error="sandbox_result_invalid",
+                warning=warning,
                 metadata=metadata,
             )
 
@@ -316,6 +344,7 @@ class SandboxExecutionRunner:
                 exec_mode=plan.mode,
                 trace_id=request.trace_id,
                 output=output or {},
+                warning=warning,
                 metadata=metadata,
             )
         return ExecutionResult(
@@ -324,5 +353,6 @@ class SandboxExecutionRunner:
             exec_mode=plan.mode,
             trace_id=request.trace_id,
             error=err[:300],
+            warning=warning,
             metadata=metadata,
         )

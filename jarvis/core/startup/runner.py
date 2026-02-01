@@ -181,6 +181,16 @@ class StartupSelfCheckRunner:
                     )
                 except Exception:
                     pass
+        if result.overall_status != OverallStatus.BLOCKED:
+            try:
+                snapshot = getattr(config_manager, "snapshot_security_lkg", None)
+                if callable(snapshot):
+                    snapshot(root_dir=root_dir, ops=self.ops)
+            except Exception as e:  # noqa: BLE001
+                try:
+                    self.ops.log(trace_id="startup", event="config.lkg.snapshot", outcome="error", details={"error": str(e)[:200]})
+                except Exception:
+                    pass
         if self.telemetry is not None:
             try:
                 self.telemetry.set_gauge("startup_safe_mode", 1 if result.started_in_safe_mode else 0)
