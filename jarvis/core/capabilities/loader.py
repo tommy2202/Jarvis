@@ -5,7 +5,7 @@ from typing import Any, Dict
 from pydantic import ValidationError
 
 from jarvis.core.capabilities.defaults import default_capabilities
-from jarvis.core.capabilities.models import CapabilitiesConfig, CapabilityDefinition
+from jarvis.core.capabilities.models import CAPABILITIES_SCHEMA_VERSION, CapabilitiesConfig, CapabilityDefinition
 
 
 class CapabilityConfigError(RuntimeError):
@@ -15,6 +15,7 @@ class CapabilityConfigError(RuntimeError):
 def default_config_dict() -> Dict[str, Any]:
     caps = default_capabilities()
     return {
+        "schema_version": CAPABILITIES_SCHEMA_VERSION,
         "capabilities": {k: v.model_dump() for k, v in caps.items()},
         "intent_requirements": {
             "music.play": ["CAP_AUDIO_OUTPUT"],
@@ -35,6 +36,18 @@ def default_config_dict() -> Dict[str, Any]:
 
 
 def validate_and_normalize(raw: Dict[str, Any]) -> CapabilitiesConfig:
+    if not isinstance(raw, dict):
+        raise CapabilityConfigError("capabilities.json must be an object.")
+    if "schema_version" not in raw:
+        raise CapabilityConfigError("capabilities.json missing schema_version.")
+    try:
+        schema_version = int(raw.get("schema_version"))
+    except Exception as e:  # noqa: BLE001
+        raise CapabilityConfigError("capabilities.json schema_version must be an integer.") from e
+    if schema_version != CAPABILITIES_SCHEMA_VERSION:
+        raise CapabilityConfigError(
+            f"capabilities.json schema_version mismatch (expected {CAPABILITIES_SCHEMA_VERSION})."
+        )
     try:
         cfg = CapabilitiesConfig.model_validate(raw)
     except ValidationError as e:

@@ -92,6 +92,7 @@ class PolicyDefaults(BaseModel):
 class PolicyConfigFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: int = Field(default=1, ge=1, le=10)
     enabled: bool = True
     default: PolicyDefaults = Field(default_factory=PolicyDefaults)
     rules: List[PolicyRule] = Field(default_factory=list)

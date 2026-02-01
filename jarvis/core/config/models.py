@@ -324,6 +324,7 @@ class ModulesConfig(BaseModel):
 class ExecutionConfigFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: int = Field(default=1, ge=1, le=10)
     enabled: bool = True
     default_backend: str = "sandbox"
     fallback_backend: str = "local_process"
