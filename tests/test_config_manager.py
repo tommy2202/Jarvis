@@ -9,6 +9,7 @@ import pytest
 from jarvis.core.config.manager import ConfigManager, SecretUnavailable, ConfigError
 from jarvis.core.config.paths import ConfigFsPaths
 from jarvis.core.crypto import generate_usb_master_key_bytes, write_usb_key
+from .helpers.config_builders import build_web_config_v1
 
 
 class DummyLogger:
@@ -76,7 +77,16 @@ def test_migration_bumps_version(tmp_path):
         json.dump({"config_version": 1, "created_at": "x", "last_migrated_at": "x", "backups": {"max_backups_per_file": 10}, "hot_reload": {"enabled": False, "debounce_ms": 500, "poll_interval_ms": 500}}, f)
     # legacy web.json with host key
     with open(fs.web, "w", encoding="utf-8") as f:
-        json.dump({"enabled": False, "host": "0.0.0.0", "port": 8000, "allowed_origins": [], "enable_web_ui": True}, f)
+        web = build_web_config_v1(
+            overrides={
+                "enabled": False,
+                "host": "0.0.0.0",
+                "port": 8000,
+                "allowed_origins": [],
+                "enable_web_ui": True,
+            }
+        )
+        json.dump(web, f)
     cm = ConfigManager(fs=fs, logger=DummyLogger(), read_only=False)
     cfg = cm.load_all()
     assert cfg.app.config_version >= 2

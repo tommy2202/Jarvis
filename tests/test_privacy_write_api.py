@@ -11,6 +11,7 @@ from jarvis.core.privacy.store import PrivacyStore
 from jarvis.core.privacy.write_api import write_artifact_metadata, write_memory
 from jarvis.core.secure_store import SecureStore
 from jarvis.core.security_events import SecurityAuditLogger
+from .helpers.config_builders import build_privacy_config_v1
 
 
 class _L:
@@ -32,7 +33,7 @@ def _make_secure_store(tmp_path) -> SecureStore:
 
 
 def _allow_persistence(cm: ConfigManager) -> None:
-    raw = cm.read_non_sensitive("privacy.json") or {}
+    raw = cm.read_non_sensitive("privacy.json") or build_privacy_config_v1()
     raw.setdefault("data_minimization", {})
     raw["data_minimization"]["disable_persistent_user_text"] = False
     raw["data_minimization"]["disable_persistent_transcripts"] = False

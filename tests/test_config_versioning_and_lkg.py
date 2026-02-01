@@ -16,6 +16,7 @@ from jarvis.core.ops_log import OpsLogger
 from jarvis.core.policy.engine import PolicyEngine
 from jarvis.core.policy.models import PolicyConfigFile
 from jarvis.core.startup.runner import StartupFlags, StartupSelfCheckRunner
+from .helpers.config_builders import build_capabilities_config_v1, build_policy_config_v1
 from .helpers.fakes import FakeDispatcher
 
 
@@ -35,14 +36,10 @@ def _write_json(path: str, obj: dict) -> None:
 def test_invalid_schema_version_fails_load(tmp_path):
     cfg_dir = tmp_path / "config"
     os.makedirs(cfg_dir, exist_ok=True)
+    policy = build_policy_config_v1(overrides={"schema_version": 99})
     _write_json(
         str(cfg_dir / "policy.json"),
-        {
-            "schema_version": 99,
-            "enabled": True,
-            "default": {"deny_unknown_intents": True, "deny_high_sensitivity_without_admin": True},
-            "rules": [],
-        },
+        policy,
     )
     cm = ConfigManager(fs=ConfigFsPaths(str(tmp_path)), logger=_L())
     with pytest.raises(ConfigError, match="schema_version"):
@@ -52,7 +49,9 @@ def test_invalid_schema_version_fails_load(tmp_path):
 def test_missing_required_field_fails_load(tmp_path):
     cfg_dir = tmp_path / "config"
     os.makedirs(cfg_dir, exist_ok=True)
-    _write_json(str(cfg_dir / "capabilities.json"), {"schema_version": 1})
+    caps = build_capabilities_config_v1()
+    caps.pop("capabilities", None)
+    _write_json(str(cfg_dir / "capabilities.json"), caps)
     cm = ConfigManager(fs=ConfigFsPaths(str(tmp_path)), logger=_L())
     with pytest.raises(ConfigError, match="capabilities.json"):
         cm.load_all()
