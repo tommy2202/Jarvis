@@ -63,6 +63,7 @@ class JobsConfig(BaseModel):
 
 class WebConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    schema_version: int = Field(default=1, ge=1, le=10)
     enabled: bool = False
     bind_host: str = "127.0.0.1"
     port: int = 8000
@@ -142,6 +143,7 @@ class AuditConfigFile(BaseModel):
 
 class PolicyConfigFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    schema_version: int = Field(default=1, ge=1, le=10)
     enabled: bool = True
     default: Dict[str, Any] = Field(default_factory=lambda: {"deny_unknown_intents": True, "deny_high_sensitivity_without_admin": True})
     rules: List[Dict[str, Any]] = Field(default_factory=list)

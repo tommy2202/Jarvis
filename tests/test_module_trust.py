@@ -6,6 +6,7 @@ import os
 from jarvis.core.modules.manager import ModuleManager
 from jarvis.core.security import AdminSession, SecurityManager
 from jarvis.core.secure_store import SecureStore
+from .helpers.config_builders import build_module_trust_config_v1
 from .helpers.module_trust import DummyLogger, EventBusCapture, make_cfg, write_module_json
 
 
@@ -114,7 +115,10 @@ def test_admin_can_trust_module(tmp_path):
 
 def test_dev_mode_override_logged(tmp_path):
     cm = make_cfg(tmp_path)
-    cm.save_non_sensitive("module_trust.json", {"allow_unsigned_modules": False, "dev_mode_override": True})
+    cm.save_non_sensitive(
+        "module_trust.json",
+        build_module_trust_config_v1(overrides={"allow_unsigned_modules": False, "dev_mode_override": True}),
+    )
     modules_root = tmp_path / "jarvis" / "modules"
     mod_dir = modules_root / "safe.three"
     write_module_json(

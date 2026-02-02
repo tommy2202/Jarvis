@@ -254,12 +254,12 @@ python -m pip install -U pip
 pip install -e ".[dev]"
 ```
 
-### Dev check (Windows)
+### Run verification
 
-Run unit tests + core smoke checks (no web/UI launch):
+Offline checks (bytecode compile + tests):
 
 ```powershell
-.\scripts\dev_check.ps1
+powershell -ExecutionPolicy Bypass -File scripts/dev_check.ps1
 ```
 
 Or run unit tests directly:

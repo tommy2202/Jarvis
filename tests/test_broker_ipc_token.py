@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import time
 
@@ -19,6 +20,7 @@ from jarvis.core.policy.models import PolicyConfigFile
 from jarvis.core.privacy.store import PrivacyStore
 from jarvis.core.secure_store import SecureStore
 from jarvis.core.security_events import SecurityAuditLogger
+from .helpers.config_builders import build_policy_config_v1
 
 
 class _L:
@@ -28,7 +30,14 @@ class _L:
 
 
 def _make_cfg(tmp_path) -> ConfigManager:
-    cm = ConfigManager(fs=ConfigFsPaths(str(tmp_path)), logger=_L(), read_only=False)
+    fs = ConfigFsPaths(str(tmp_path))
+    os.makedirs(fs.config_dir, exist_ok=True)
+    policy_path = os.path.join(fs.config_dir, "policy.json")
+    if not os.path.exists(policy_path):
+        with open(policy_path, "w", encoding="utf-8") as f:
+            json.dump(build_policy_config_v1(), f)
+            f.write("\n")
+    cm = ConfigManager(fs=fs, logger=_L(), read_only=False)
     cm.load_all()
     return cm
 

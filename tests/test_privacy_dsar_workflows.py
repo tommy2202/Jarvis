@@ -9,6 +9,7 @@ from jarvis.core.config.paths import ConfigFsPaths
 from jarvis.core.privacy.dsar import DsarEngine
 from jarvis.core.privacy.models import DataCategory, DataRecord, LawfulBasis, Sensitivity, StorageKind
 from jarvis.core.privacy.store import PrivacyStore
+from .helpers.config_builders import build_privacy_config_v1
 
 
 class _L:
@@ -24,7 +25,7 @@ def _make_cfg(tmp_path) -> ConfigManager:
 
 
 def _set_dsar_export_allow_copy(cm: ConfigManager, cats: list[str]) -> None:
-    raw = cm.read_non_sensitive("privacy.json") or {}
+    raw = cm.read_non_sensitive("privacy.json") or build_privacy_config_v1()
     raw.setdefault("dsar", {})
     raw["dsar"].setdefault("export", {})
     raw["dsar"]["export"]["allow_copy_categories"] = list(cats)
@@ -32,7 +33,7 @@ def _set_dsar_export_allow_copy(cm: ConfigManager, cats: list[str]) -> None:
 
 
 def _set_dsar_delete_cfg(cm: ConfigManager, cats: list[str], action: str = "delete") -> None:
-    raw = cm.read_non_sensitive("privacy.json") or {}
+    raw = cm.read_non_sensitive("privacy.json") or build_privacy_config_v1()
     raw.setdefault("dsar", {})
     raw["dsar"].setdefault("delete", {})
     raw["dsar"]["delete"]["categories"] = list(cats)

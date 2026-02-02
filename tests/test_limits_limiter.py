@@ -11,6 +11,7 @@ from jarvis.core.limits.limiter import Limiter
 from jarvis.core.module_registry import ModuleRegistry
 from jarvis.core.security import AdminSession, PermissionPolicy, SecurityManager
 from jarvis.core.secure_store import SecureStore
+from .helpers.config_builders import build_capabilities_config_v1
 
 
 class _L:
@@ -27,7 +28,7 @@ def _make_cfg(tmp_path) -> ConfigManager:
 
 def _cap_engine(cm: ConfigManager, tmp_path) -> CapabilityEngine:
     caps_raw = cm.read_non_sensitive("capabilities.json")
-    caps_raw = dict(caps_raw or {})
+    caps_raw = dict(caps_raw or build_capabilities_config_v1())
     caps_raw["intent_requirements"] = {"core.ping": []}
     cm.save_non_sensitive("capabilities.json", caps_raw)
     cap_cfg = validate_and_normalize(cm.read_non_sensitive("capabilities.json"))

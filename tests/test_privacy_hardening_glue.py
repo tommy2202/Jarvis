@@ -16,6 +16,7 @@ from jarvis.core.privacy.store import PrivacyStore
 from jarvis.core.runtime import JarvisRuntime, RuntimeConfig, RuntimeEvent, EventType
 from jarvis.core.security import AdminSession, PermissionPolicy, SecurityManager
 from jarvis.core.secure_store import SecureStore
+from .helpers.config_builders import build_privacy_config_v1
 
 
 class _L:
@@ -55,7 +56,7 @@ def test_no_transcript_stored_by_default(tmp_path):
 def test_transcript_storage_requires_consent(tmp_path):
     cm = _make_cfg(tmp_path)
     # enable persistent transcript storage in privacy.json
-    raw = cm.read_non_sensitive("privacy.json")
+    raw = cm.read_non_sensitive("privacy.json") or build_privacy_config_v1()
     raw.setdefault("data_minimization", {})
     raw["data_minimization"]["disable_persistent_transcripts"] = False
     cm.save_non_sensitive("privacy.json", raw)

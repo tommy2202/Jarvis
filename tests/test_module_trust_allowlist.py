@@ -3,12 +3,16 @@ from __future__ import annotations
 from jarvis.core.modules.manager import ModuleManager
 from jarvis.core.security import AdminSession, SecurityManager
 from jarvis.core.secure_store import SecureStore
+from .helpers.config_builders import build_module_trust_config_v1
 from .helpers.module_trust import DummyLogger, EventBusCapture, make_cfg, write_module_json
 
 
 def test_allowlist_blocks_non_allowlisted_module(tmp_path):
     cm = make_cfg(tmp_path)
-    cm.save_non_sensitive("module_trust.json", {"trusted_module_ids": ["safe.allowlisted"], "dev_mode": False})
+    cm.save_non_sensitive(
+        "module_trust.json",
+        build_module_trust_config_v1(overrides={"trusted_module_ids": ["safe.allowlisted"], "dev_mode": False}),
+    )
     modules_root = tmp_path / "jarvis" / "modules"
     mod_dir = modules_root / "demo.blocked"
     write_module_json(
@@ -44,7 +48,10 @@ def test_allowlist_blocks_non_allowlisted_module(tmp_path):
 
 def test_allowlisted_module_requires_admin_when_not_safe(tmp_path):
     cm = make_cfg(tmp_path)
-    cm.save_non_sensitive("module_trust.json", {"trusted_module_ids": ["demo.risky"], "dev_mode": False})
+    cm.save_non_sensitive(
+        "module_trust.json",
+        build_module_trust_config_v1(overrides={"trusted_module_ids": ["demo.risky"], "dev_mode": False}),
+    )
     modules_root = tmp_path / "jarvis" / "modules"
     mod_dir = modules_root / "demo.risky"
     write_module_json(
@@ -86,7 +93,10 @@ def test_allowlisted_module_requires_admin_when_not_safe(tmp_path):
 
 def test_dev_mode_allowlist_override_audited(tmp_path):
     cm = make_cfg(tmp_path)
-    cm.save_non_sensitive("module_trust.json", {"trusted_module_ids": ["only.this"], "dev_mode": True})
+    cm.save_non_sensitive(
+        "module_trust.json",
+        build_module_trust_config_v1(overrides={"trusted_module_ids": ["only.this"], "dev_mode": True}),
+    )
     modules_root = tmp_path / "jarvis" / "modules"
     mod_dir = modules_root / "demo.override"
     write_module_json(
