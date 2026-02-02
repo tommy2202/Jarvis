@@ -11,7 +11,7 @@ def test_allowlist_blocks_non_allowlisted_module(tmp_path):
     cm = make_cfg(tmp_path)
     cm.save_non_sensitive(
         "module_trust.json",
-        build_module_trust_config_v1(overrides={"trusted_module_ids": ["safe.allowlisted"], "dev_mode": False}),
+        build_module_trust_config_v1(trusted_module_ids=["safe.allowlisted"], dev_mode=False),
     )
     modules_root = tmp_path / "jarvis" / "modules"
     mod_dir = modules_root / "demo.blocked"
@@ -50,7 +50,7 @@ def test_allowlisted_module_requires_admin_when_not_safe(tmp_path):
     cm = make_cfg(tmp_path)
     cm.save_non_sensitive(
         "module_trust.json",
-        build_module_trust_config_v1(overrides={"trusted_module_ids": ["demo.risky"], "dev_mode": False}),
+        build_module_trust_config_v1(trusted_module_ids=["demo.risky"], dev_mode=False),
     )
     modules_root = tmp_path / "jarvis" / "modules"
     mod_dir = modules_root / "demo.risky"
@@ -95,7 +95,7 @@ def test_dev_mode_allowlist_override_audited(tmp_path):
     cm = make_cfg(tmp_path)
     cm.save_non_sensitive(
         "module_trust.json",
-        build_module_trust_config_v1(overrides={"trusted_module_ids": ["only.this"], "dev_mode": True}),
+        build_module_trust_config_v1(trusted_module_ids=["only.this"], dev_mode=True),
     )
     modules_root = tmp_path / "jarvis" / "modules"
     mod_dir = modules_root / "demo.override"

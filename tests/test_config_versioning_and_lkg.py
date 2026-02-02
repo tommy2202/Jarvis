@@ -36,7 +36,7 @@ def _write_json(path: str, obj: dict) -> None:
 def test_invalid_schema_version_fails_load(tmp_path):
     cfg_dir = tmp_path / "config"
     os.makedirs(cfg_dir, exist_ok=True)
-    policy = build_policy_config_v1(overrides={"schema_version": 99})
+    policy = build_policy_config_v1(schema_version=99)
     _write_json(
         str(cfg_dir / "policy.json"),
         policy,

@@ -7,6 +7,7 @@ from jarvis.core.config.io import read_json_file
 from jarvis.core.config.paths import ConfigFsPaths
 from jarvis.core.events import EventLogger
 from jarvis.core.migrations import VersionRegistry, run_module_registry_migrations
+from .helpers.config_builders import build_modules_config_v1
 
 
 def _read_events(path: str) -> list[dict]:
@@ -23,7 +24,11 @@ def test_migration_runs_once(tmp_path):
     event_logger = EventLogger(events_path)
 
     files = {
-        "modules.json": {"schema_version": 0, "modules": [{"module_id": "demo", "enabled": True}], "intents": []},
+        "modules.json": build_modules_config_v1(
+            schema_version=0,
+            modules=[{"module_id": "demo", "enabled": True}],
+            intents=[],
+        ),
         "modules_registry.json": {"modules": "invalid"},
     }
 
@@ -74,7 +79,10 @@ def test_migration_logged(tmp_path):
     registry = VersionRegistry(path=os.path.join(fs.config_dir, "schema_registry.json"), backups_dir=fs.backups_dir)
     event_logger = EventLogger(events_path)
 
-    files = {"modules.json": {"schema_version": 0, "modules": [], "intents": []}, "modules_registry.json": {}}
+    files = {
+        "modules.json": build_modules_config_v1(schema_version=0, modules=[], intents=[]),
+        "modules_registry.json": {},
+    }
     run_module_registry_migrations(
         fs=fs,
         files=files,

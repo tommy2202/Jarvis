@@ -6,7 +6,7 @@ import os
 from jarvis.core.modules.manager import ModuleManager
 from jarvis.core.security import AdminSession, SecurityManager
 from jarvis.core.secure_store import SecureStore
-from .helpers.config_builders import build_module_trust_config_v1
+from .helpers.config_builders import build_module_trust_config_v1, build_modules_config_v1
 from .helpers.module_trust import DummyLogger, EventBusCapture, make_cfg, write_module_json
 
 
@@ -31,10 +31,9 @@ def test_untrusted_module_blocked(tmp_path):
     # Pre-seed registry to simulate a non-local provenance install.
     cm.save_non_sensitive(
         "modules.json",
-        {
-            "schema_version": 1,
-            "intents": [],
-            "modules": {
+        build_modules_config_v1(
+            intents=[],
+            modules={
                 "safe.three": {
                     "installed": True,
                     "enabled": True,
@@ -50,7 +49,7 @@ def test_untrusted_module_blocked(tmp_path):
                     "changed_requires_review": False,
                 }
             },
-        },
+        ),
     )
 
     mm = ModuleManager(config_manager=cm, modules_root=str(modules_root), runtime_dir=str(tmp_path / "runtime"), event_bus=None, logger=DummyLogger(), security_manager=None)
@@ -80,10 +79,9 @@ def test_admin_can_trust_module(tmp_path):
 
     cm.save_non_sensitive(
         "modules.json",
-        {
-            "schema_version": 1,
-            "intents": [],
-            "modules": {
+        build_modules_config_v1(
+            intents=[],
+            modules={
                 "safe.three": {
                     "installed": True,
                     "enabled": False,
@@ -99,7 +97,7 @@ def test_admin_can_trust_module(tmp_path):
                     "changed_requires_review": False,
                 }
             },
-        },
+        ),
     )
 
     store = SecureStore(usb_key_path=str(tmp_path / "usb_missing.bin"), store_path=str(tmp_path / "store.enc"))
@@ -117,7 +115,7 @@ def test_dev_mode_override_logged(tmp_path):
     cm = make_cfg(tmp_path)
     cm.save_non_sensitive(
         "module_trust.json",
-        build_module_trust_config_v1(overrides={"allow_unsigned_modules": False, "dev_mode_override": True}),
+        build_module_trust_config_v1(allow_unsigned_modules=False, dev_mode_override=True),
     )
     modules_root = tmp_path / "jarvis" / "modules"
     mod_dir = modules_root / "safe.three"
@@ -137,10 +135,9 @@ def test_dev_mode_override_logged(tmp_path):
 
     cm.save_non_sensitive(
         "modules.json",
-        {
-            "schema_version": 1,
-            "intents": [],
-            "modules": {
+        build_modules_config_v1(
+            intents=[],
+            modules={
                 "safe.three": {
                     "installed": True,
                     "enabled": True,
@@ -156,7 +153,7 @@ def test_dev_mode_override_logged(tmp_path):
                     "changed_requires_review": False,
                 }
             },
-        },
+        ),
     )
 
     bus = EventBusCapture()

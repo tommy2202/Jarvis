@@ -78,13 +78,11 @@ def test_migration_bumps_version(tmp_path):
     # legacy web.json with host key
     with open(fs.web, "w", encoding="utf-8") as f:
         web = build_web_config_v1(
-            overrides={
-                "enabled": False,
-                "host": "0.0.0.0",
-                "port": 8000,
-                "allowed_origins": [],
-                "enable_web_ui": True,
-            }
+            enabled=False,
+            host="0.0.0.0",
+            port=8000,
+            allowed_origins=[],
+            enable_web_ui=True,
         )
         json.dump(web, f)
     cm = ConfigManager(fs=fs, logger=DummyLogger(), read_only=False)
