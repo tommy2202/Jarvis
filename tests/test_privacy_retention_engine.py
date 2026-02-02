@@ -7,6 +7,7 @@ from jarvis.core.config.manager import ConfigManager
 from jarvis.core.config.paths import ConfigFsPaths
 from jarvis.core.privacy.models import DataCategory, DataRecord, LawfulBasis, Sensitivity, StorageKind
 from jarvis.core.privacy.store import PrivacyStore
+from .helpers.config_builders import build_privacy_config_v1
 
 
 class _L:
@@ -22,9 +23,7 @@ def _make_cfg(tmp_path) -> ConfigManager:
 
 
 def _write_privacy_policy(cm: ConfigManager, *, category: str, sensitivity: str, ttl_days: int, deletion_action: str, review_required: bool) -> None:
-    raw = cm.read_non_sensitive("privacy.json") or {}
-    raw.setdefault("schema_version", 1)
-    raw.setdefault("default_user_id", "default")
+    raw = cm.read_non_sensitive("privacy.json") or build_privacy_config_v1()
     raw.setdefault("data_minimization", {})
     raw.setdefault("default_consent_scopes", {})
     pols = raw.get("retention_policies") or []
