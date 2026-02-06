@@ -4,7 +4,7 @@ This repo is a **minimal but functional** “Jarvis” assistant designed to run
 
 - **Config-driven Stage-A intent router** (keyword matching + confidence + basic args)
 - **Core fact fuzzy safeguard** (time/date/status/version resolve locally even with phrasing variance)
-- **Stage-B local LLM fallback** (local HTTP to a model server, safe mock mode)
+- **Stage-B local LLM fallback** (llama.cpp in-process primary; Ollama HTTP optional; safe mock mode)
 - **Single enforcement point** (dispatcher enforces permissions + admin gating)
 - **Admin session** (passphrase hash stored in **encrypted secure store**; inactivity timeout)
 - **USB-key encryption** (AES-GCM; default USB key path `E:\JARVIS_KEY.bin`)
@@ -682,18 +682,61 @@ CLI commands:
 - `/shutdown`
 - `/say <text>`
 
-## LLM lifecycle control (Ollama recommended)
+## LLM lifecycle control (llama.cpp primary, Ollama optional)
 
 Jarvis supports two **local LLM roles**:
 - **chat**: starts on wake/first message; unloads after idle
 - **coder**: on-demand (CLI `/llm test coder ...`), then unloads immediately after use
 
-Configuration: `config/llm.json`
-- `mode: "external"` (default): Jarvis never starts/stops Ollama; it only calls `base_url`.
-- `mode: "managed"`: Jarvis may attempt a best-effort `ollama serve` if the server is down.
-  - By default Jarvis will **not** kill your Ollama server on idle (`managed_kill_server_on_idle: false`).
+**Two backend types** (config-only switching):
+- **llamacpp** (primary, default): In-process GGUF model via `llama-cpp-python`. Offline, no server needed, no billing, no prompt logging.
+- **ollama** (optional fallback): HTTP backend for Ollama server.
 
-### Windows setup (Ollama)
+Configuration: `config/llm.json` (validated with `schema_version`)
+
+### llama.cpp setup (recommended, offline)
+
+1) Install the optional dependency:
+
+```bash
+pip install llama-cpp-python
+```
+
+2) Download GGUF models and place them in a `models/` directory (or any path):
+
+```
+models/chat.gguf      # e.g. Qwen, Mistral, Llama GGUF
+models/coder.gguf     # e.g. CodeQwen, DeepSeek-Coder GGUF
+```
+
+3) Update `config/llm.json` roles to point to your models:
+
+```json
+{
+  "roles": {
+    "chat": {
+      "backend": "llamacpp",
+      "model": "models/chat.gguf",
+      "model_path": "models/chat.gguf",
+      "n_ctx": 2048,
+      "n_gpu_layers": 0
+    },
+    "coder": {
+      "backend": "llamacpp",
+      "model": "models/coder.gguf",
+      "model_path": "models/coder.gguf",
+      "n_ctx": 4096,
+      "n_gpu_layers": 0
+    }
+  }
+}
+```
+
+Key settings: `n_gpu_layers` (set > 0 for GPU offload), `n_ctx` (context window), `n_threads` (CPU threads, null=auto).
+
+Models are loaded lazily on first request and unloaded after `idle_unload_seconds` of inactivity.
+
+### Ollama setup (optional fallback)
 
 1) Install Ollama for Windows.
 2) Pull models (examples; use names that match your `config/llm.json`):
@@ -708,6 +751,25 @@ ollama pull qwen3-coder:14b
 ```bash
 ollama serve
 ```
+
+4) Set `backend: "ollama"` in the role config:
+
+```json
+{
+  "roles": {
+    "chat": {
+      "backend": "ollama",
+      "model": "qwen2.5:14b-instruct",
+      "base_url": "http://127.0.0.1:11434"
+    }
+  }
+}
+```
+
+- `mode: "external"` (default): Jarvis never starts/stops Ollama; it only calls `base_url`.
+- `mode: "managed"`: Jarvis may attempt a best-effort `ollama serve` if the server is down.
+
+**Note**: Jarvis runs without Ollama installed if llamacpp is configured. Ollama is fully optional.
 
 ### CLI commands
 

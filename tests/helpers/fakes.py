@@ -57,6 +57,8 @@ class FakeVoice:
 class FakeLLMBackend:
     """
     Implements the LLMLifecycleController backend interface used in tests.
+    Supports both the neutral readiness API (ensure_ready/is_ready/release)
+    and the legacy shims (is_server_running/start_server/stop_server).
     """
 
     def __init__(self):
@@ -65,24 +67,37 @@ class FakeLLMBackend:
         self.responses: List[str] = []
         self.raise_timeout = False
         self.raise_error = False
+        self.release_called = False
 
     name = "fake"
 
     def health(self):
         return type("H", (), {"ok": self.running, "detail": "ok" if self.running else "down"})()
 
-    def is_server_running(self):
+    # ── neutral readiness API ──────────────────────────────────────
+    def ensure_ready(self):
+        self.running = True
+
+    def is_ready(self):
         return self.running
 
+    def release(self):
+        self.running = False
+        self.release_called = True
+
+    # ── backward-compat shims ──────────────────────────────────────
+    def is_server_running(self):
+        return self.is_ready()
+
     def start_server(self):
-        self.running = True
+        self.ensure_ready()
         return True
 
     def stop_server(self):
-        self.running = False
+        self.release()
         return True
 
-    def chat(self, *, model: str, messages: list[dict], options: Dict[str, Any], timeout_seconds: float) -> str:
+    def chat(self, *, model: str, messages: list[dict], options: Dict[str, Any], timeout_seconds: float, trace_id: str = "") -> str:
         import requests
 
         self.calls += 1

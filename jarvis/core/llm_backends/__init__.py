@@ -1,2 +1,2 @@
-"""LLM backend adapters (Ollama, etc.)."""
+"""LLM backend adapters (llamacpp, Ollama, etc.)."""
 

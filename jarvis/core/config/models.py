@@ -222,12 +222,16 @@ class UiConfig(BaseModel):
 
 class LLMConfigFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    schema_version: int = Field(default=1, ge=1, le=10)
     enabled: bool = True
     mode: str = "external"
     debug_log_prompts: bool = False
     managed_kill_server_on_idle: bool = False
     roles: Dict[str, Any] = Field(default_factory=dict)
     watchdog: Dict[str, Any] = Field(default_factory=dict)
+    backends: Dict[str, Any] = Field(default_factory=dict)
+    lifecycle: Dict[str, Any] = Field(default_factory=dict)
+    security: Dict[str, Any] = Field(default_factory=dict)
 
 
 class StateMachineConfig(BaseModel):

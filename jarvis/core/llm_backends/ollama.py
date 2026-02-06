@@ -14,7 +14,7 @@ from jarvis.core.llm_backends.base import BackendHealth, LLMBackend
 
 @dataclass
 class OllamaBackend(LLMBackend):
-    base_url: str
+    base_url: str = "http://127.0.0.1:11434"
     managed: bool = False
     _proc: Optional[subprocess.Popen] = None
     name: str = "ollama"
@@ -31,45 +31,57 @@ class OllamaBackend(LLMBackend):
         except Exception as e:  # noqa: BLE001
             return BackendHealth(ok=False, detail=str(e))
 
-    def is_server_running(self) -> bool:
-        return self.health().ok
+    # ── neutral readiness API ──────────────────────────────────────
 
-    def start_server(self) -> bool:
-        # Best-effort; safest behavior is to not hang and not kill user processes.
-        if self.is_server_running():
-            return True
+    def ensure_ready(self) -> None:
+        """Validate Ollama HTTP availability; optionally start in managed mode."""
+        if self.health().ok:
+            return
         if not self.managed:
-            return False
+            return
         exe = shutil.which("ollama")
         if not exe:
-            return False
+            return
         try:
-            # On Windows: 'ollama serve' typically starts a background service.
-            # On Linux/macOS: it runs in foreground. We keep the process handle only if started here.
-            self._proc = subprocess.Popen([exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # noqa: S603,S607
+            self._proc = subprocess.Popen(
+                [exe, "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )  # noqa: S603,S607
         except Exception:
             self._proc = None
-            return False
-        # Wait briefly for server to come up.
+            return
         for _ in range(10):
-            if self.is_server_running():
-                return True
+            if self.health().ok:
+                return
             time.sleep(0.2)
-        return False
 
-    def stop_server(self) -> bool:
+    def is_ready(self) -> bool:
+        return self.health().ok
+
+    def release(self) -> None:
+        """Terminate managed Ollama process if we started it."""
         if self._proc is None:
-            return False
+            return
         try:
             self._proc.terminate()
             self._proc.wait(timeout=2.0)
-            return True
         except Exception:
-            return False
+            pass
         finally:
             self._proc = None
 
-    def chat(self, *, model: str, messages: list[dict], options: Dict[str, Any], timeout_seconds: float) -> str:
+    # ── LLM chat ───────────────────────────────────────────────────
+
+    def chat(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        options: Dict[str, Any],
+        timeout_seconds: float,
+        trace_id: str = "",
+    ) -> str:
         payload = {
             "model": model,
             "messages": messages,
@@ -79,6 +91,17 @@ class OllamaBackend(LLMBackend):
         r = requests.post(self._url("/api/chat"), json=payload, timeout=timeout_seconds)
         r.raise_for_status()
         data = r.json()
-        # Ollama chat response: {"message":{"role":"assistant","content":"..."}, ...}
         return str(((data.get("message") or {}).get("content")) or "")
 
+    # ── backward-compat shims (used by legacy code / tests) ───────
+
+    def is_server_running(self) -> bool:
+        return self.is_ready()
+
+    def start_server(self) -> bool:
+        self.ensure_ready()
+        return self.is_ready()
+
+    def stop_server(self) -> bool:
+        self.release()
+        return True

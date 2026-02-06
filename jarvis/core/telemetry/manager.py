@@ -351,7 +351,7 @@ class TelemetryManager:
                 if not st.get("enabled", False):
                     return degraded(Subsystem.llm, "LLM disabled", details={"enabled": False})
                 if isinstance(chat, dict) and chat.get("disabled"):
-                    return down(Subsystem.llm, "LLM disabled by watchdog", details=telemetry_redact(chat), remediation="Check Ollama/local server and restart Jarvis.")
+                    return down(Subsystem.llm, "LLM disabled by watchdog", details=telemetry_redact(chat), remediation="Check LLM backend (llamacpp model or Ollama server) and restart Jarvis.")
                 if isinstance(chat, dict) and chat.get("last_error"):
                     return degraded(Subsystem.llm, "LLM errors", details={"last_error": chat.get("last_error")}, remediation="Ensure local LLM server is reachable.")
                 return ok(Subsystem.llm, "LLM lifecycle ok", details={"chat_loaded": bool(chat.get("loaded"))})

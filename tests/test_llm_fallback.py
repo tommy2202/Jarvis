@@ -14,7 +14,7 @@ class DummyLogger:
 
 def test_lifecycle_retries_invalid_json_then_succeeds(tmp_path, monkeypatch):
     policy = LLMPolicy.model_validate(
-        {"enabled": True, "mode": "external", "roles": {"chat": {"backend": "ollama", "model": "m", "base_url": "http://x"}}, "watchdog": {"health_check_interval_seconds": 999, "restart_on_failure": False, "max_restart_attempts": 1}}
+        {"schema_version": 1, "enabled": True, "mode": "external", "roles": {"chat": {"backend": "ollama", "model": "m", "base_url": "http://x"}}, "watchdog": {"health_check_interval_seconds": 999, "restart_on_failure": False, "max_restart_attempts": 1}}
     )
     lc = LLMLifecycleController(policy=policy, event_logger=EventLogger(str(tmp_path / "events.jsonl")), logger=DummyLogger())
     try:
@@ -32,7 +32,7 @@ def test_lifecycle_retries_invalid_json_then_succeeds(tmp_path, monkeypatch):
 
 def test_intent_allowlist_enforced(tmp_path, monkeypatch):
     policy = LLMPolicy.model_validate(
-        {"enabled": True, "mode": "external", "roles": {"chat": {"backend": "ollama", "model": "m", "base_url": "http://x"}}, "watchdog": {"health_check_interval_seconds": 999, "restart_on_failure": False, "max_restart_attempts": 1}}
+        {"schema_version": 1, "enabled": True, "mode": "external", "roles": {"chat": {"backend": "ollama", "model": "m", "base_url": "http://x"}}, "watchdog": {"health_check_interval_seconds": 999, "restart_on_failure": False, "max_restart_attempts": 1}}
     )
     lc = LLMLifecycleController(policy=policy, event_logger=EventLogger(str(tmp_path / "events.jsonl")), logger=DummyLogger())
     try:
@@ -54,4 +54,3 @@ def test_intent_allowlist_enforced(tmp_path, monkeypatch):
         assert resp.parsed_json["confidence"] == 0.0
     finally:
         lc.stop()
-

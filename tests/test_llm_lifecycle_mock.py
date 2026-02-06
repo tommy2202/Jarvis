@@ -27,18 +27,27 @@ class MockBackend:
     def health(self):
         return type("H", (), {"ok": self.running, "detail": "down" if not self.running else "ok"})()
 
-    def is_server_running(self):
+    def ensure_ready(self):
+        self.running = True
+
+    def is_ready(self):
         return self.running
 
+    def release(self):
+        self.running = False
+
+    def is_server_running(self):
+        return self.is_ready()
+
     def start_server(self):
-        self.running = True
+        self.ensure_ready()
         return True
 
     def stop_server(self):
-        self.running = False
+        self.release()
         return True
 
-    def chat(self, *, model, messages, options, timeout_seconds):
+    def chat(self, *, model, messages, options, timeout_seconds, trace_id=""):
         self.calls += 1
         if self.sleep:
             time.sleep(self.sleep)
@@ -54,6 +63,7 @@ def test_lifecycle_retries_invalid_json(tmp_path, monkeypatch):
     ev = EventLogger(str(tmp_path / "events.jsonl"))
     policy = LLMPolicy.model_validate(
         {
+            "schema_version": 1,
             "enabled": True,
             "mode": "external",
             "roles": {"chat": {"backend": "ollama", "model": "m", "base_url": "http://x"}},
@@ -87,6 +97,7 @@ def test_lifecycle_handles_backend_error(tmp_path, monkeypatch):
     ev = EventLogger(str(tmp_path / "events.jsonl"))
     policy = LLMPolicy.model_validate(
         {
+            "schema_version": 1,
             "enabled": True,
             "mode": "external",
             "roles": {"chat": {"backend": "ollama", "model": "m", "base_url": "http://x"}},
@@ -118,6 +129,7 @@ def test_intent_fallback_never_allows_unknown_intents(tmp_path, monkeypatch):
     ev = EventLogger(str(tmp_path / "events.jsonl"))
     policy = LLMPolicy.model_validate(
         {
+            "schema_version": 1,
             "enabled": True,
             "mode": "external",
             "roles": {"chat": {"backend": "ollama", "model": "m", "base_url": "http://x"}},
@@ -147,4 +159,3 @@ def test_intent_fallback_never_allows_unknown_intents(tmp_path, monkeypatch):
         assert resp.parsed_json["confidence"] == 0.0
     finally:
         lc.stop()
-
