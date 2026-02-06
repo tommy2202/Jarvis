@@ -111,6 +111,10 @@
     "music.play": [
       "CAP_AUDIO_OUTPUT"
     ],
+    "system.image_generate": [
+      "CAP_IMAGE_GENERATION",
+      "CAP_HEAVY_COMPUTE"
+    ],
     "system.job.submit": [],
     "system.tool.call": []
   },

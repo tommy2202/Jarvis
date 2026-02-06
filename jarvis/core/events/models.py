@@ -22,6 +22,7 @@ class SourceSubsystem(str, Enum):
     state_machine = "state_machine"
     dispatcher = "dispatcher"
     llm = "llm"
+    image = "image"
     jobs = "jobs"
     web = "web"
     voice = "voice"

@@ -437,6 +437,17 @@ class RecoveryConfigFile(BaseModel):
     circuit_breakers: Dict[str, Dict[str, int]] = Field(default_factory=dict)
 
 
+class ImageConfigFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    schema_version: int = Field(default=1, ge=1, le=10)
+    enabled: bool = True
+    backend: Dict[str, Any] = Field(default_factory=lambda: {"type": "comfyui_http", "base_url": "http://127.0.0.1:8188", "mode": "external"})
+    limits: Dict[str, Any] = Field(default_factory=lambda: {"max_width": 2048, "max_height": 2048, "max_steps": 50, "timeout_seconds": 300.0})
+    presets: Dict[str, Any] = Field(default_factory=lambda: {"default": {"workflow_template": "config/workflows/default_sdxl.json", "default_width": 1024, "default_height": 1024, "default_steps": 20, "default_negative_prompt": ""}})
+    security: Dict[str, Any] = Field(default_factory=lambda: {"never_log_prompts": True})
+    artifacts_dir: str = "artifacts/images"
+
+
 class AppConfigV2(BaseModel):
     model_config = ConfigDict(extra="forbid")
     app: AppFileConfig
@@ -456,6 +467,7 @@ class AppConfigV2(BaseModel):
     runtime_state: RuntimeStateConfigFile
     jobs: JobsConfig
     llm: LLMConfigFile
+    image: ImageConfigFile
     recovery: RecoveryConfigFile
     state_machine: StateMachineConfig
     modules_registry: ModulesRegistryConfig

@@ -44,6 +44,7 @@ class AuditCategory(str, Enum):
     execution = "execution"
     job = "job"
     llm = "llm"
+    image = "image"
     voice = "voice"
     web = "web"
     config = "config"

@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "enabled": true,
+  "backend": {
+    "type": "comfyui_http",
+    "base_url": "http://127.0.0.1:8188",
+    "mode": "external"
+  },
+  "limits": {
+    "max_width": 2048,
+    "max_height": 2048,
+    "max_steps": 50,
+    "timeout_seconds": 300.0
+  },
+  "presets": {
+    "default": {
+      "workflow_template": "config/workflows/default_sdxl.json",
+      "default_width": 1024,
+      "default_height": 1024,
+      "default_steps": 20,
+      "default_negative_prompt": ""
+    }
+  },
+  "security": {
+    "never_log_prompts": true
+  },
+  "artifacts_dir": "artifacts/images"
+}

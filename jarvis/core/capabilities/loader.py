@@ -20,6 +20,7 @@ def default_config_dict() -> Dict[str, Any]:
         "intent_requirements": {
             "music.play": ["CAP_AUDIO_OUTPUT"],
             "anime_dubbing.run": ["CAP_HEAVY_COMPUTE", "CAP_RUN_SUBPROCESS", "CAP_WRITE_FILES"],
+            "system.image_generate": ["CAP_IMAGE_GENERATION", "CAP_HEAVY_COMPUTE"],
             "system.job.submit": [],
             "system.tool.call": [],
         },

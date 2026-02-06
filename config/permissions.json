@@ -9,6 +9,11 @@
       "network_access": false,
       "requires_admin": false,
       "resource_intensive": false
+    },
+    "system.image_generate": {
+      "network_access": false,
+      "requires_admin": true,
+      "resource_intensive": true
     }
   }
 }

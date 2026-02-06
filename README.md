@@ -783,6 +783,73 @@ ollama serve
 If web is enabled, authenticated LLM status endpoint:
 - `GET /v1/llm/status`
 
+## Image generation (ComfyUI backend, localhost-only)
+
+Jarvis supports offline image generation via ComfyUI as a local diffusion engine (SDXL or other models managed by ComfyUI).
+
+**Key properties:**
+- Localhost-only: backend must bind to 127.0.0.1 / localhost / ::1 (enforced at config validation)
+- Capability-gated: requires `CAP_IMAGE_GENERATION` + `CAP_HEAVY_COMPUTE` + admin session
+- Privacy-safe: prompts and image bytes are NEVER logged; only metadata (preset, size, steps, trace_id)
+- Fail-closed: if ComfyUI is unreachable, requests are denied
+
+### ComfyUI setup
+
+1) Install and run ComfyUI locally:
+
+```bash
+# See https://github.com/comfyanonymous/ComfyUI for installation
+cd ComfyUI
+python main.py --listen 127.0.0.1 --port 8188
+```
+
+2) Place SDXL models in ComfyUI's `models/checkpoints/` directory.
+
+3) Configure `config/image.json`:
+
+```json
+{
+  "schema_version": 1,
+  "enabled": true,
+  "backend": {
+    "type": "comfyui_http",
+    "base_url": "http://127.0.0.1:8188",
+    "mode": "external"
+  },
+  "limits": {
+    "max_width": 2048,
+    "max_height": 2048,
+    "max_steps": 50,
+    "timeout_seconds": 300.0
+  },
+  "presets": {
+    "default": {
+      "workflow_template": "config/workflows/default_sdxl.json",
+      "default_width": 1024,
+      "default_height": 1024,
+      "default_steps": 20
+    }
+  }
+}
+```
+
+### Workflow templates
+
+Workflow templates live in `config/workflows/`. The default template is `config/workflows/default_sdxl.json` (a standard SDXL text-to-image pipeline).
+
+To create custom presets, add new workflow JSON files and reference them in `config/image.json` presets. Parameters (prompt, size, steps, seed) are injected automatically into known ComfyUI node types.
+
+### Adjusting limits
+
+Edit `config/image.json` → `limits`:
+- `max_width` / `max_height`: Maximum image dimensions (requests exceeding these are denied, not clamped)
+- `max_steps`: Maximum diffusion steps
+- `timeout_seconds`: Maximum time for a single generation
+
+### Output
+
+Generated images are saved to `artifacts/images/` with filenames: `<timestamp>_<trace_id>_<preset>.png`
+
 ## Secure store operations (USB key)
 
 Jarvis keeps secrets in an encrypted secure store:
